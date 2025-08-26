@@ -31,6 +31,7 @@ public sealed partial class ClassConfiguration
     public bool Log { get; set; } = true;
     public bool LogBagChanges { get; set; } = true;
     public bool Loot { get; set; } = true;
+    public string UnitToFollow { get; set; } = "focus";
     public bool Skin { get; set; }
     public bool Herb { get; set; }
     public bool Mine { get; set; }
@@ -76,6 +77,10 @@ public sealed partial class ClassConfiguration
     public KeyActions Parallel { get; } = new();
     public KeyActions NPC { get; } = new();
     public KeyActions AssistFocus { get; } = new();
+    public KeyActions PartyMember1 { get; } = new();
+    public KeyActions PartyMember2 { get; } = new();
+    public KeyActions PartyMember3 { get; } = new();
+    public KeyActions PartyMember4 { get; } = new();
     public WaitKeyActions Wait { get; } = new();
     public FormKeyActions Form { get; } = new();
 

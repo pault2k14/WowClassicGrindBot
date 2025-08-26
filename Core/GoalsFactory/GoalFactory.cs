@@ -126,6 +126,10 @@ public static class GoalFactory
             services.AddScoped<GoapGoal, PullTargetGoal>();
             services.AddScoped<GoapGoal, ApproachTargetGoal>();
             services.AddScoped<GoapGoal, AssistFocusGoal>();
+            services.AddScoped<GoapGoal, PartyMember1Goal>();
+            services.AddScoped<GoapGoal, PartyMember2Goal>();
+            services.AddScoped<GoapGoal, PartyMember3Goal>();
+            services.AddScoped<GoapGoal, PartyMember4Goal>();
             services.AddScoped<GoapGoal, CombatGoal>();
 
             ResolveLootAndSkin(services, classConfig);

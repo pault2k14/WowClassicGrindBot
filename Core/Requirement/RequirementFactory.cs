@@ -98,6 +98,10 @@ public sealed partial class RequirementFactory
         AddonBits bits = sp.GetRequiredService<AddonBits>();
         BuffStatus<IPlayer> playerBuffs = sp.GetRequiredService<BuffStatus<IPlayer>>();
         BuffStatus<IFocus> focusBuffs = sp.GetRequiredService<BuffStatus<IFocus>>();
+        BuffStatus<IPartyMember1> partyMember1Buffs = sp.GetRequiredService<BuffStatus<IPartyMember1>>();
+        BuffStatus<IPartyMember2> partyMember2Buffs = sp.GetRequiredService<BuffStatus<IPartyMember2>>();
+        BuffStatus<IPartyMember3> partyMember3Buffs = sp.GetRequiredService<BuffStatus<IPartyMember3>>();
+        BuffStatus<IPartyMember4> partyMember4Buffs = sp.GetRequiredService<BuffStatus<IPartyMember4>>();
         TargetDebuffStatus targetDebuffs = sp.GetRequiredService<TargetDebuffStatus>();
         SessionStat sessionStat = sp.GetRequiredService<SessionStat>();
         combatLog = sp.GetRequiredService<CombatLog>();
@@ -107,6 +111,11 @@ public sealed partial class RequirementFactory
         var targetDebuff = sp.GetRequiredService<AuraTimeReader<ITargetDebuffTimeReader>>();
         var targetBuff = sp.GetRequiredService<AuraTimeReader<ITargetBuffTimeReader>>();
         var focusBuff = sp.GetRequiredService<AuraTimeReader<IFocusBuffTimeReader>>();
+        var partyMember1Buff = sp.GetRequiredService<AuraTimeReader<IPartyMember1BuffTimeReader>>();
+        var partyMember2Buff = sp.GetRequiredService<AuraTimeReader<IPartyMember2BuffTimeReader>>();
+        var partyMember3Buff = sp.GetRequiredService<AuraTimeReader<IPartyMember3BuffTimeReader>>();
+        var partyMember4Buff = sp.GetRequiredService<AuraTimeReader<IPartyMember4BuffTimeReader>>();
+
 
         Dictionary<string, Func<ReadOnlySpan<char>, Requirement>> requirementMap = new()
         {
@@ -145,6 +154,7 @@ public sealed partial class RequirementFactory
 
             { AddVisible, npcNameFinder._PotentialAddsExist },
             { "InCombat", bits.Combat },
+            { "FocusCombat", bits.FocusTarget_Combat },
 
             // Range
             { "InMeleeRange", playerReader.IsInMeleeRange },
@@ -192,6 +202,10 @@ public sealed partial class RequirementFactory
 
         AddAura("", boolVariables, playerBuffs);
         AddAura("F_", boolVariables, focusBuffs);
+        AddAura("P1_", boolVariables, partyMember1Buffs);
+        AddAura("P2_", boolVariables, partyMember2Buffs);
+        AddAura("P3_", boolVariables, partyMember3Buffs);
+        AddAura("P4_", boolVariables, partyMember4Buffs);
         AddAura("", boolVariables, targetDebuffs);
 
         BindPathSettingsBoolVariables(classConfig.Paths, boolVariables);
@@ -203,6 +217,10 @@ public sealed partial class RequirementFactory
             { HealthP, playerReader.HealthPercent },
             { "TargetHealth%", playerReader.TargetHealthPercent },
             { "FocusHealth%", playerReader.FocusHealthPercent },
+            { "PartyMember1Health%", playerReader.PartyMember1HealthPercent },
+            { "PartyMember2Health%", playerReader.PartyMember2HealthPercent },
+            { "PartyMember3Health%", playerReader.PartyMember3HealthPercent },
+            { "PartyMember4Health%", playerReader.PartyMember4HealthPercent },
             { "PetHealth%", playerReader.PetHealthPercent },
             { ManaP, playerReader.ManaPercent },
             { "Mana", playerReader.ManaCurrent },
@@ -235,6 +253,10 @@ public sealed partial class RequirementFactory
             //"TBuff_{textureId}"
             //"TDebuff_{textureId}"
             //"FBuff_{textureId}"
+            //"P1Buff_{textureId}"
+            //"P2Buff_{textureId}"
+            //"P3Buff_{textureId}"
+            //"P4Buff_{textureId}"
             { "MainHandSpeed", playerReader.MainHandSpeedMs },
             { "MainHandSwing", MainHandSwing },
             { "RangedSpeed", playerReader.RangedSpeedMs },
@@ -259,7 +281,9 @@ public sealed partial class RequirementFactory
         InitUserDefinedIntVariables(classConfig.IntVariables,
             playerBuff, playerDebuff,
             targetDebuff,
-            targetBuff, focusBuff);
+            targetBuff, focusBuff,
+            partyMember1Buff, partyMember2Buff,
+            partyMember3Buff, partyMember4Buff);
     }
 
     private static void AddAura<T>(string prefix,
@@ -412,7 +436,11 @@ public sealed partial class RequirementFactory
         AuraTimeReader<IPlayerDebuffTimeReader> playerDebuffTimeReader,
         AuraTimeReader<ITargetDebuffTimeReader> targetDebuffTimeReader,
         AuraTimeReader<ITargetBuffTimeReader> targetBuffTimeReader,
-        AuraTimeReader<IFocusBuffTimeReader> focusBuffTimeReader)
+        AuraTimeReader<IFocusBuffTimeReader> focusBuffTimeReader,
+        AuraTimeReader<IPartyMember1BuffTimeReader> partyMember1BuffTimeReader,
+        AuraTimeReader<IPartyMember2BuffTimeReader> partyMember2BuffTimeReader,
+        AuraTimeReader<IPartyMember3BuffTimeReader> partyMember3BuffTimeReader,
+        AuraTimeReader<IPartyMember4BuffTimeReader> partyMember4BuffTimeReader)
     {
         foreach ((string key, int value) in intKeyValues)
         {
@@ -446,6 +474,26 @@ public sealed partial class RequirementFactory
             else if (key.StartsWith("FBuff_", StringComparison.InvariantCultureIgnoreCase))
             {
                 int l() => focusBuffTimeReader.GetRemainingTimeMs(value);
+                intVariables.TryAdd($"{value}", l);
+            }
+            else if (key.StartsWith("P1Buff_", StringComparison.InvariantCultureIgnoreCase))
+            {
+                int l() => partyMember1BuffTimeReader.GetRemainingTimeMs(value);
+                intVariables.TryAdd($"{value}", l);
+            }
+            else if (key.StartsWith("P2Buff_", StringComparison.InvariantCultureIgnoreCase))
+            {
+                int l() => partyMember2BuffTimeReader.GetRemainingTimeMs(value);
+                intVariables.TryAdd($"{value}", l);
+            }
+            else if (key.StartsWith("P3Buff_", StringComparison.InvariantCultureIgnoreCase))
+            {
+                int l() => partyMember3BuffTimeReader.GetRemainingTimeMs(value);
+                intVariables.TryAdd($"{value}", l);
+            }
+            else if (key.StartsWith("P4Buff_", StringComparison.InvariantCultureIgnoreCase))
+            {
+                int l() => partyMember4BuffTimeReader.GetRemainingTimeMs(value);
                 intVariables.TryAdd($"{value}", l);
             }
 

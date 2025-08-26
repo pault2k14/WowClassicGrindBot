@@ -25,6 +25,9 @@ public sealed partial class ConfigurableInput
     public KeyAction TargetPet => classConfig.TargetPet;
     public KeyAction PetAttack => classConfig.PetAttack;
     public KeyAction TargetFocus => classConfig.TargetFocus;
+    public KeyAction TargetFocusPartyMemberTwo => classConfig.TargetFocusPartyMemberTwo;
+    public KeyAction TargetFocusPartyMemberThree => classConfig.TargetFocusPartyMemberThree;
+    public KeyAction TargetFocusPartyMemberFour => classConfig.TargetFocusPartyMemberFour;
     public KeyAction FollowTarget => classConfig.FollowTarget;
     public KeyAction Mount => classConfig.Mount;
 }

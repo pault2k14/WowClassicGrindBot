@@ -454,6 +454,22 @@ function DataToColor:areSpellsInRange()
     return inRange
 end
 
+function DataToColor:arePartyMembersInRange()
+    local inRange = 0
+    -- CheckInteractDistance restricted in combat
+    if not UnitAffectingCombat(DataToColor.C.unitPlayer) then
+        local c = #DataToColor.S.interactInRangePartyMembers
+        for i = 1, c do
+            local data = DataToColor.S.interactInRangePartyMembers[i]
+            if CheckInteractDistance(data[1], data[2]) then
+                inRange = inRange + (2 ^ (i - 1))
+            end
+        end
+    end
+
+    return inRange
+end
+
 function DataToColor:isActionUseable(min, max)
     local isUsableBits = 0
     for i = min, max do

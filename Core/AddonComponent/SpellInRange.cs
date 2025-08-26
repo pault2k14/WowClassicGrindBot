@@ -5,16 +5,19 @@ namespace Core;
 public sealed class SpellInRange : IReader
 {
     private const int cell = 40;
+    private const int partyMembersInRangecell = 130;
 
     public bool this[int index] => b[index];
 
     private BitVector32 b;
+    private BitVector32 b2;
 
     public SpellInRange() { }
 
     public void Update(IAddonDataProvider reader)
     {
         b = new(reader.GetInt(cell));
+        b2 = new (reader.GetInt(partyMembersInRangecell));
     }
 
     // Warrior
@@ -112,6 +115,20 @@ public sealed class SpellInRange : IReader
     public bool Target_Inspect => b[Mask._21];
     public bool Target_Trade => b[Mask._22];
     public bool Target_Duel => b[Mask._23];
+
+    public bool PartyMember1_Inspect => b2[Mask._0];
+    public bool PartyMember1_Trade => b2[Mask._1];
+    public bool PartyMember1_Duel => b2[Mask._2];
+
+    public bool PartyMember2_Inspect => b2[Mask._3];
+    public bool PartyMember2_Trade => b2[Mask._4];
+    public bool PartyMember2_Duel => b2[Mask._5];
+    public bool PartyMember3_Inspect => b2[Mask._6];
+    public bool PartyMember3_Trade => b2[Mask._7];
+    public bool PartyMember3_Duel => b2[Mask._8];
+    public bool PartyMember4_Inspect => b2[Mask._9];
+    public bool PartyMember4_Trade => b2[Mask._10];
+    public bool PartyMember4_Duel => b2[Mask._11];
 
     public bool WithinPullRange(PlayerReader playerReader, UnitClass @class) => @class switch
     {

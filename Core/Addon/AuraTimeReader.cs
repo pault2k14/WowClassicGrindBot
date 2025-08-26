@@ -22,6 +22,11 @@ public interface ITargetDebuffTimeReader : IAuraTimeReader { }
 public interface ITargetBuffTimeReader : IAuraTimeReader { }
 
 public interface IFocusBuffTimeReader : IAuraTimeReader { }
+public interface IPartyMember1BuffTimeReader : IAuraTimeReader { }
+public interface IPartyMember2BuffTimeReader : IAuraTimeReader { }
+public interface IPartyMember3BuffTimeReader : IAuraTimeReader { }
+public interface IPartyMember4BuffTimeReader : IAuraTimeReader { }
+
 
 public sealed class AuraTimeReader<T> : IAuraTimeReader, IReader
 {

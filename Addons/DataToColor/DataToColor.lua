@@ -5,7 +5,7 @@
 -- Trigger between emitting game data and frame location data
 local SETUP_SEQUENCE = false
 -- Total number of data frames generated
-local NUMBER_OF_FRAMES = 108
+local NUMBER_OF_FRAMES = 133
 -- Set number of pixel rows
 local FRAME_ROWS = 1
 -- Size of data squares in px. Varies based on rounding errors as well as dimension size. Use as a guideline, but not 100% accurate.
@@ -197,6 +197,11 @@ DataToColor.playerDebuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FR
 DataToColor.targetBuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
 DataToColor.targetDebuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
 DataToColor.focusBuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+DataToColor.partyMember1BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+DataToColor.partyMember2BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+DataToColor.partyMember3BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+DataToColor.partyMember4BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+
 
 DataToColor.customTrigger1 = {}
 
@@ -310,6 +315,11 @@ function DataToColor:Reset()
     DataToColor.targetBuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
     DataToColor.targetDebuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
     DataToColor.focusBuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+    DataToColor.partyMember1BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+    DataToColor.partyMember2BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+    DataToColor.partyMember3BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+    DataToColor.partyMember4BuffTime = DataToColor.struct:new(AURA_DURATION_ITERATION_FRAME_CHANGE_RATE)
+
 
     DataToColor.playerPetSummons = {}
 end
@@ -727,6 +737,11 @@ function DataToColor:CreateFrames()
             local targetDebuffCount = DataToColor:populateAuraTimer(UnitDebuff, DataToColor.C.unitTarget, DataToColor.targetDebuffTime)
             local targetBuffCount = DataToColor:populateAuraTimer(UnitBuff, DataToColor.C.unitTarget, DataToColor.targetBuffTime)
             local focusBuffCount = DataToColor:populateAuraTimer(UnitBuff, DataToColor.C.unitFocus, DataToColor.focusBuffTime)
+            local partyMember1BuffCount = DataToColor:populateAuraTimer(UnitBuff, DataToColor.C.unitPartyMember1, DataToColor.partyMember1BuffTime)
+            local partyMember2BuffCount = DataToColor:populateAuraTimer(UnitBuff, DataToColor.C.unitPartyMember2, DataToColor.partyMember2BuffTime)
+            local partyMember3BuffCount = DataToColor:populateAuraTimer(UnitBuff, DataToColor.C.unitPartyMember3, DataToColor.partyMember3BuffTime)
+            local partyMember4BuffCount = DataToColor:populateAuraTimer(UnitBuff, DataToColor.C.unitPartyMember4, DataToColor.partyMember4BuffTime)
+
 
             -- player/target buff and debuff counts
             -- playerdebuff count cannot be higher than 16
@@ -871,6 +886,102 @@ function DataToColor:CreateFrames()
                 Pixel(int, 0, 93)
             end
 
+            if UnitExists(DataToColor.C.unitPartyMember1) then
+                textureId, expireTime = DataToColor.partyMember1BuffTime:getTimed(globalTick)
+            else
+                textureId, expireTime = DataToColor.partyMember1BuffTime:getForced(globalTick)
+                expireTime = GetTime()
+            end
+
+            if textureId then
+                DataToColor.partyMember1BuffTime:setDirtyAfterTime(textureId, globalTick)
+
+                local durationSec = max(0, ceil(expireTime - GetTime()))
+                --DataToColor:Print("focus buff update ", textureId, " ", durationSec)
+                Pixel(int, textureId, 118)
+                Pixel(int, durationSec, 119)
+
+                if durationSec == 0 then
+                    DataToColor.partyMember1BuffTime:removeWhenExpired(textureId, globalTick)
+                    --DataToColor:Print("focus buff expired ", textureId, " ", durationSec)
+                end
+            else
+                Pixel(int, 0, 118)
+                Pixel(int, 0, 119)
+            end
+  
+            if UnitExists(DataToColor.C.unitPartyMember2) then
+                textureId, expireTime = DataToColor.partyMember2BuffTime:getTimed(globalTick)
+            else
+                textureId, expireTime = DataToColor.partyMember2BuffTime:getForced(globalTick)
+                expireTime = GetTime()
+            end
+
+            if textureId then
+                DataToColor.partyMember2BuffTime:setDirtyAfterTime(textureId, globalTick)
+
+                local durationSec = max(0, ceil(expireTime - GetTime()))
+                --DataToColor:Print("focus buff update ", textureId, " ", durationSec)
+                Pixel(int, textureId, 120)
+                Pixel(int, durationSec, 121)
+
+                if durationSec == 0 then
+                    DataToColor.partyMember2BuffTime:removeWhenExpired(textureId, globalTick)
+                    --DataToColor:Print("focus buff expired ", textureId, " ", durationSec)
+                end
+            else
+                Pixel(int, 0, 120)
+                Pixel(int, 0, 121)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember3) then
+                textureId, expireTime = DataToColor.partyMember3BuffTime:getTimed(globalTick)
+            else
+                textureId, expireTime = DataToColor.partyMember3BuffTime:getForced(globalTick)
+                expireTime = GetTime()
+            end
+
+            if textureId then
+                DataToColor.partyMember3BuffTime:setDirtyAfterTime(textureId, globalTick)
+
+                local durationSec = max(0, ceil(expireTime - GetTime()))
+                --DataToColor:Print("focus buff update ", textureId, " ", durationSec)
+                Pixel(int, textureId, 122)
+                Pixel(int, durationSec, 123)
+
+                if durationSec == 0 then
+                    DataToColor.partyMember3BuffTime:removeWhenExpired(textureId, globalTick)
+                    --DataToColor:Print("focus buff expired ", textureId, " ", durationSec)
+                end
+            else
+                Pixel(int, 0, 122)
+                Pixel(int, 0, 123)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember4) then
+                textureId, expireTime = DataToColor.partyMember4BuffTime:getTimed(globalTick)
+            else
+                textureId, expireTime = DataToColor.partyMember4BuffTime:getForced(globalTick)
+                expireTime = GetTime()
+            end
+
+            if textureId then
+                DataToColor.partyMember4BuffTime:setDirtyAfterTime(textureId, globalTick)
+
+                local durationSec = max(0, ceil(expireTime - GetTime()))
+                --DataToColor:Print("focus buff update ", textureId, " ", durationSec)
+                Pixel(int, textureId, 124)
+                Pixel(int, durationSec, 125)
+
+                if durationSec == 0 then
+                    DataToColor.partyMember4BuffTime:removeWhenExpired(textureId, globalTick)
+                    --DataToColor:Print("focus buff expired ", textureId, " ", durationSec)
+                end
+            else
+                Pixel(int, 0, 124)
+                Pixel(int, 0, 125)
+            end
+
             local mouseoverLevel = UnitLevelSafe(DataToColor.C.unitmouseover, playerLevel)
             Pixel(int, mouseoverLevel * 100 + DataToColor.C.unitClassification[UnitClassification(DataToColor.C.unitmouseover)], 85)
 
@@ -882,6 +993,52 @@ function DataToColor:CreateFrames()
             Pixel(int, UnitHealthMax(DataToColor.C.unitFocus), 89)
             Pixel(int, UnitHealth(DataToColor.C.unitFocus), 90)
             Pixel(int, DataToColor:getAuraMaskForClass(UnitBuff, DataToColor.C.unitFocus, DataToColor.S.playerBuffs), 91)
+            
+            if UnitExists(DataToColor.C.unitPartyMember1) then
+                Pixel(int, UnitHealthMax(DataToColor.C.unitPartyMember1), 106)
+                Pixel(int, UnitHealth(DataToColor.C.unitPartyMember1), 107)
+                Pixel(int, DataToColor:getAuraMaskForClass(UnitBuff, DataToColor.C.unitPartyMember1, DataToColor.S.playerBuffs), 108)
+                Pixel(int, DataToColor:getGuidFromUnit(DataToColor.C.unitPartyMember1), 126)
+            else
+                Pixel(int, 100, 106)
+                Pixel(int, 0, 107)
+                Pixel(int, 0, 108)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember2) then
+                Pixel(int, UnitHealthMax(DataToColor.C.unitPartyMember2), 109)
+                Pixel(int, UnitHealth(DataToColor.C.unitPartyMember2), 110)
+                Pixel(int, DataToColor:getAuraMaskForClass(UnitBuff, DataToColor.C.unitPartyMember2, DataToColor.S.playerBuffs), 111)
+                Pixel(int, DataToColor:getGuidFromUnit(DataToColor.C.unitPartyMember2), 127)
+            else
+                Pixel(int, 100, 109)
+                Pixel(int, 0, 110)
+                Pixel(int, 0, 111)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember3) then
+                Pixel(int, UnitHealthMax(DataToColor.C.unitPartyMember3), 112)
+                Pixel(int, UnitHealth(DataToColor.C.unitPartyMember3), 113)
+                Pixel(int, DataToColor:getAuraMaskForClass(UnitBuff, DataToColor.C.unitPartyMember3, DataToColor.S.playerBuffs), 114)
+                Pixel(int, DataToColor:getGuidFromUnit(DataToColor.C.unitPartyMember3), 128)
+            else
+                Pixel(int, 100, 112)
+                Pixel(int, 0, 113)
+                Pixel(int, 0, 114)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember4) then
+                Pixel(int, UnitHealthMax(DataToColor.C.unitPartyMember4), 115)
+                Pixel(int, UnitHealth(DataToColor.C.unitPartyMember4), 116)
+                Pixel(int, DataToColor:getAuraMaskForClass(UnitBuff, DataToColor.C.unitPartyMember4, DataToColor.S.playerBuffs), 117)
+                Pixel(int, DataToColor:getGuidFromUnit(DataToColor.C.unitPartyMember4), 129)
+            else
+                Pixel(int, 100, 115)
+                Pixel(int, 0, 116)
+                Pixel(int, 0, 117)
+            end
+
+            Pixel(int, DataToColor:arePartyMembersInRange(), 130)
 
             -- 94 last cast GCD
             Pixel(int, DataToColor.lastCastGCD, 94)

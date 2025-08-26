@@ -4,6 +4,11 @@ namespace Core;
 
 public interface IFocus { }
 
+public interface IPartyMember1 { }
+public interface IPartyMember2 { }
+public interface IPartyMember3 { }
+public interface IPartyMember4 { }
+
 public interface IPlayer { }
 
 public sealed class BuffStatus<T> : IReader

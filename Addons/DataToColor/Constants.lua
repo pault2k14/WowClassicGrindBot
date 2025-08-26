@@ -28,6 +28,10 @@ else
     DataToColor.C.unitFocusTarget = "focustarget"
 end
 
+DataToColor.C.unitPartyMember1 = "party1"
+DataToColor.C.unitPartyMember2 = "party2"
+DataToColor.C.unitPartyMember3 = "party3"
+DataToColor.C.unitPartyMember4 = "party4"
 DataToColor.C.unitPetTarget = "pettarget"
 DataToColor.C.unitTargetTarget = "targettarget"
 DataToColor.C.unitNormal = "normal"

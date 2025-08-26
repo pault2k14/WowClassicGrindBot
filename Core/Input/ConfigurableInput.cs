@@ -155,6 +155,12 @@ public sealed partial class ConfigurableInput
 
     public void PressTargetFocus(CancellationToken token = default) => PressRandom(TargetFocus, token);
 
+    public void PressTargetFocusPartyMemberTwo(CancellationToken token = default) => PressRandom(TargetFocusPartyMemberTwo, token);
+
+    public void PressTargetFocusPartyMemberThree(CancellationToken token = default) => PressRandom(TargetFocusPartyMemberThree, token);
+    
+    public void PressTargetFocusPartyMemberFour(CancellationToken token = default) => PressRandom(TargetFocusPartyMemberFour, token);
+
     public void PressFollowTarget(CancellationToken token = default) => PressRandom(FollowTarget, token);
 
     public void PressESC(CancellationToken token = default)

@@ -215,6 +215,24 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public int FocusHealthMax() => reader.GetInt(89);
     public int FocusHealthCurrent() => reader.GetInt(90);
     public int FocusHealthPercent() => (1 + FocusHealthCurrent()) * 100 / (1 + FocusHealthMax());
+    
+    public int PartyMember1HealthMax() => reader.GetInt(106);
+    public int PartyMember1HealthCurrent() => reader.GetInt(107);
+    public int PartyMember1HealthPercent() => (1 + PartyMember1HealthCurrent()) * 100 / (1 + PartyMember1HealthMax());
+    public int PartyMember2HealthMax() => reader.GetInt(109);
+    public int PartyMember2HealthCurrent() => reader.GetInt(110);
+    public int PartyMember2HealthPercent() => (1 + PartyMember2HealthCurrent()) * 100 / (1 + PartyMember2HealthMax());
+    public int PartyMember3HealthMax() => reader.GetInt(112);
+    public int PartyMember3HealthCurrent() => reader.GetInt(113);
+    public int PartyMember3HealthPercent() => (1 + PartyMember3HealthCurrent()) * 100 / (1 + PartyMember3HealthMax());
+    public int PartyMember4HealthMax() => reader.GetInt(115);
+    public int PartyMember4HealthCurrent() => reader.GetInt(116);
+    public int PartyMember4HealthPercent() => (1 + PartyMember4HealthCurrent()) * 100 / (1 + PartyMember4HealthMax());
+    public int PartyMember1Guid => reader.GetInt(126);
+    public int PartyMember2Guid => reader.GetInt(127);
+    public int PartyMember3Guid => reader.GetInt(128);
+    public int PartyMember4Guid => reader.GetInt(129);
+
 
     public int LastCastGCD { get; private set; }
     public void ResetLastCastGCD()

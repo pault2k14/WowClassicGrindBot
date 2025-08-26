@@ -4,6 +4,7 @@ local DataToColor = unpack(Load)
 DataToColor.S.spellInRangeTarget = {}
 DataToColor.S.spellInRangeUnit = {}
 DataToColor.S.interactInRangeUnit = {}
+DataToColor.S.interactInRangePartyMembers = {}
 
 DataToColor.S.playerBuffs = {}
 DataToColor.S.targetDebuffs = {}
@@ -20,6 +21,7 @@ function DataToColor:InitStorage()
     CreateSpellInRangeUnit()
 
     CreateInteractInRangeList()
+    CreateInteractInRangePartyMemberList()
 
     CreatePlayerBuffList()
     CreateTargetDebuffList()
@@ -148,6 +150,25 @@ function CreateInteractInRangeList()
     DataToColor.S.interactInRangeUnit[10] = { DataToColor.C.unitTarget, 1 }
     DataToColor.S.interactInRangeUnit[11] = { DataToColor.C.unitTarget, 2 }
     DataToColor.S.interactInRangeUnit[12] = { DataToColor.C.unitTarget, 3 }
+end
+
+function CreateInteractInRangePartyMemberList()
+    DataToColor.S.interactInRangePartyMembers = {}
+    DataToColor.S.interactInRangePartyMembers[1] = { DataToColor.C.unitPartyMember1, 1 }
+    DataToColor.S.interactInRangePartyMembers[2] = { DataToColor.C.unitPartyMember1, 2 }
+    DataToColor.S.interactInRangePartyMembers[3] = { DataToColor.C.unitPartyMember1, 3 }
+
+    DataToColor.S.interactInRangePartyMembers[4] = { DataToColor.C.unitPartyMember2, 1 }
+    DataToColor.S.interactInRangePartyMembers[5] = { DataToColor.C.unitPartyMember2, 2 }
+    DataToColor.S.interactInRangePartyMembers[6] = { DataToColor.C.unitPartyMember2, 3 }
+
+    DataToColor.S.interactInRangePartyMembers[7] = { DataToColor.C.unitPartyMember3, 1 }
+    DataToColor.S.interactInRangePartyMembers[8] = { DataToColor.C.unitPartyMember3, 2 }
+    DataToColor.S.interactInRangePartyMembers[9] = { DataToColor.C.unitPartyMember3, 3 }
+
+    DataToColor.S.interactInRangePartyMembers[10] = { DataToColor.C.unitPartyMember4, 1 }
+    DataToColor.S.interactInRangePartyMembers[11] = { DataToColor.C.unitPartyMember4, 2 }
+    DataToColor.S.interactInRangePartyMembers[12] = { DataToColor.C.unitPartyMember4, 3 }
 end
 
 function CreatePlayerBuffList()

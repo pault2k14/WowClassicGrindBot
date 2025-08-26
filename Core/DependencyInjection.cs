@@ -41,6 +41,10 @@ public static class DependencyInjection
         s.ForwardSingleton<BuffStatus<IPlayer>, IReader>(x => new(41));
         s.ForwardSingleton<TargetDebuffStatus, IReader>();
         s.ForwardSingleton<BuffStatus<IFocus>, IReader>(x => new(91));
+        s.ForwardSingleton<BuffStatus<IPartyMember1>, IReader>(x => new(108));
+        s.ForwardSingleton<BuffStatus<IPartyMember2>, IReader>(x => new(111));
+        s.ForwardSingleton<BuffStatus<IPartyMember3>, IReader>(x => new(114));
+        s.ForwardSingleton<BuffStatus<IPartyMember4>, IReader>(x => new(117));
         s.ForwardSingleton<Stance, IReader>();
 
         s.ForwardSingleton<CombatLog, IReader>();
@@ -67,6 +71,14 @@ public static class DependencyInjection
             x => new(83, 84));
         s.ForwardSingleton<AuraTimeReader<IFocusBuffTimeReader>, IReader>(
             x => new(92, 93));
+        s.ForwardSingleton<AuraTimeReader<IPartyMember1BuffTimeReader>, IReader>(
+            x => new(118, 119));
+        s.ForwardSingleton<AuraTimeReader<IPartyMember2BuffTimeReader>, IReader>(
+            x => new(120, 121));
+        s.ForwardSingleton<AuraTimeReader<IPartyMember3BuffTimeReader>, IReader>(
+            x => new(122, 123));
+        s.ForwardSingleton<AuraTimeReader<IPartyMember4BuffTimeReader>, IReader>(
+            x => new(124, 125));
         s.ForwardSingleton<AuraTimeReader<IPlayerDebuffTimeReader>, IReader>(
             x => new(104, 105));
 
@@ -141,6 +153,10 @@ public static class DependencyInjection
         s.ForwardSingleton<AuraTimeReader<ITargetDebuffTimeReader>>(sp);
         s.ForwardSingleton<AuraTimeReader<ITargetBuffTimeReader>>(sp);
         s.ForwardSingleton<AuraTimeReader<IFocusBuffTimeReader>>(sp);
+        s.ForwardSingleton<AuraTimeReader<IPartyMember1BuffTimeReader>>(sp);
+        s.ForwardSingleton<AuraTimeReader<IPartyMember2BuffTimeReader>>(sp);
+        s.ForwardSingleton<AuraTimeReader<IPartyMember3BuffTimeReader>>(sp);
+        s.ForwardSingleton<AuraTimeReader<IPartyMember4BuffTimeReader>>(sp);
 
         return s;
     }

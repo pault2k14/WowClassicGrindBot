@@ -118,6 +118,30 @@ public sealed partial class ClassConfiguration
         BaseAction = true,
     };
 
+    public KeyAction TargetFocusPartyMemberTwo { get; } = new()
+    {
+        Key = "Oemcomma",
+        Name = nameof(TargetFocusPartyMemberTwo),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
+    public KeyAction TargetFocusPartyMemberThree { get; } = new()
+    {
+        Key = "OemPeriod",
+        Name = nameof(TargetFocusPartyMemberThree),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
+    public KeyAction TargetFocusPartyMemberFour { get; } = new()
+    {
+        Key = "Oem2",
+        Name = nameof(TargetFocusPartyMemberFour),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
     public KeyAction FollowTarget { get; } = new()
     {
         Key = "PageDown",
