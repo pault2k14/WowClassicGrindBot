@@ -97,22 +97,6 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void Update()
     {
-        logger.LogWarning("playerReader.SpellInRange.PartyMember1_Inspect: " + playerReader.SpellInRange.PartyMember1_Inspect);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember1_Trade: " + playerReader.SpellInRange.PartyMember1_Trade);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember1_Duel: " + playerReader.SpellInRange.PartyMember1_Duel);
-
-        logger.LogWarning("playerReader.SpellInRange.PartyMember2_Inspect: " + playerReader.SpellInRange.PartyMember2_Inspect);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember2_Trade: " + playerReader.SpellInRange.PartyMember2_Trade);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember2_Duel: " + playerReader.SpellInRange.PartyMember2_Duel);
-
-        logger.LogWarning("playerReader.SpellInRange.PartyMember3_Inspect: " + playerReader.SpellInRange.PartyMember3_Inspect);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember3_Trade: " + playerReader.SpellInRange.PartyMember3_Trade);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember3_Duel: " + playerReader.SpellInRange.PartyMember3_Duel);
-
-        logger.LogWarning("playerReader.SpellInRange.PartyMember4_Inspect: " + playerReader.SpellInRange.PartyMember4_Inspect);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember4_Trade: " + playerReader.SpellInRange.PartyMember4_Trade);
-        logger.LogWarning("playerReader.SpellInRange.PartyMember4_Duel: " + playerReader.SpellInRange.PartyMember4_Duel);
-
         if (classConfig.UnitToFollow == "focus")
         {
             if (playerReader.TargetGuid != playerReader.FocusGuid)

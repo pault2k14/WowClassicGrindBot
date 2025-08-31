@@ -20,10 +20,17 @@ public sealed class TargetFocusTargetGoal : GoapGoal
         this.bits = bits;
         this.wait = wait;
 
+        /* This was preventing AssistFocus mode from returning to combat 
+         *  when combat is temporarily left for other plans. Seen when 2 or 3
+            mobs attack at the same time.
+            [GoapAgent        ] New Plan= NO PLAN
+            appears in the log */
+        /*
         if (classConfig.Loot)
         {
             AddPrecondition(GoapKey.incombat, false);
         }
+        */
 
         AddPrecondition(GoapKey.hasfocus, true);
         AddPrecondition(GoapKey.focushastarget, true);

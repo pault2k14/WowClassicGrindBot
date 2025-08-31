@@ -163,6 +163,11 @@ DataToColor.channeling = false
 
 DataToColor.playerGUID = UnitGUID(DataToColor.C.unitPlayer)
 DataToColor.petGUID = UnitGUID(DataToColor.C.unitPet)
+DataToColor.focusGUID = UnitGUID(DataToColor.C.unitFocus)
+DataToColor.partyMember1GUID = UnitGUID(DataToColor.C.unitPartyMember1)
+DataToColor.partyMember2GUID = UnitGUID(DataToColor.C.unitPartyMember2)
+DataToColor.partyMember3GUID = UnitGUID(DataToColor.C.unitPartyMember3)
+DataToColor.partyMember4GUID = UnitGUID(DataToColor.C.unitPartyMember4)
 
 DataToColor.corpseInRange = 0
 

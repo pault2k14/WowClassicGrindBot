@@ -294,6 +294,11 @@ function DataToColor:OnCombatEvent(...)
         strlen(sourceGUID) > 0 and
         (destGUID == DataToColor.playerGUID or
         destGUID == DataToColor.petGUID or
+        destGUID == DataToColor.focusGUID or
+        destGUID == DataToColor.partyMember1GUID or
+        destGUID == DataToColor.partyMember2GUID or
+        destGUID == DataToColor.partyMember3GUID or
+        destGUID == DataToColor.partyMember4GUID or
         DataToColor.playerPetSummons[destGUID]) then
         --DataToColor:Print("Damage Taken ", sourceGUID)
 
@@ -401,7 +406,39 @@ function DataToColor:OnCombatEvent(...)
             --DataToColor:Print(subEvent, " ", destGUID)
 
             local targetGuid = UnitGUID(DataToColor.C.unitTarget)
-            if targetGuid == destGUID and not UnitIsTapDenied(DataToColor.C.unitTarget) and DataToColor.eligibleKillCredit[destGUID] == nil then
+            local focusTargetGuid = 0
+            local partyMember1TargetGuid = 0
+            local partyMember2TargetGuid = 0
+            local partyMember3TargetGuid = 0
+            local partyMember4TargetGuid = 0
+            
+            if UnitExists(DataToColor.C.unitFocusTarget) then
+                focusTargetGuid = UnitGUID(DataToColor.C.unitFocusTarget)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember1) then
+                partyMember1TargetGuid = UnitGUID(DataToColor.C.unitPartyMember1Target)
+            end
+            
+            if UnitExists(DataToColor.C.unitPartyMember2) then
+                partyMember2TargetGuid = UnitGUID(DataToColor.C.unitPartyMember2Target)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember3) then
+                partyMember3TargetGuid = UnitGUID(DataToColor.C.unitPartyMember3Target)
+            end
+
+            if UnitExists(DataToColor.C.unitPartyMember4) then
+                partyMember4TargetGuid = UnitGUID(DataToColor.C.unitPartyMember4Target)
+            end
+
+            if (targetGuid == destGUID 
+                or focusTargetGuid == destGUID 
+                or partyMember1TargetGuid == destGUID
+                or partyMember2TargetGuid == destGUID
+                or partyMember3TargetGuid == destGUID
+                or partyMember4TargetGuid == destGUID) 
+                and not UnitIsTapDenied(DataToColor.C.unitTarget) and DataToColor.eligibleKillCredit[destGUID] == nil then
                 DataToColor.eligibleKillCredit[destGUID] = true
                 --DataToColor:Print("Kill Credit added(done): ", destGUID)
             end

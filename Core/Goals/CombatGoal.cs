@@ -176,6 +176,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
             else
             {
+                logger.LogInformation("No damage taken, clear target.");
                 input.PressClearTarget();
                 wait.Update();
             }
@@ -203,6 +204,18 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
 
             logger.LogWarning($"Found new target by pet. {elapsedPetFoundTarget}ms");
+
+            return;
+        }
+
+        if (bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
+        { 
+            logger.LogWarning($"Found new combat target of focus.");
+            ResetCooldowns();
+
+            input.PressTargetFocus();
+            input.PressTargetOfTarget();
+            wait.Update();
 
             return;
         }
