@@ -47,6 +47,7 @@ public sealed class TargetDebuffStatus : IReader
     // Mage
     public bool Frostbite() => v[Mask._0];
     public bool Slow() => v[Mask._1];
+    public bool Polymorph() => v[Mask._2];
 
     // Rogue
 

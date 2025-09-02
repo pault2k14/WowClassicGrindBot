@@ -5,7 +5,7 @@
 -- Trigger between emitting game data and frame location data
 local SETUP_SEQUENCE = false
 -- Total number of data frames generated
-local NUMBER_OF_FRAMES = 133
+local NUMBER_OF_FRAMES = 134
 -- Set number of pixel rows
 local FRAME_ROWS = 1
 -- Size of data squares in px. Varies based on rounding errors as well as dimension size. Use as a guideline, but not 100% accurate.
@@ -98,6 +98,7 @@ local GetCoinTextureString = GetCoinTextureString
 local UseContainerItem = DataToColor.UseContainerItem
 
 local GetNumLootItems = GetNumLootItems
+local GetRaidTargetIndex = GetRaidTargetIndex
 
 -- initialization
 local globalTick = 0
@@ -1044,6 +1045,12 @@ function DataToColor:CreateFrames()
             end
 
             Pixel(int, DataToColor:arePartyMembersInRange(), 130)
+
+            if UnitExists(DataToColor.C.unitTarget) then
+                Pixel(int, GetRaidTargetIndex(DataToColor.C.unitTarget), 131)
+            else
+                Pixel(int, 0, 131)
+            end
 
             -- 94 last cast GCD
             Pixel(int, DataToColor.lastCastGCD, 94)
