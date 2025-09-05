@@ -1046,6 +1046,7 @@ function DataToColor:CreateFrames()
 
             Pixel(int, DataToColor:arePartyMembersInRange(), 130)
 
+            
             if UnitExists(DataToColor.C.unitTarget) then
                 Pixel(int, GetRaidTargetIndex(DataToColor.C.unitTarget), 131)
             else

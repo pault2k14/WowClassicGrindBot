@@ -97,6 +97,7 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public int TargetMaxHealth() => reader.GetInt(18);
     public int TargetHealth() => reader.GetInt(19);
     public int TargetHealthPercent() => (1 + TargetHealth()) * 100 / (1 + TargetMaxHealth());
+    public int TargetRaidIcon() => reader.GetInt(131);
 
     public int PetMaxHealth() => reader.GetInt(38);
     public int PetHealth() => reader.GetInt(39);
