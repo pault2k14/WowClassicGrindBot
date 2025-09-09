@@ -162,7 +162,20 @@ public sealed partial class RequirementFactory
             { "InDeadZoneRange", playerReader.IsInDeadZone },
             { "OutOfCombatRange", playerReader.OutOfCombatRange },
             { "InCombatRange", playerReader.WithInCombatRange },
+
+            // Raid Icon
+            { "HasNoIcon", () => playerReader.TargetRaidIcon() == 0 },
+            { "HasStarIcon", () => playerReader.TargetRaidIcon() == 1 },
+            { "HasCircleIcon", () => playerReader.TargetRaidIcon() == 2 },
+            { "HasDiamondIcon", () => playerReader.TargetRaidIcon() == 3 },
+            { "HasTriangleIcon", () => playerReader.TargetRaidIcon() == 4 },
+            { "HasMoonIcon", () => playerReader.TargetRaidIcon() == 5 },
+            { "HasSquareIcon", () => playerReader.TargetRaidIcon() == 6 },
+            { "HasCrossIcon", () => playerReader.TargetRaidIcon() == 7 },
+            { "HasSkullIcon", () => playerReader.TargetRaidIcon() == 8 },
             
+
+
             // Pet
             { "Has Pet", bits.Pet },
             { "Pet Happy", bits.Pet_Happy },

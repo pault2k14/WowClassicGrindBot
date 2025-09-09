@@ -123,6 +123,7 @@ public static class GoalFactory
         }
         else if (classConfig.Mode == Mode.AssistFocus)
         {
+            services.AddScoped<GoapGoal, CrowdControlGoal>();
             services.AddScoped<GoapGoal, PullTargetGoal>();
             services.AddScoped<GoapGoal, ApproachTargetGoal>();
             services.AddScoped<GoapGoal, AssistFocusGoal>();

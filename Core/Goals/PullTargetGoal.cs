@@ -147,6 +147,21 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
+        if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+        {
+            Log("Matching raid icon!");
+            input.PressClearTarget();
+            wait.Update();
+            return;
+        }
+
+        if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) == -1)
+        {
+            Log("No Matching raid icon!");
+            Log("classConfig.RaidIconsToSkipInCombat: " + classConfig.RaidIconsToSkipInCombat);
+            Log("layerReader.TargetRaidIcon: " + playerReader.TargetRaidIcon());
+        }
+
         if (PullDurationMs > MAX_PULL_DURATION)
         {
             input.PressStopAttack();

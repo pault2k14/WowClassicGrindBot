@@ -65,7 +65,7 @@ public sealed partial class ClassConfiguration
 
     public bool CheckTargetGivesExp { get; set; }
     public string[] Blacklist { get; init; } = [];
-
+    public int[] RaidIconsToSkipInCombat { get; init; } = Array.Empty<int>();
     public Dictionary<int, SchoolMask> NpcSchoolImmunity { get; } = [];
 
     public Dictionary<string, int> IntVariables { get; } = [];
@@ -77,6 +77,7 @@ public sealed partial class ClassConfiguration
     public KeyActions Parallel { get; } = new();
     public KeyActions NPC { get; } = new();
     public KeyActions AssistFocus { get; } = new();
+    public KeyActions CrowdControl { get; } = new();
     public KeyActions PartyMember1 { get; } = new();
     public KeyActions PartyMember2 { get; } = new();
     public KeyActions PartyMember3 { get; } = new();

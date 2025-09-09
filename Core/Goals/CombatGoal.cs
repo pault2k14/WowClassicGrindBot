@@ -133,6 +133,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressPetAttack();
         }
 
+        if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+        {
+            input.PressClearTarget();
+            wait.Update();
+            return;
+        }
+
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
@@ -203,6 +210,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetOfTarget();
             wait.Update();
 
+            if(classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+            {
+                input.PressClearTarget();
+                wait.Update();
+            }
+                
+
             logger.LogWarning($"Found new target by pet. {elapsedPetFoundTarget}ms");
 
             return;
@@ -217,6 +231,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetOfTarget();
             wait.Update();
 
+            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+            {
+                input.PressClearTarget();
+                wait.Update();
+            }
+
             return;
         }
 
@@ -228,6 +248,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())
             {
+                if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+                {
+                    input.PressClearTarget();
+                    wait.Update();
+                    return;
+                }
+
                 ResetCooldowns();
 
                 logger.LogWarning("Found new target!");
