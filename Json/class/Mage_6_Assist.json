@@ -11,10 +11,11 @@
   "IntVariables": {
     //"Item_Conjure_Drink": 5350,
     "Item_Conjure_Drink": 2288,
-    "Item_Conjure_Food": 5349,
-    "MIN_FOOD%": 30,
-    "MIN_WATER%": 30,
-    "MIN_MANA_SPELL%": 40
+    //"Item_Conjure_Food": 5349,
+    "Item_Conjure_Food": 1113,
+    "MIN_FOOD%": 40,
+    "MIN_WATER%": 40,
+    "MIN_MANA_SPELL%": 15
   },
   "CrowdControl": {
     "Sequence": [
@@ -49,7 +50,7 @@
     "Sequence": [
       {
         "Name": "Fire Blast",
-        "Key": "5",
+        "Key": "3",
         "Requirements": [
           "TargetAlive && TargetHealth% < 35",
           "SpellInRange:20"
@@ -69,7 +70,7 @@
       },
       {
         "Name": "Shoot",
-        "Key": "7",
+        "Key": "4",
         "Item": true,
         "Requirements": [
           "HasRangedWeapon",
@@ -97,12 +98,12 @@
     "Sequence": [
       {
         "Name": "Frost Armor",
-        "Key": "3",
+        "Key": "7",
         "Requirement": "!Frost Armor"
       },
       {
         "Name": "Arcane Intellect",
-        "Key": "4",
+        "Key": "8",
         "Requirement": "!Arcane Intellect",
         "Log": false
       },
@@ -111,19 +112,23 @@
         "Key": "9",
         "HasCastBar": true,
         "Requirements": [
-          "!BagItem:Item_Conjure_Drink:10",
-          "Mana% > 50"
+          "!BagItem:Item_Conjure_Drink:4",
+          "Mana% > 50",
+          "!Drink",
+          "!Food"
         ],
         "AfterCastWaitCastbar": true,
         "AfterCastWaitBag": true
       },
       {
         "Name": "Conjure Food",
-        "Key": "8",
+        "Key": "0",
         "HasCastBar": true,
         "Requirements": [
           "!BagItem:Item_Conjure_Food:4",
-          "Mana% > 50"
+          "Mana% > 50",
+          "!Drink",
+          "!Food"
         ],
         "AfterCastWaitCastbar": true,
         "AfterCastWaitBag": true
