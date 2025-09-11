@@ -289,16 +289,43 @@ function DataToColor:OnCombatEvent(...)
     local _, subEvent, _, sourceGUID, _, sourceFlags, _, destGUID, _, destFlags, _, spellId, spellName, _ = ...
     --print(...)
 
+    local focusTargetGuid = 0
+    local partyMember1TargetGuid = 0
+    local partyMember2TargetGuid = 0
+    local partyMember3TargetGuid = 0
+    local partyMember4TargetGuid = 0
+            
+    if UnitExists(DataToColor.C.unitFocusTarget) then
+         focusTargetGuid = UnitGUID(DataToColor.C.unitFocusTarget)
+    end
+
+    if UnitExists(DataToColor.C.unitPartyMember1) then
+         partyMember1TargetGuid = UnitGUID(DataToColor.C.unitPartyMember1Target)
+    end
+            
+    if UnitExists(DataToColor.C.unitPartyMember2) then
+         partyMember2TargetGuid = UnitGUID(DataToColor.C.unitPartyMember2Target)
+    end
+
+    if UnitExists(DataToColor.C.unitPartyMember3) then
+         partyMember3TargetGuid = UnitGUID(DataToColor.C.unitPartyMember3Target)
+    end
+
+    if UnitExists(DataToColor.C.unitPartyMember4) then
+         partyMember4TargetGuid = UnitGUID(DataToColor.C.unitPartyMember4Target)
+    end
+
     if playerDamageTakenEvents[subEvent] and
         band(destFlags, COMBATLOG_OBJECT_TYPE_PLAYER_OR_PET) and
         strlen(sourceGUID) > 0 and
         (destGUID == DataToColor.playerGUID or
         destGUID == DataToColor.petGUID or
         destGUID == DataToColor.focusGUID or
-        destGUID == DataToColor.partyMember1GUID or
-        destGUID == DataToColor.partyMember2GUID or
-        destGUID == DataToColor.partyMember3GUID or
-        destGUID == DataToColor.partyMember4GUID or
+        destGUID == focusTargetGuid or
+        destGUID == partyMember1TargetGuid or
+        destGUID == partyMember2TargetGuid or
+        destGUID == partyMember3TargetGuid or
+        destGUID == partyMember4TargetGuid or
         DataToColor.playerPetSummons[destGUID]) then
         --DataToColor:Print("Damage Taken ", sourceGUID)
 
