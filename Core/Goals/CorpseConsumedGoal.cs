@@ -18,7 +18,8 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
     private readonly bool lootEnabled;
 
     public CorpseConsumedGoal(ILogger<CorpseConsumedGoal> logger,
-        ClassConfiguration classConfig, GoapAgentState goapAgentState, Wait wait, RestHandler restHandler)
+        ClassConfiguration classConfig, GoapAgentState goapAgentState, 
+        Wait wait, RestHandler restHandler)
         : base(nameof(CorpseConsumedGoal))
     {
         this.logger = logger;
