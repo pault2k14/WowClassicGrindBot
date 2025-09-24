@@ -18,7 +18,7 @@
     "Item_Conjure_Food": 1113,
     "MIN_FOOD%": 40,
     "MIN_WATER%": 40,
-    "MIN_MANA_SPELL%": 15
+    "MIN_MANA_SPELL%": 10
   },
 /*
   "PartyMember2": {
@@ -50,7 +50,8 @@
         "Requirements": [
           "HasRangedWeapon",
           "!Shooting",
-          "SpellInRange:1"
+          "SpellInRange:1",
+          "Mana% < MIN_MANA_SPELL%"
         ]
       }
     ]
@@ -69,6 +70,7 @@
         "CrowdControl": true,
         "Requirements": [
           "HasMoonIcon",
+          "Mana% > MIN_MANA_SPELL%",
           "!Polymorph"
         ]
       },
@@ -76,7 +78,6 @@
         "Name": "Fire Blast",
         "Key": "3",
         "Requirements": [
-          "TargetAlive && TargetHealth% < 5",
           "Mana% > MIN_MANA_SPELL%",
           "SpellInRange:20"
         ]
@@ -87,8 +88,7 @@
         "HasCastBar": true,
         "AfterCastWaitCastbar": true,
         "Requirements": [
-          "Mana% > MIN_MANA_SPELL%",
-          "TargetHealth% > 5"
+          "Mana% > MIN_MANA_SPELL%"
         ],
         "Interrupt": "CanRun:Fire Blast",
         "CancelOnInterrupt": true
@@ -100,7 +100,8 @@
         "Requirements": [
           "HasRangedWeapon",
           "!Shooting",
-          "SpellInRange:1"
+          "SpellInRange:1",
+          "Mana% < MIN_MANA_SPELL%"
         ]
       }
     ]
