@@ -1,0 +1,154 @@
+{
+  "ClassName": "Mage",
+  "Loot": false,
+  "Mode": "AssistFocus",
+  "UnitToFollow": "party1",
+  "PathFilename": "5_Gnome.json",
+  "PathThereAndBack": true,
+  "PathReduceSteps": false,
+  "RaidIconsToSkipInCombat": [
+    5,
+    6,
+    7
+  ],
+  "IntVariables": {
+    //"Item_Conjure_Drink": 5350,
+    "Item_Conjure_Drink": 2288,
+    //"Item_Conjure_Food": 5349,
+    "Item_Conjure_Food": 1113,
+    "MIN_FOOD%": 40,
+    "MIN_WATER%": 40,
+    "MIN_MANA_SPELL%": 15
+  },
+/*
+  "PartyMember2": {
+    "Sequence": [
+      {
+        "Name": "Arcane Intellect",
+        "Key": "8",
+        "Requirement": "!P2_Arcane Intellect",
+        "Log": false
+      }
+    ]
+  },
+  */
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Fireball",
+        "Key": "2",
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "Requirements": [
+          "Mana% > MIN_MANA_SPELL%"
+        ],
+        "Interrupt": "CanRun:Fire Blast",
+        "CancelOnInterrupt": true
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "Polymorph",
+        "Key": "6",
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "AfterCastAuraExpected": true,
+        //"AfterCastWaitBuff": true,
+        "AfterCastDelay":  1000,
+        //"Cooldown": 1000,
+        "CrowdControl": true,
+        "Requirements": [
+          "HasSquareIcon",
+          "!Polymorph"
+        ]
+      },
+      {
+        "Name": "Fire Blast",
+        "Key": "3",
+        "Requirements": [
+          "TargetAlive && TargetHealth% < 35",
+          "SpellInRange:20"
+        ]
+      },
+      {
+        "Name": "Fireball",
+        "Key": "2",
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "Requirements": [
+          "Mana% > MIN_MANA_SPELL%",
+          "TargetHealth% > 35"
+        ],
+        "Interrupt": "CanRun:Fire Blast",
+        "CancelOnInterrupt": true
+      },
+      {
+        "Name": "Shoot",
+        "Key": "4",
+        "Item": true,
+        "Requirements": [
+          "HasRangedWeapon",
+          "!Shooting",
+          "SpellInRange:1"
+        ]
+      }
+    ]
+  },
+  "Parallel": {
+    "Sequence": [
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health% < MIN_FOOD%"
+      },
+      {
+        "Name": "Drink",
+        "Key": "F11",
+        "Requirement": "Mana% < MIN_WATER%"
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Frost Armor",
+        "Key": "7",
+        "Requirement": "!Frost Armor"
+      },
+      {
+        "Name": "Arcane Intellect",
+        "Key": "8",
+        "Requirement": "!Arcane Intellect",
+        "Log": false
+      },
+      {
+        "Name": "Conjure Drink",
+        "Key": "9",
+        "HasCastBar": true,
+        "Requirements": [
+          "!BagItem:Item_Conjure_Drink:4",
+          "Mana% > 50",
+          "!Drink",
+          "!Food"
+        ],
+        "AfterCastWaitCastbar": true,
+        "AfterCastWaitBag": true
+      },
+      {
+        "Name": "Conjure Food",
+        "Key": "0",
+        "HasCastBar": true,
+        "Requirements": [
+          "!BagItem:Item_Conjure_Food:4",
+          "Mana% > 50",
+          "!Drink",
+          "!Food"
+        ],
+        "AfterCastWaitCastbar": true,
+        "AfterCastWaitBag": true
+      }
+    ]
+  }
+}
