@@ -41,9 +41,17 @@
         "AfterCastWaitCastbar": true,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%"
-        ],
-        "Interrupt": "CanRun:Fire Blast",
-        "CancelOnInterrupt": true
+        ]
+      },
+      {
+        "Name": "Shoot",
+        "Key": "4",
+        "Item": true,
+        "Requirements": [
+          "HasRangedWeapon",
+          "!Shooting",
+          "SpellInRange:1"
+        ]
       }
     ]
   },
@@ -68,7 +76,8 @@
         "Name": "Fire Blast",
         "Key": "3",
         "Requirements": [
-          "TargetAlive && TargetHealth% < 35",
+          "TargetAlive && TargetHealth% < 5",
+          "Mana% > MIN_MANA_SPELL%",
           "SpellInRange:20"
         ]
       },
@@ -79,7 +88,7 @@
         "AfterCastWaitCastbar": true,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
-          "TargetHealth% > 35"
+          "TargetHealth% > 5"
         ],
         "Interrupt": "CanRun:Fire Blast",
         "CancelOnInterrupt": true
