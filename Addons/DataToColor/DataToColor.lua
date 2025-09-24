@@ -1048,7 +1048,12 @@ function DataToColor:CreateFrames()
 
             
             if UnitExists(DataToColor.C.unitTarget) then
-                Pixel(int, GetRaidTargetIndex(DataToColor.C.unitTarget), 131)
+                local raidTargetIndex = GetRaidTargetIndex(DataToColor.C.unitTarget)
+                if raidTargetIndex == nil then
+                    Pixel(int, 0, 131)
+                else
+                    Pixel(int, raidTargetIndex, 131)
+                end 
             else
                 Pixel(int, 0, 131)
             end

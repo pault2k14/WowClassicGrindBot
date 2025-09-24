@@ -21,6 +21,11 @@ public sealed partial class KeyAction
         set => features[ActionMask.HasCastBar] = value;
     }
     public ConsoleKey ConsoleKey { get; set; }
+    public bool CrowdControl
+    {
+        get => features[ActionMask.CrowdControl];
+        set => features[ActionMask.CrowdControl] = value;
+    }
     public string Key { get; set; } = string.Empty;
     public int Slot { get; set; }
     public int SlotIndex { get; private set; }

@@ -1,12 +1,15 @@
 {
   "ClassName": "Mage",
-  "Loot": true,
+  "Loot": false,
   "Mode": "AssistFocus",
+  "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "RaidIconsToSkipInCombat": [
-    5
+    5,
+    6,
+    7
   ],
   "IntVariables": {
     //"Item_Conjure_Drink": 5350,
@@ -17,20 +20,18 @@
     "MIN_WATER%": 40,
     "MIN_MANA_SPELL%": 15
   },
-  "CrowdControl": {
+/*
+  "PartyMember2": {
     "Sequence": [
       {
-        "Name": "Polymorph",
-        "Key": "6",
-        "HasCastBar": true,
-        "AfterCastWaitCastbar": true,
-        "Requirements": [
-          "HasMoonIcon",
-          "!Polymorph"
-        ]
+        "Name": "Arcane Intellect",
+        "Key": "8",
+        "Requirement": "!P2_Arcane Intellect",
+        "Log": false
       }
     ]
   },
+  */
   "Pull": {
     "Sequence": [
       {
@@ -48,6 +49,21 @@
   },
   "Combat": {
     "Sequence": [
+      {
+        "Name": "Polymorph",
+        "Key": "6",
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "AfterCastAuraExpected": true,
+        //"AfterCastWaitBuff": true,
+        "AfterCastDelay":  1000,
+        //"Cooldown": 1000,
+        "CrowdControl": true,
+        "Requirements": [
+          "HasMoonIcon",
+          "!Polymorph"
+        ]
+      },
       {
         "Name": "Fire Blast",
         "Key": "3",

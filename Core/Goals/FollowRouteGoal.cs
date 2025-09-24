@@ -48,6 +48,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private CancellationTokenSource sideActivityCts;
 
     private readonly PathSettings pathSettings;
+    private readonly RestHandler restHandler;
 
     private Vector3[] mapRoute
     {
@@ -89,7 +90,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         ClassConfiguration classConfig,
         Navigation navigation,
         IMountHandler mountHandler, TargetFinder targetFinder,
-        IBlacklist targetBlacklist)
+        IBlacklist targetBlacklist, RestHandler restHandler)
     : base("Follow " + System.IO.Path.GetFileNameWithoutExtension(pathSettings.FileName))
     {
         this.cost = cost;
@@ -156,6 +157,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             sideActivityThread = new(Thread_LookingForTarget);
             sideActivityThread.Start();
         }
+
+        this.restHandler = restHandler;
     }
 
     public void Dispose()
@@ -179,6 +182,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Resume()
     {
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
+        }
+
         onEnterTime = DateTime.UtcNow;
 
         if (sideActivityCts.IsCancellationRequested)

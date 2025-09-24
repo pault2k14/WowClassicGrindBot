@@ -97,7 +97,18 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public int TargetMaxHealth() => reader.GetInt(18);
     public int TargetHealth() => reader.GetInt(19);
     public int TargetHealthPercent() => (1 + TargetHealth()) * 100 / (1 + TargetMaxHealth());
-    public int TargetRaidIcon() => reader.GetInt(131);
+    public int TargetRaidIcon => reader.GetInt(131);
+    //public RecordInt TargetRaidIcon { get; } = new(131);
+
+    public bool hasNoIcon => TargetRaidIcon == 0;
+    public bool hasStarIcon => TargetRaidIcon == 1;
+    public bool hasCircleIcon => TargetRaidIcon == 2;
+    public bool hasDiamondIcon => TargetRaidIcon == 3;
+    public bool hasTriangleIcon => TargetRaidIcon == 4;
+    public bool hasMoonIcon => TargetRaidIcon == 5;
+    public bool hasSquareIcon => TargetRaidIcon == 6;
+    public bool hasCrossIcon => TargetRaidIcon == 7;
+    public bool hasSkullIcon => TargetRaidIcon == 8;
 
     public int PetMaxHealth() => reader.GetInt(38);
     public int PetHealth() => reader.GetInt(39);
@@ -295,7 +306,6 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
 
         LootEvent.UpdateIncludeLeastSignificantDigit(reader, 10);
         LootWindowCount.UpdateExcludingLeastSignificantDigits(reader, 10);
-
         GCD.Update(reader);
 
         UIErrorTime.Update(reader);

@@ -13,11 +13,12 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
     private readonly ILogger<CorpseConsumedGoal> logger;
     private readonly GoapAgentState goapAgentState;
     private readonly Wait wait;
+    private readonly RestHandler restHandler;
 
     private readonly bool lootEnabled;
 
     public CorpseConsumedGoal(ILogger<CorpseConsumedGoal> logger,
-        ClassConfiguration classConfig, GoapAgentState goapAgentState, Wait wait)
+        ClassConfiguration classConfig, GoapAgentState goapAgentState, Wait wait, RestHandler restHandler)
         : base(nameof(CorpseConsumedGoal))
     {
         this.logger = logger;
@@ -37,10 +38,16 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
         AddPrecondition(GoapKey.consumecorpse, true);
 
         AddEffect(GoapKey.consumecorpse, false);
+        this.restHandler = restHandler;
     }
 
     public override void OnEnter()
     {
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
+        }
+
         goapAgentState.ConsumableCorpseCount = Math.Max(goapAgentState.ConsumableCorpseCount - 1, 0);
         if (goapAgentState.ConsumableCorpseCount == 0)
         {

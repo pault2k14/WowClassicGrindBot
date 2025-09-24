@@ -29,7 +29,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly IMountHandler mountHandler;
     private readonly IBlacklist targetBlacklist;
     private readonly CombatLog combatLog;
-
+    
     private long approachStart;
 
     private double nextStuckCheckTime;

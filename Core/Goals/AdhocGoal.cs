@@ -20,6 +20,7 @@ public sealed class AdhocGoal : GoapGoal
     private readonly IMountHandler mountHandler;
     private readonly AddonBits bits;
     private readonly CombatLog combatLog;
+    private readonly RestHandler restHandler;
 
     private readonly bool? combatMatters;
 
@@ -27,7 +28,7 @@ public sealed class AdhocGoal : GoapGoal
         ConfigurableInput input, Wait wait,
         PlayerReader playerReader, StopMoving stopMoving,
         CastingHandler castingHandler, IMountHandler mountHandler,
-        AddonBits bits, CombatLog combatLog)
+        AddonBits bits, CombatLog combatLog, RestHandler restHandler)
         : base(nameof(AdhocGoal))
     {
         this.logger = logger;
@@ -40,6 +41,7 @@ public sealed class AdhocGoal : GoapGoal
         this.mountHandler = mountHandler;
         this.bits = bits;
         this.combatLog = combatLog;
+        this.restHandler = restHandler;
 
         if (bool.TryParse(key.InCombat, out bool result))
         {
@@ -57,6 +59,11 @@ public sealed class AdhocGoal : GoapGoal
         if (key.BeforeCastDismount && mountHandler.IsMounted())
         {
             mountHandler.Dismount();
+        }
+
+        while(restHandler.IsResting())
+        {
+            wait.Update(1000);
         }
     }
 

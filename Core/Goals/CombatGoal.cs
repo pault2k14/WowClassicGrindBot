@@ -3,8 +3,9 @@
 using Game;
 
 using Microsoft.Extensions.Logging;
-
+using SharedLib;
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 
 namespace Core.Goals;
@@ -23,7 +24,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private readonly CastingHandler castingHandler;
     private readonly IMountHandler mountHandler;
     private readonly CombatLog combatLog;
-
+    
     private float lastDirection;
     private float lastMinDistance;
     private float lastMaxDistance;
@@ -133,29 +134,53 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressPetAttack();
         }
 
-        if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
-        {
-            input.PressClearTarget();
-            wait.Update();
-            return;
-        }
-
+        bool crowdControlAction = false;
+        bool successfulCast = false;
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
             KeyAction keyAction = span[i];
 
-            if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
+            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
+                .TargetRaidIcon) != -1 && !keyAction.CrowdControl)
             {
                 continue;
             }
 
+            if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
+            {
+                continue;
+            }
+                    
+            if(keyAction.CrowdControl)
+            {
+                crowdControlAction = true;
+                if (!CheckCrowdControl(keyAction))
+                {
+                    wait.Update();
+                    input.PressTargetFocus();
+                    input.PressTargetOfTarget();
+                    wait.Update();
+                    continue;
+                }
+            }
+            
             bool interrupt() => bits.Target_Alive() && keyAction.CanBeInterrupted();
 
             if (castingHandler.CastIfReady(keyAction, interrupt))
             {
+                successfulCast = true;
                 break;
             }
+        }
+
+        if (crowdControlAction && successfulCast)
+        {
+            wait.Update();
+            input.PressTargetFocus();
+            input.PressTargetOfTarget();
+            wait.Update();
+            return;
         }
 
         if (bits.SoftInteract_Enabled())
@@ -210,7 +235,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetOfTarget();
             wait.Update();
 
-            if(classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+            if(classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon) != -1)
             {
                 input.PressClearTarget();
                 wait.Update();
@@ -231,7 +256,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetOfTarget();
             wait.Update();
 
-            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon) != -1)
             {
                 input.PressClearTarget();
                 wait.Update();
@@ -248,7 +273,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())
             {
-                if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+                if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon) != -1)
                 {
                     input.PressClearTarget();
                     wait.Update();
@@ -270,6 +295,38 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         logger.LogWarning($"Waiting for target to exists or lose combat. Possible threats {combatLog.DamageTakenCount()}!");
         wait.Till(CastingHandler.GCD * 2,
             () => bits.Target_Alive() || !bits.Combat());
+    }
+
+    public bool CheckCrowdControl(KeyAction item)
+    {
+        Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
+        int currentTargetGuid = playerReader.TargetGuid;
+
+        /* Tab through all nearby hostile units recording their GUID
+         * if we find a mob with a raid icon add it to list of targets  
+         */
+
+        wait.Update();
+
+        for (int x = 0; x < 10; x++)
+        {
+            input.PressNearestTarget();
+            wait.Update();
+
+            if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
+            {
+                break;
+            }
+
+            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
+
+            if(bits.Target_Alive() && item.CanRun())
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private Vector3 GetCorpseLocation(float distance)

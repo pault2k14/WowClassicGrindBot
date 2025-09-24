@@ -13,13 +13,15 @@ public sealed class FollowFocusGoal : GoapGoal
     private readonly Wait wait;
     private readonly ClassConfiguration classConfig;
     private readonly ILogger<FollowFocusGoal> logger;
+    private readonly RestHandler restHandler;
 
     public FollowFocusGoal(ConfigurableInput input,
         PlayerReader playerReader,
         AddonBits bits,
         Wait wait,
         ClassConfiguration classConfig,
-        ILogger<FollowFocusGoal> logger
+        ILogger<FollowFocusGoal> logger,
+        RestHandler restHandler
         )
         : base(nameof(FollowFocusGoal))
     {
@@ -29,6 +31,7 @@ public sealed class FollowFocusGoal : GoapGoal
         this.wait = wait;
         this.classConfig = classConfig;
         this.logger = logger;
+        this.restHandler = restHandler;
 
         if (classConfig.UnitToFollow == "focus")
         {
@@ -44,6 +47,11 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void OnEnter()
     {
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
+        }
+
         if (input.IsKeyDown(input.ForwardKey))
         {
             input.StopForward(true);

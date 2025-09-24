@@ -16,6 +16,7 @@ public sealed class AssistFocusGoal : GoapGoal
     private readonly CastingHandler castingHandler;
     private readonly IMountHandler mountHandler;
     private readonly CombatLog combatLog;
+    private readonly RestHandler restHandler;
 
     public AssistFocusGoal(ILogger<AssistFocusGoal> logger,
         ConfigurableInput input,
@@ -26,7 +27,8 @@ public sealed class AssistFocusGoal : GoapGoal
         StopMoving stopMoving,
         CastingHandler castingHandler,
         IMountHandler mountHandler,
-        CombatLog combatLog
+        CombatLog combatLog,
+        RestHandler restHandler
         )
         : base(nameof(AssistFocusGoal))
     {
@@ -40,6 +42,7 @@ public sealed class AssistFocusGoal : GoapGoal
         this.castingHandler = castingHandler;
         this.mountHandler = mountHandler;
         this.combatLog = combatLog;
+        this.restHandler = restHandler;
 
         this.Keys = classConfig.AssistFocus.Sequence;
 
@@ -65,6 +68,11 @@ public sealed class AssistFocusGoal : GoapGoal
         wait.Update();
         input.PressTargetFocus();
         wait.Update();
+
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
+        }
     }
 
     public override void OnExit()

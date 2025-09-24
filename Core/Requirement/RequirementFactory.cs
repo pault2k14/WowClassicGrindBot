@@ -116,7 +116,6 @@ public sealed partial class RequirementFactory
         var partyMember3Buff = sp.GetRequiredService<AuraTimeReader<IPartyMember3BuffTimeReader>>();
         var partyMember4Buff = sp.GetRequiredService<AuraTimeReader<IPartyMember4BuffTimeReader>>();
 
-
         Dictionary<string, Func<ReadOnlySpan<char>, Requirement>> requirementMap = new()
         {
             { greaterThenOrEqual, CreateGreaterOrEquals },
@@ -164,15 +163,15 @@ public sealed partial class RequirementFactory
             { "InCombatRange", playerReader.WithInCombatRange },
 
             // Raid Icon
-            { "HasNoIcon", () => playerReader.TargetRaidIcon() == 0 },
-            { "HasStarIcon", () => playerReader.TargetRaidIcon() == 1 },
-            { "HasCircleIcon", () => playerReader.TargetRaidIcon() == 2 },
-            { "HasDiamondIcon", () => playerReader.TargetRaidIcon() == 3 },
-            { "HasTriangleIcon", () => playerReader.TargetRaidIcon() == 4 },
-            { "HasMoonIcon", () => playerReader.TargetRaidIcon() == 5 },
-            { "HasSquareIcon", () => playerReader.TargetRaidIcon() == 6 },
-            { "HasCrossIcon", () => playerReader.TargetRaidIcon() == 7 },
-            { "HasSkullIcon", () => playerReader.TargetRaidIcon() == 8 },
+            { "HasNoIcon", () => playerReader.hasNoIcon },
+            { "HasStarIcon", () => playerReader.hasStarIcon },
+            { "HasCircleIcon", () => playerReader.hasCircleIcon },
+            { "HasDiamondIcon", () => playerReader.hasDiamondIcon },
+            { "HasTriangleIcon", () => playerReader.hasTriangleIcon },
+            { "HasMoonIcon", () => playerReader.hasMoonIcon },
+            { "HasSquareIcon", () => playerReader.hasSquareIcon },
+            { "HasCrossIcon", () => playerReader.hasCrossIcon },
+            { "HasSkullIcon", () => playerReader.hasSkullIcon },
             
 
 

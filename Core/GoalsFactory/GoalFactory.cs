@@ -75,6 +75,7 @@ public static class GoalFactory
         services.AddScoped<StuckDetector>();
         services.AddScoped<CombatTracker>();
         services.AddScoped<SafeSpotCollector>();
+        services.AddScoped<RestHandler>();
 
         var playerReader = sp.GetRequiredService<PlayerReader>();
 
@@ -224,7 +225,8 @@ public static class GoalFactory
                 x.GetRequiredService<CastingHandler>(),
                 x.GetRequiredService<IMountHandler>(),
                 x.GetRequiredService<AddonBits>(),
-                x.GetRequiredService<CombatLog>()));
+                x.GetRequiredService<CombatLog>(),
+                x.GetRequiredService<RestHandler>()));
         }
     }
 
@@ -310,7 +312,8 @@ public static class GoalFactory
                 x.GetRequiredService<Navigation>(),
                 x.GetRequiredService<IMountHandler>(),
                 x.GetRequiredService<TargetFinder>(),
-                x.GetRequiredService<IBlacklist>()
+                x.GetRequiredService<IBlacklist>(),
+                x.GetRequiredService<RestHandler>()
                 ));
         }
     }

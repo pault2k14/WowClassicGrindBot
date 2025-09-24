@@ -16,6 +16,7 @@ public sealed class PartyMember2Goal : GoapGoal
     private readonly CastingHandler castingHandler;
     private readonly IMountHandler mountHandler;
     private readonly CombatLog combatLog;
+    private readonly RestHandler restHandler;
 
     public PartyMember2Goal(ILogger<PartyMember2Goal> logger,
         ConfigurableInput input,
@@ -26,7 +27,8 @@ public sealed class PartyMember2Goal : GoapGoal
         StopMoving stopMoving,
         CastingHandler castingHandler,
         IMountHandler mountHandler,
-        CombatLog combatLog
+        CombatLog combatLog,
+        RestHandler restHandler
         )
         : base(nameof(PartyMember2Goal))
     {
@@ -42,6 +44,7 @@ public sealed class PartyMember2Goal : GoapGoal
         this.combatLog = combatLog;
 
         this.Keys = classConfig.PartyMember2.Sequence;
+        this.restHandler = restHandler;
     }
 
     public override float Cost => 3.9f;
@@ -63,6 +66,11 @@ public sealed class PartyMember2Goal : GoapGoal
         wait.Update();
         input.PressTargetFocusPartyMemberTwo();
         wait.Update();
+
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
+        }
     }
 
     public override void OnExit()

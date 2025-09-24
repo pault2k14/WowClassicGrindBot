@@ -36,6 +36,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
     private readonly CombatLog combatLog;
     private readonly PlayerDirection playerDirection;
     private readonly GoapAgentState state;
+    private readonly RestHandler restHandler;
 
     private readonly CancellationToken token;
 
@@ -51,7 +52,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         ClassConfiguration classConfig, NpcNameTargeting npcNameTargeting,
         PlayerDirection playerDirection,
         GoapAgentState state, CombatLog combatLog,
-        CancellationTokenSource cts)
+        CancellationTokenSource cts, RestHandler restHandler)
         : base(nameof(LootGoal))
     {
         this.logger = logger;
@@ -73,10 +74,16 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.dangercombat, false);
         AddPrecondition(GoapKey.shouldloot, true);
         AddEffect(GoapKey.shouldloot, false);
+        this.restHandler = restHandler;
     }
 
     public override void OnEnter()
     {
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
+        }
+
         float e = wait.UntilCount(Loot.RESET_UPDATE_COUNT, LootReset);
         if (e < 0)
         {

@@ -34,7 +34,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     private readonly KeyAction? approachKey;
     private readonly Action approachAction;
-
+    
     private readonly bool requiresNpcNameFinder;
 
     private long pullStart;
@@ -147,21 +147,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
-        if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
-        {
-            Log("Matching raid icon!");
-            input.PressClearTarget();
-            wait.Update();
-            return;
-        }
-
-        if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) == -1)
-        {
-            Log("No Matching raid icon!");
-            Log("classConfig.RaidIconsToSkipInCombat: " + classConfig.RaidIconsToSkipInCombat);
-            Log("layerReader.TargetRaidIcon: " + playerReader.TargetRaidIcon());
-        }
-
         if (PullDurationMs > MAX_PULL_DURATION)
         {
             input.PressStopAttack();
@@ -188,6 +173,13 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         for (int i = 0; i < keys.Length; i++)
         {
             KeyAction keyAction = keys[i];
+
+            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
+                .TargetRaidIcon) != -1 && !keyAction.CrowdControl)
+            {
+                continue;
+            }
+
 
             if (keyAction.Name.Equals(input.Approach.Name,
                 StringComparison.OrdinalIgnoreCase))

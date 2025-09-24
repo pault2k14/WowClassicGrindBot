@@ -93,7 +93,7 @@ public sealed class CrowdControlGoal : GoapGoal
                 break;
             }
 
-            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
+            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
 
             for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
             {

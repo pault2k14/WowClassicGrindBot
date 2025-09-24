@@ -17,6 +17,7 @@ public sealed class ParallelGoal : GoapGoal
     private readonly PlayerReader playerReader;
     private readonly CastingHandler castingHandler;
     private readonly IMountHandler mountHandler;
+    private readonly RestHandler restHandler;
 
     private static bool None() => false;
 
@@ -24,7 +25,7 @@ public sealed class ParallelGoal : GoapGoal
 
     public ParallelGoal(ILogger logger, ConfigurableInput input, Wait wait,
         PlayerReader playerReader, StopMoving stopMoving, ClassConfiguration classConfig,
-        CastingHandler castingHandler, IMountHandler mountHandler)
+        CastingHandler castingHandler, IMountHandler mountHandler, RestHandler restHandler)
         : base(nameof(ParallelGoal))
     {
         this.logger = logger;
@@ -38,6 +39,7 @@ public sealed class ParallelGoal : GoapGoal
         AddPrecondition(GoapKey.incombat, false);
 
         Keys = classConfig.Parallel.Sequence;
+        this.restHandler = restHandler;
     }
 
     public override bool CanRun()
@@ -55,6 +57,11 @@ public sealed class ParallelGoal : GoapGoal
         if (mountHandler.IsMounted())
         {
             mountHandler.Dismount();
+        }
+
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
         }
 
         for (int i = 0; i < Keys.Length; i++)

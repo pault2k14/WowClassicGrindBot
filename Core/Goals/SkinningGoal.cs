@@ -34,6 +34,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
     private readonly CombatTracker combatTracker;
     private readonly GoapAgentState state;
     private readonly CancellationToken token;
+    private readonly RestHandler restHandler;
 
     private bool canRun;
     private int bagHashNewOrStackGain;
@@ -46,7 +47,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         AddonBits bits, Wait wait, StopMoving stopMoving,
         NpcNameTargeting npcNameTargeting, CombatTracker combatTracker,
         GoapAgentState state, ClassConfiguration classConfig,
-        CancellationTokenSource cts)
+        CancellationTokenSource cts, RestHandler restHandler)
         : base(nameof(SkinningGoal))
     {
         this.logger = logger;
@@ -76,6 +77,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
         AddPrecondition(GoapKey.shouldgather, true);
         AddEffect(GoapKey.shouldgather, false);
+        this.restHandler = restHandler;
     }
 
     public void Dispose()
@@ -96,6 +98,11 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
     public override void OnEnter()
     {
+        while (restHandler.IsResting())
+        {
+            wait.Update(1000);
+        }
+
         float e = wait.UntilCount(Loot.RESET_UPDATE_COUNT, LootReset);
         if (e < 0)
         {
