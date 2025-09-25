@@ -272,9 +272,20 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        logger.LogInformation("Checking target in front...");
-        input.PressNearestTarget();
-        wait.Update();
+        if (classConfig.Mode == Mode.AssistFocus)
+        {
+            logger.LogInformation("Checking assist focus target...");
+            wait.Update();
+            input.PressTargetFocus();
+            input.PressTargetOfTarget();
+            wait.Update();
+        }
+        else
+        {
+            logger.LogInformation("Checking target in front...");
+            input.PressNearestTarget();
+            wait.Update();
+        }
 
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
