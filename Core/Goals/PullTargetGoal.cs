@@ -177,8 +177,15 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
                 .TargetRaidIcon) != -1 && !keyAction.CrowdControl)
             {
+                // None of our pull sequence had crowd control.
+                if (i + 1 == keys.Length)
+                {
+                    return;
+                }
                 continue;
             }
+
+
 
 
             if (keyAction.Name.Equals(input.Approach.Name,
