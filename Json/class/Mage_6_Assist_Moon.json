@@ -16,8 +16,8 @@
     "Item_Conjure_Drink": 2288,
     //"Item_Conjure_Food": 5349,
     "Item_Conjure_Food": 1113,
-    "MIN_FOOD%": 40,
-    "MIN_WATER%": 40,
+    "MIN_FOOD%": 75,
+    "MIN_WATER%": 75,
     "MIN_MANA_SPELL%": 10
   },
 /*
