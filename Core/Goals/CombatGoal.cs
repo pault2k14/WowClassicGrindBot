@@ -172,6 +172,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 successfulCast = true;
                 break;
             }
+
+            if(keyAction.CrowdControl)
+            {
+                input.PressTargetFocus();
+                input.PressTargetOfTarget();
+                wait.Update();
+            }
         }
 
         if (crowdControlAction && successfulCast)
