@@ -1,11 +1,16 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": true,
+  "Loot": false,
   "UnitToFollow": "party1",
   "PathFilename": "_pack\\1-20\\Draenei\\1-5_Azuremyst Isle.json",
   "PathThereAndBack": true,
   "PathReduceSteps": true,
+  "RaidIconsToSkipInCombat": [
+    5,
+    6,
+    7
+  ],
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
@@ -22,7 +27,7 @@
         "Cooldown": 500,
         "Requirements": [
           "PartyMember1Health% < 70",
-          "Mana > 30"
+          "Mana > 75"
         ]
       },
       {
@@ -41,15 +46,14 @@
         "Key": "9",
         "WhenUsable": true,
         "Requirements": [
-          "PartyMember1Health% < 10",
-          "Mana > 45",
+          "PartyMember1Health% < 30",
+          "Mana > 80",
           "InCombat",
           "!P1_Shield"
         ]
       }
     ]
   },
-/*
   "PartyMember2": {
     "Sequence": [
       {
@@ -59,7 +63,7 @@
         "Cooldown": 500,
         "Requirements": [
           "PartyMember2Health% < 70",
-          "Mana > 30"
+          "Mana > 75"
         ]
       },
       {
@@ -78,15 +82,86 @@
         "Key": "9",
         "WhenUsable": true,
         "Requirements": [
-          "PartyMember2Health% < 50",
+          "PartyMember2Health% < 70",
+          "Mana > 80",
           "InCombat",
-          "Mana > 45",
           "!P2_Shield"
         ]
       }
     ]
   },
-  */
+  "PartyMember3": {
+    "Sequence": [
+      {
+        "Name": "Lesser Heal",
+        "Key": "3",
+        "HasCastBar": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "PartyMember3Health% < 70",
+          "Mana > 75"
+        ]
+      },
+      {
+        "Name": "Power Word Fortitude",
+        "Key": "0",
+        "HasCastBar": false,
+        "Cooldown": 1000,
+        "Requirements": [
+          "!P3_Fortitude",
+          "!InCombat",
+          "Mana% > 70"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "Requirements": [
+          "PartyMember3Health% < 70",
+          "Mana > 80",
+          "InCombat",
+          "!P3_Shield"
+        ]
+      }
+    ]
+  },
+  "PartyMember4": {
+    "Sequence": [
+      {
+        "Name": "Lesser Heal",
+        "Key": "3",
+        "HasCastBar": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "PartyMember4Health% < 70",
+          "Mana > 75"
+        ]
+      },
+      {
+        "Name": "Power Word Fortitude",
+        "Key": "0",
+        "HasCastBar": false,
+        "Cooldown": 1000,
+        "Requirements": [
+          "!P4_Fortitude",
+          "!InCombat",
+          "Mana% > 70"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "Requirements": [
+          "PartyMember4Health% < 70",
+          "Mana > 80",
+          "InCombat",
+          "!P4_Shield"
+        ]
+      }
+    ]
+  },
   "Wait": {
     "Sequence": [
       {
@@ -99,15 +174,24 @@
   "Pull": {
     "Sequence": [
       {
+        "Name": "Power Word: Shield",
+        "Key": "6",
+        "WhenUsable": true,
+        "AfterCastWaitBuff": true,
+        "Requirements": [
+
+          "MIN_MANA_OFFENSIVE% < Mana%",
+          "!Shield"
+        ]
+      },
+      {
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 12000,
         "Requirements": [
-            "TargetHealth% > MIN_TARGET_HP%",
-            "Mana% > MIN_MANA_OFFENSIVE%"
+          "MIN_MANA_OFFENSIVE% < Mana%"
         ]
-       },
+      }
     ]
   },
   "Combat": {
@@ -118,7 +202,8 @@
         "HasCastBar": false,
         "Cooldown": 15000,
         "Requirements": [
-          "Health% < 40",
+          "!Renew",
+          "Health% < 90",
           "Mana > 30"
         ]
       },
@@ -128,7 +213,7 @@
         "HasCastBar": true,
         "Cooldown": 500,
         "Requirements": [
-          "Health% < 70",
+          "Health% < 80",
           "Mana > 30"
         ]
       },
@@ -148,17 +233,18 @@
         "WhenUsable": true,
         "Requirements": [
           "Health% < 90",
-          "Mana > 45",
+          "Mana > 20",
           "!Shield"
         ]
       },
       {
         "Name": "Shoot",
-        "Key": "8",
+        "Key": "4",
         "Item": true,
         "Requirements": [
           //"HasRangedWeapon",
-          "!Shooting"
+          "!Shooting",
+          "SpellInRange:1"
         ]
       }
       //{
@@ -222,6 +308,16 @@
           "!FocusCombat",
           "!Fortitude"
         ]
+      },
+      {
+        "Name": "Inner Fire",
+        "Key": "8",
+        "Cooldown": 1000,
+        "HasCastBar": false,
+        "Requirements": [
+          "Mana% > 20",
+          "!Inner Fire"
+        ]
       }
     ]
   },
@@ -231,7 +327,7 @@
         "Name": "Food",
         "Key": "F12",
         "Requirements": [
-          "Health% < 30",
+          "Health% < 50",
           "!InCombat",
           "!FocusCombat"
         ]
@@ -240,7 +336,7 @@
         "Name": "Drink",
         "Key": "F11",
         "Requirements": [
-          "Mana% < 30",
+          "Mana% < 75",
           "!InCombat",
           "!FocusCombat"
         ]
