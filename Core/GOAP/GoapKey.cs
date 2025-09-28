@@ -26,6 +26,7 @@ public enum GoapKey
     targethostile,
     hasfocus,
     focushastarget,
+    focuscombat,
     consumablecorpsenearby,
     LENGTH
 }

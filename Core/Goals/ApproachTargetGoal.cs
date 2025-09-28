@@ -29,7 +29,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly IMountHandler mountHandler;
     private readonly IBlacklist targetBlacklist;
     private readonly CombatLog combatLog;
-    
+    private readonly ClassConfiguration classConfig;
+
     private long approachStart;
 
     private double nextStuckCheckTime;
@@ -45,7 +46,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         StopMoving stopMoving, CombatTracker combatTracker,
         IBlacklist blacklist,
         IMountHandler mountHandler,
-        CombatLog combatLog)
+        CombatLog combatLog,
+        ClassConfiguration classConfig)
         : base(nameof(ApproachTargetGoal))
     {
         this.logger = logger;
@@ -60,6 +62,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.mountHandler = mountHandler;
         this.targetBlacklist = blacklist;
         this.combatLog = combatLog;
+        this.classConfig = classConfig;
 
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
@@ -114,8 +117,72 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (!input.Approach.OnCooldown() && (!bits.SoftInteract() || HasValidSoftInteract()))
         {
-            input.PressApproach();
-            wait.Update();
+            
+            if (classConfig.Mode == Mode.AssistFocus)
+            {
+                // HasMoonIcon 5
+                // HasSquareIcon 6
+                // HasCrossIcon 7
+                bool foundCrowdControlAction = false;
+                string? raidIconRequirement = null;
+                int targetRaidIcon = classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
+                .TargetRaidIcon);
+
+                if(targetRaidIcon == 5)
+                {
+                    raidIconRequirement = "HasMoonIcon";
+                }
+                else if(targetRaidIcon == 6)
+                {
+                    raidIconRequirement = "HasSquareIcon";
+                }
+                else if (targetRaidIcon == 7)
+                {
+                    raidIconRequirement = "HasCrossIcon";
+                }
+
+                if(raidIconRequirement != null)
+                {
+                    Keys = classConfig.Combat.Sequence;
+                    ReadOnlySpan<KeyAction> span = Keys;
+                    for (int i = 0; i < span.Length; i++)
+                    {
+                        KeyAction keyAction = span[i];
+
+                        if (keyAction.CrowdControl
+                            && keyAction.Requirements.Contains(raidIconRequirement))
+                        {
+                            foundCrowdControlAction = true;
+                            break;
+                        }
+                    }
+                }
+
+                // The target had a raid icon, and at least one of our
+                // combat actions had a matching raid icon requirement
+                // so we should approach
+                if (foundCrowdControlAction)
+                {
+                    input.PressApproach();
+                    wait.Update();
+                }
+                // Either the target did not have a raid icon or none
+                // of our combat actions had a matching raid icon requirement
+                else
+                {
+                    input.PressTargetFocus();
+                    input.PressTargetOfTarget();
+                    wait.Update();
+                    input.PressApproach();
+                    wait.Update();
+                }
+            }
+            else
+            {
+                input.PressApproach();
+                wait.Update();
+            }
+
         }
 
         if (!bits.Combat())
