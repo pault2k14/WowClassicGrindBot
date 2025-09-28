@@ -49,7 +49,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.mountHandler = mountHandler;
         this.classConfig = classConfig;
 
-        AddPrecondition(GoapKey.incombat, true);
+        if(classConfig.Mode == Mode.AssistFocus)
+        {
+            AddPrecondition(GoapKey.focuscombat, true);
+        }
+        else
+        {
+            AddPrecondition(GoapKey.incombat, true);
+        }
+
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
         AddPrecondition(GoapKey.targethostile, true);

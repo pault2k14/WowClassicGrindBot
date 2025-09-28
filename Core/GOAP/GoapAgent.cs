@@ -267,6 +267,7 @@ public sealed partial class GoapAgent : IDisposable
                 UnitsTarget.Pet or UnitsTarget.PartyOrPet) << (int)GoapKey.targettargetsus) |
 
             (B(playerCombat) << (int)GoapKey.incombat) |
+            (B(bits.FocusTarget_Combat()) << (int)GoapKey.focuscombat) |
             (B(playerReader.PetTarget() && !b.PetTarget_Dead()) << (int)GoapKey.pethastarget) |
             (B(mountHandler.IsMounted()) << (int)GoapKey.ismounted) |
             (B(playerReader.WithInPullRange()) << (int)GoapKey.withinpullrange) |
