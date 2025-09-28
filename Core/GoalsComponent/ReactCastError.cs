@@ -20,13 +20,14 @@ public sealed class ReactCastError
     private readonly StopMoving stopMoving;
     private readonly PlayerDirection direction;
     private readonly AddonReader addonReader;
+    private readonly ClassConfiguration classConfig;
 
     public ReactCastError(ILogger<ReactCastError> logger,
         PlayerReader playerReader,
         AddonReader addonReader,
         ActionBarBits<IUsableAction> usableAction,
         AddonBits bits, Wait wait, ConfigurableInput input, StopMoving stopMoving,
-        PlayerDirection direction)
+        PlayerDirection direction, ClassConfiguration classConfig)
     {
         this.logger = logger;
         this.playerReader = playerReader;
@@ -37,6 +38,7 @@ public sealed class ReactCastError
         this.input = input;
         this.stopMoving = stopMoving;
         this.direction = direction;
+        this.classConfig = classConfig;
     }
 
     public void Do(KeyAction item)
@@ -168,7 +170,28 @@ public sealed class ReactCastError
 
                 float beforeDir = playerReader.Direction;
 
-                input.PressFastInteract();
+                if(bits.Target_Combat())
+                {
+                    logger.LogInformation("ERR_BADATTACKFACING target was in combat");
+                }
+                else
+                {
+                    logger.LogInformation("ERR_BADATTACKFACING target was NOT in combat");
+
+                }
+
+                if (classConfig.Mode == Mode.AssistFocus)
+                {
+                    logger.LogInformation("ERR_BADATTACKFACING AssistFocus targeting focus target");
+                    input.PressTargetFocus();
+                    input.PressTargetOfTarget();
+                    wait.Update();
+                }
+                else if(bits.Target_Combat())
+                {
+                    logger.LogInformation("ERR_BADATTACKFACING PressFastInteract");
+                    input.PressFastInteract();
+                }
 
                 const int updateCount = 2;
                 float e = wait.AfterEquals(playerReader.SpellQueueTimeMs,
