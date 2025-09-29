@@ -192,9 +192,9 @@ public sealed class ReactCastError
                         wait.Update();
                     }
 
-                    logger.LogInformation("ERR_BADATTACKFACING AssistFocus interacting with target");
-                    input.PressInteract();
-                    
+                    logger.LogInformation("ERR_BADATTACKFACING AssistFocus fast interacting with target");
+                    input.PressFastInteract();
+
                 }
                 else if(bits.Target_Combat())
                 {
