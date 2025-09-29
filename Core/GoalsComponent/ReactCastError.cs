@@ -182,10 +182,18 @@ public sealed class ReactCastError
 
                 if (classConfig.Mode == Mode.AssistFocus)
                 {
-                    logger.LogInformation("ERR_BADATTACKFACING AssistFocus targeting focus target");
-                    input.PressTargetFocus();
-                    input.PressTargetOfTarget();
-                    wait.Update();
+                    if(bits.Target != bits.FocusTarget)
+                    {
+                        logger.LogInformation("ERR_BADATTACKFACING AssistFocus targeting focus target");
+                        wait.Update(1000);
+                        input.PressTargetFocus();
+                        input.PressTargetOfTarget();
+                        wait.Update();
+                    }
+
+                    logger.LogInformation("ERR_BADATTACKFACING AssistFocus interacting with target");
+                    input.PressInteract();
+                    
                 }
                 else if(bits.Target_Combat())
                 {

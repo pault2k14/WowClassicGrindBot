@@ -64,7 +64,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         //AddPrecondition(GoapKey.targettargetsus, true);
         AddPrecondition(GoapKey.incombatrange, true);
 
-        AddEffect(GoapKey.producedcorpse, true);
+        if (classConfig.Loot)
+        {
+            AddEffect(GoapKey.producedcorpse, true);
+        }
+
         AddEffect(GoapKey.targetisalive, false);
         AddEffect(GoapKey.hastarget, false);
 
