@@ -20,7 +20,7 @@
     "MIN_WATER%": 75,
     "MIN_MANA_SPELL%": 10
   },
-/*
+  /*
   "PartyMember2": {
     "Sequence": [
       {
@@ -65,7 +65,7 @@
         "AfterCastWaitCastbar": true,
         "AfterCastAuraExpected": true,
         //"AfterCastWaitBuff": true,
-        "AfterCastDelay":  1000,
+        "AfterCastDelay": 1000,
         //"Cooldown": 1000,
         "CrowdControl": true,
         "Requirements": [
@@ -125,12 +125,22 @@
       {
         "Name": "Frost Armor",
         "Key": "7",
-        "Requirement": "!Frost Armor"
+        "Requirements": [
+          "!Frost Armor",
+          "Mana% > 10",
+          "!Drink",
+          "!Food"
+        ]
       },
       {
         "Name": "Arcane Intellect",
         "Key": "8",
-        "Requirement": "!Arcane Intellect",
+        "Requirements": [
+          "!Arcane Intellect",
+          "Mana% > 10",
+          "!Drink",
+          "!Food"
+        ],
         "Log": false
       },
       {
@@ -139,7 +149,7 @@
         "HasCastBar": true,
         "Requirements": [
           "!BagItem:Item_Conjure_Drink:4",
-          "Mana% > 50",
+          "Mana% > 10",
           "!Drink",
           "!Food"
         ],
@@ -152,7 +162,7 @@
         "HasCastBar": true,
         "Requirements": [
           "!BagItem:Item_Conjure_Food:4",
-          "Mana% > 50",
+          "Mana% > 10",
           "!Drink",
           "!Food"
         ],

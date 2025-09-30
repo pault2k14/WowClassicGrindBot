@@ -31,10 +31,10 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal
         AddPrecondition(GoapKey.consumecorpse, false);
 
         AddEffect(GoapKey.producedcorpse, false);
-        AddEffect(GoapKey.consumecorpse, true);
-
+        
         if (classConfig.Loot)
         {
+            AddEffect(GoapKey.consumecorpse, true);
             AddEffect(GoapKey.shouldloot, true);
 
             if (classConfig.GatherCorpse)

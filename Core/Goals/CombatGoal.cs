@@ -181,25 +181,33 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if (castingHandler.CastIfReady(keyAction, interrupt))
             {
+                logger.LogInformation("CombatGoals: Successful Cast");
                 successfulCast = true;
                 break;
             }
 
+            /* Probably not needed
             if(keyAction.CrowdControl)
             {
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
                 wait.Update();
             }
+            */
         }
 
         if (crowdControlAction && successfulCast)
         {
+            logger.LogInformation("Clear target of crowdcontrol");
+            input.PressClearTarget();
+            wait.Update();
+            /*
             wait.Update();
             input.PressTargetFocus();
             input.PressTargetOfTarget();
             wait.Update();
             return;
+            */
         }
 
         if (bits.SoftInteract_Enabled())
@@ -260,13 +268,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
             }
                 
-
             logger.LogWarning($"Found new target by pet. {elapsedPetFoundTarget}ms");
 
             return;
         }
 
-        if (bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
+        if (classConfig.Mode == Mode.AssistFocus && bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
         { 
             logger.LogWarning($"Found new combat target of focus.");
             ResetCooldowns();
@@ -283,7 +290,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             return;
         }
+        else
+        {
+            logger.LogInformation("Checking target in front...");
+            input.PressNearestTarget();
+            wait.Update();
+        }
 
+        /*
         if (classConfig.Mode == Mode.AssistFocus)
         {
             logger.LogInformation("Checking assist focus target...");
@@ -298,6 +312,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressNearestTarget();
             wait.Update();
         }
+        */
 
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
