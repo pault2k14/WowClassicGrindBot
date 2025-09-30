@@ -38,7 +38,9 @@
         "Requirements": [
           "!P1_Fortitude",
           "!InCombat",
-          "Mana% > 70"
+          "Mana% > 70",
+          "!Food",
+          "!Drink"
         ]
       },
       {
@@ -74,7 +76,9 @@
         "Requirements": [
           "!P2_Fortitude",
           "!InCombat",
-          "Mana% > 70"
+          "Mana% > 70",
+          "!Food",
+          "!Drink"
         ]
       },
       {
@@ -110,7 +114,9 @@
         "Requirements": [
           "!P3_Fortitude",
           "!InCombat",
-          "Mana% > 70"
+          "Mana% > 70",
+          "!Food",
+          "!Drink"
         ]
       },
       {
@@ -146,7 +152,9 @@
         "Requirements": [
           "!P4_Fortitude",
           "!InCombat",
-          "Mana% > 70"
+          "Mana% > 70",
+          "!Food",
+          "!Drink"
         ]
       },
       {
@@ -306,7 +314,9 @@
           "Mana% > 70",
           "!InCombat",
           "!FocusCombat",
-          "!Fortitude"
+          "!Fortitude",
+          "!Food",
+          "!Drink"
         ]
       },
       {
@@ -316,7 +326,9 @@
         "HasCastBar": false,
         "Requirements": [
           "Mana% > 20",
-          "!Inner Fire"
+          "!Inner Fire",
+          "!Food",
+          "!Drink"
         ]
       }
     ]
