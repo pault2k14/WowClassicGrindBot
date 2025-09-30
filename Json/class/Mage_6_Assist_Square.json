@@ -12,8 +12,9 @@
     7
   ],
   "IntVariables": {
-    //"Item_Conjure_Drink": 5350,
-    "Item_Conjure_Drink": 2288,
+    //"Item_Conjure_Drink": 5350, // Rank 1
+    //"Item_Conjure_Drink": 2288, // Rank 2
+    "Item_Conjure_Drink": 2136, // Rank 2
     //"Item_Conjure_Food": 5349,
     "Item_Conjure_Food": 1113,
     "MIN_FOOD%": 75,
