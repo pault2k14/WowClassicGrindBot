@@ -146,6 +146,23 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressPetAttack();
         }
 
+        if (classConfig.Mode == Mode.AssistFocus)
+        {
+            if (bits.Target != bits.FocusTarget)
+            {
+                input.PressTargetFocus();
+                input.PressTargetOfTarget();
+                wait.Update();
+            }
+
+            /* Use the skull icon to force melee range */
+            if(playerReader.hasSkullIcon && !playerReader.IsInMeleeRange())
+            {
+                input.PressFastInteract();
+                wait.Update();
+            }
+        }
+
         bool crowdControlAction = false;
         bool successfulCast = false;
         ReadOnlySpan<KeyAction> span = Keys;
