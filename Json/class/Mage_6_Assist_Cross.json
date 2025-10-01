@@ -76,6 +76,15 @@
         ]
       },
       {
+        "Name": "Evocation",
+        "Key": "5",
+        "HasCastBar": true,
+        "Cooldown": 480000,
+        "Requirements": [
+          "Mana% < 15"
+        ]
+      },
+      {
         "Name": "Fire Blast",
         "Key": "3",
         "Requirements": [
@@ -123,15 +132,6 @@
   },
   "Adhoc": {
     "Sequence": [
-      {
-        "Name": "Evocation",
-        "Key": "5",
-        "HasCastBar": true,
-        "Cooldown": 480000,
-        "Requirements": [
-          "Mana%<12"
-        ]
-      },
       {
         "Name": "Frost Armor",
         "Key": "7",

@@ -66,13 +66,22 @@
         "AfterCastWaitCastbar": true,
         "AfterCastAuraExpected": true,
         //"AfterCastWaitBuff": true,
-        "AfterCastDelay":  1000,
+        "AfterCastDelay": 1000,
         //"Cooldown": 1000,
         "CrowdControl": true,
         "Requirements": [
           "HasSquareIcon",
           "Mana% > MIN_MANA_SPELL%",
           "!Polymorph"
+        ]
+      },
+      {
+        "Name": "Evocation",
+        "Key": "5",
+        "HasCastBar": true,
+        "Cooldown": 480000,
+        "Requirements": [
+          "Mana% < 15"
         ]
       },
       {
@@ -123,15 +132,6 @@
   },
   "Adhoc": {
     "Sequence": [
-      {
-        "Name": "Evocation",
-        "Key": "5",
-        "HasCastBar": true,
-        "Cooldown": 480000,
-        "Requirements": [
-          "Mana%<12"
-        ]
-      },
       {
         "Name": "Frost Armor",
         "Key": "7",
