@@ -2,15 +2,20 @@
   "ClassName": "Mage",
   "Loot": false,
   "Mode": "AssistFocus",
-  "UnitToFollow": "party2",
+  "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "RaidIconsToSkipInCombat": [
-    5,
-    6,
-    7
+    4, // Triangle
+    5, // Moon
+    6, // Square
+    7 // Cross
   ],
+  "RaidIconsToAttackWithoutFocus": [
+    2 // Circle
+  ],
+  // Diamond 3
   "IntVariables": {
     //"Item_Conjure_Drink": 5350, // Rank 1
     //"Item_Conjure_Drink": 2288, // Rank 2

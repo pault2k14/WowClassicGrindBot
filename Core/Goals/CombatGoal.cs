@@ -172,8 +172,26 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             KeyAction keyAction = span[i];
 
+            // Use specific raid icons to force attacking of a non focus target
+            if (classConfig.Mode == Mode.AssistFocus
+                && classConfig.RaidIconsToAttackWithoutFocus.Length > 0
+                && !playerReader.hasSkullIcon
+                && !keyAction.CrowdControl)
+            {
+                //logger.LogInformation("CombatGoals: Check for RaidIconsToAttackWithoutFocus");
+                if (!CheckNonFocusAttack())
+                {
+                    //logger.LogInformation("CombatGoals: Didn't find a RaidIconToAttackWithoutFocus");
+                    input.PressTargetFocus();
+                    input.PressTargetOfTarget();
+                    wait.Update();
+                }
+            }
+
             /* Use the skull icon to force melee range */
-            if (playerReader.hasSkullIcon && !playerReader.IsInMeleeRange() 
+            if (classConfig.Mode == Mode.AssistFocus
+                && playerReader.hasSkullIcon 
+                && !playerReader.IsInMeleeRange() 
                 && !keyAction.CrowdControl)
             {
                 // Do we need to stop following the target as well?
@@ -210,19 +228,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if (castingHandler.CastIfReady(keyAction, interrupt))
             {
-                logger.LogInformation("CombatGoals: Successful Cast");
+                //logger.LogInformation("CombatGoals: Successful Cast");
                 successfulCast = true;
                 break;
             }
 
-            /* Probably not needed
-            if(keyAction.CrowdControl)
-            {
-                input.PressTargetFocus();
-                input.PressTargetOfTarget();
-                wait.Update();
-            }
-            */
         }
 
         if (crowdControlAction && successfulCast)
@@ -230,13 +240,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("Clear target of crowdcontrol");
             input.PressClearTarget();
             wait.Update();
-            /*
-            wait.Update();
-            input.PressTargetFocus();
-            input.PressTargetOfTarget();
-            wait.Update();
-            return;
-            */
         }
 
         if (bits.SoftInteract_Enabled())
@@ -326,22 +329,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
-        /*
-        if (classConfig.Mode == Mode.AssistFocus)
-        {
-            logger.LogInformation("Checking assist focus target...");
-            wait.Update();
-            input.PressTargetFocus();
-            input.PressTargetOfTarget();
-            wait.Update();
-        }
-        else
-        {
-            logger.LogInformation("Checking target in front...");
-            input.PressNearestTarget();
-            wait.Update();
-        }
-        */
 
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
@@ -396,6 +383,40 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if(bits.Target_Alive() && item.CanRun())
             {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public bool CheckNonFocusAttack()
+    {
+        Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
+        int currentTargetGuid = playerReader.TargetGuid;
+
+        /* Tab through all nearby hostile units recording their GUID
+         * if we find a mob with a raid icon add it to list of targets  
+         */
+
+        wait.Update();
+
+        for (int x = 0; x < 10; x++)
+        {
+            input.PressNearestTarget();
+            wait.Update();
+
+            if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
+            {
+                break;
+            }
+
+            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
+
+            if (bits.Target_Alive() && classConfig.RaidIconsToAttackWithoutFocus
+                .Contains(playerReader.TargetRaidIcon))
+            {
+                //logger.LogInformation("CombatGoals: Found RaidIconsToAttackWithoutFocus");
                 return true;
             }
         }
