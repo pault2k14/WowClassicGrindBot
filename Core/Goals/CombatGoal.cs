@@ -146,6 +146,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressPetAttack();
         }
 
+        /*
         if (classConfig.Mode == Mode.AssistFocus)
         {
             if (bits.Target != bits.FocusTarget)
@@ -155,13 +156,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
             }
 
-            /* Use the skull icon to force melee range */
+            // Use the skull icon to force melee range
             if(playerReader.hasSkullIcon && !playerReader.IsInMeleeRange())
             {
                 input.PressFastInteract();
                 wait.Update();
             }
         }
+        */
 
         bool crowdControlAction = false;
         bool successfulCast = false;
@@ -169,6 +171,16 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
             KeyAction keyAction = span[i];
+
+            /* Use the skull icon to force melee range */
+            if (playerReader.hasSkullIcon && !playerReader.IsInMeleeRange() 
+                && !keyAction.CrowdControl)
+            {
+                // Do we need to stop following the target as well?
+                input.PressFastInteract();
+                wait.Update();
+                continue;
+            }
 
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
                 .TargetRaidIcon) != -1 && !keyAction.CrowdControl)
