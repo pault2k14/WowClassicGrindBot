@@ -236,18 +236,16 @@
   },
   "Combat": {
     "Sequence": [
-      /*
       {
         "Name": "Mana Potion",
         "Key": "F9",
-        "Requirement": "Health% < 15"
+        "Requirement": "Mana% < 20"
       },
       {
         "Name": "HP Potion",
         "Key": "F10",
-        "Requirement": "Mana% < 20"
+        "Requirement": "Health% < 15"
       },
-      */
       {
         "Name": "Heal",
         "Key": "3",
@@ -341,6 +339,16 @@
   },
   "Adhoc": {
     "Sequence": [
+      {
+        "Name": "Heal",
+        "Key": "3",
+        "HasCastBar": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 60",
+          "Mana > 155"
+        ]
+      },
       {
         "Name": "Power Word Fortitude",
         "Key": "0",
