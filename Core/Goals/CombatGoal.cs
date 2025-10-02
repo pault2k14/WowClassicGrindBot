@@ -195,6 +195,16 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             /* Use the skull icon to force melee range */
             if (classConfig.Mode == Mode.AssistFocus
+                && playerReader.hasTriangleIcon)
+            {
+
+                input.PressClearTarget();
+                wait.Update();
+                return;
+            }
+
+            /* Use the skull icon to force melee range */
+            if (classConfig.Mode == Mode.AssistFocus
                 && playerReader.hasSkullIcon 
                 && !playerReader.IsInMeleeRange() 
                 && !keyAction.CrowdControl)
