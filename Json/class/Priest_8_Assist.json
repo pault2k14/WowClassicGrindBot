@@ -7,10 +7,15 @@
   "PathThereAndBack": true,
   "PathReduceSteps": true,
   "RaidIconsToSkipInCombat": [
-    5,
-    6,
-    7
+    4, // Triangle
+    5, // Moon
+    6, // Square
+    7 // Cross
   ],
+  "RaidIconsToAttackWithoutFocus": [
+    2 // Circle
+  ],
+  // Diamond 3
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
@@ -21,13 +26,37 @@
   "PartyMember1": {
     "Sequence": [
       {
-        "Name": "Lesser Heal",
-        "Key": "3",
+        "Name": "Flash Heal",
+        "Key": "1",
+        "Cost": 1,
+        "Cooldown": 250,
         "HasCastBar": true,
-        "Cooldown": 500,
         "Requirements": [
-          "PartyMember1Health% < 70",
-          "Mana > 75"
+          "PartyMember1Health% < 30",
+          "Mana > 125"
+        ]
+      },
+      {
+        "Name": "Heal",
+        "Key": "3",
+        "Cost": 2,
+        "Cooldown": 500,
+        "HasCastBar": true,
+        "Requirements": [
+          "PartyMember1Health% < 60",
+          "Mana > 155"
+        ]
+      },
+      {
+        "Name": "Renew",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 10000,
+        "HasCastBar": false,
+        "Requirements": [
+          "!P1_Renew",
+          "PartyMember1Health% < 45",
+          "Mana > 105"
         ]
       },
       {
@@ -47,6 +76,7 @@
         "Name": "Power Word: Shield",
         "Key": "9",
         "WhenUsable": true,
+        "Cooldown": 500,
         "Requirements": [
           "PartyMember1Health% < 30",
           "Mana > 80",
@@ -59,13 +89,13 @@
   "PartyMember2": {
     "Sequence": [
       {
-        "Name": "Lesser Heal",
+        "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
         "Cooldown": 500,
         "Requirements": [
-          "PartyMember2Health% < 70",
-          "Mana > 75"
+          "PartyMember2Health% < 50",
+          "Mana > 155"
         ]
       },
       {
@@ -85,8 +115,9 @@
         "Name": "Power Word: Shield",
         "Key": "9",
         "WhenUsable": true,
+        "Cooldown": 500,
         "Requirements": [
-          "PartyMember2Health% < 70",
+          "PartyMember2Health% < 30",
           "Mana > 80",
           "InCombat",
           "!P2_Shield"
@@ -97,13 +128,13 @@
   "PartyMember3": {
     "Sequence": [
       {
-        "Name": "Lesser Heal",
+        "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
         "Cooldown": 500,
         "Requirements": [
-          "PartyMember3Health% < 70",
-          "Mana > 75"
+          "PartyMember3Health% < 50",
+          "Mana > 155"
         ]
       },
       {
@@ -123,8 +154,9 @@
         "Name": "Power Word: Shield",
         "Key": "9",
         "WhenUsable": true,
+        "Cooldown": 500,
         "Requirements": [
-          "PartyMember3Health% < 70",
+          "PartyMember3Health% < 30",
           "Mana > 80",
           "InCombat",
           "!P3_Shield"
@@ -135,13 +167,13 @@
   "PartyMember4": {
     "Sequence": [
       {
-        "Name": "Lesser Heal",
+        "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
         "Cooldown": 500,
         "Requirements": [
-          "PartyMember4Health% < 70",
-          "Mana > 75"
+          "PartyMember4Health% < 50",
+          "Mana > 155"
         ]
       },
       {
@@ -161,8 +193,9 @@
         "Name": "Power Word: Shield",
         "Key": "9",
         "WhenUsable": true,
+        "Cooldown": 500,
         "Requirements": [
-          "PartyMember4Health% < 70",
+          "PartyMember4Health% < 30",
           "Mana > 80",
           "InCombat",
           "!P4_Shield"
@@ -205,24 +238,13 @@
   "Combat": {
     "Sequence": [
       {
-        "Name": "Renew",
-        "Key": "6",
-        "HasCastBar": false,
-        "Cooldown": 15000,
-        "Requirements": [
-          "!Renew",
-          "Health% < 90",
-          "Mana > 30"
-        ]
-      },
-      {
-        "Name": "Lesser Heal",
+        "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
         "Cooldown": 500,
         "Requirements": [
-          "Health% < 80",
-          "Mana > 30"
+          "Health% < 60",
+          "Mana > 155"
         ]
       },
       {
@@ -231,7 +253,7 @@
         "WhenUsable": true,
         "Cooldown": 30000,
         "Requirements": [
-          "Health% < 55",
+          "Health% < 70",
           "Mana > 40"
         ]
       },
@@ -239,12 +261,14 @@
         "Name": "Power Word: Shield",
         "Key": "9",
         "WhenUsable": true,
+        "Cooldown": 500,
         "Requirements": [
-          "Health% < 90",
+          "Health% < 40",
           "Mana > 20",
           "!Shield"
         ]
-      },
+      }
+     /*
       {
         "Name": "Shoot",
         "Key": "4",
@@ -255,6 +279,7 @@
           "SpellInRange:1"
         ]
       }
+      */
       //{
       //  "Name": "Lesser Heal",
       //  "Key": "3",
