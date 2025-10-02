@@ -173,14 +173,25 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             KeyAction keyAction = span[i];
 
             // Use specific raid icons to force attacking of a non focus target
+            /*
             if (classConfig.Mode == Mode.AssistFocus
                 && classConfig.RaidIconsToAttackWithoutFocus.Length > 0
                 && !playerReader.hasSkullIcon
                 && !keyAction.CrowdControl)
             {
                 //logger.LogInformation("CombatGoals: Check for RaidIconsToAttackWithoutFocus");
-                CheckNonFocusAttack();
+                
+                if (!CheckNonFocusAttack())
+                {
+                    //logger.LogInformation("CombatGoals: Didn't find a RaidIconToAttackWithoutFocus");
+                    wait.Update();
+                    input.PressTargetFocus();
+                    input.PressTargetOfTarget();
+                    wait.Update();
+                }
+                
             }
+            */
 
             /* Use the skull icon to force melee range */
             if (classConfig.Mode == Mode.AssistFocus
