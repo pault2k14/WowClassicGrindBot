@@ -179,13 +179,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 && !keyAction.CrowdControl)
             {
                 //logger.LogInformation("CombatGoals: Check for RaidIconsToAttackWithoutFocus");
-                if (!CheckNonFocusAttack())
-                {
-                    //logger.LogInformation("CombatGoals: Didn't find a RaidIconToAttackWithoutFocus");
-                    input.PressTargetFocus();
-                    input.PressTargetOfTarget();
-                    wait.Update();
-                }
+                CheckNonFocusAttack();
             }
 
             /* Use the skull icon to force melee range */
