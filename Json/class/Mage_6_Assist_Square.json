@@ -64,6 +64,18 @@
   },
   "Combat": {
     "Sequence": [
+      /*
+      {
+        "Name": "Mana Potion",
+        "Key": "F9",
+        "Requirement": "Health% < 15"
+      },
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirement": "Mana% < 20"
+      },
+      */
       {
         "Name": "Polymorph",
         "Key": "6",

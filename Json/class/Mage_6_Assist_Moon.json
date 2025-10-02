@@ -26,18 +26,19 @@
     "MIN_WATER%": 75,
     "MIN_MANA_SPELL%": 10
   },
-  /*
   "PartyMember2": {
     "Sequence": [
       {
         "Name": "Arcane Intellect",
         "Key": "8",
-        "Requirement": "!P2_Arcane Intellect",
+        "Requirements": [
+          "!P2_Arcane Intellect",
+          "!InCombat"
+        ],
         "Log": false
       }
     ]
   },
-  */
   "Pull": {
     "Sequence": [
       {
@@ -64,6 +65,18 @@
   },
   "Combat": {
     "Sequence": [
+     /*
+      {
+        "Name": "Mana Potion",
+        "Key": "F9",
+        "Requirement": "Health% < 15"
+      },
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirement": "Mana% < 20"
+      },
+      */
       {
         "Name": "Polymorph",
         "Key": "6",
