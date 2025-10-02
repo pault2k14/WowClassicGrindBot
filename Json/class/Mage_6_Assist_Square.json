@@ -7,7 +7,6 @@
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "RaidIconsToSkipInCombat": [
-    4, // Triangle
     5, // Moon
     6, // Square
     7 // Cross
