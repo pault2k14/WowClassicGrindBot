@@ -203,6 +203,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
                 .TargetRaidIcon) != -1 && !keyAction.CrowdControl)
             {
+                input.PressStopAttack();
                 continue;
             }
 
