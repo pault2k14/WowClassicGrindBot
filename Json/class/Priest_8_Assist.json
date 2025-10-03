@@ -236,6 +236,7 @@
   },
   "Combat": {
     "Sequence": [
+      /*
       {
         "Name": "Mana Potion",
         "Key": "F9",
@@ -246,6 +247,7 @@
         "Key": "F10",
         "Requirement": "Health% < 15"
       },
+      */
       {
         "Name": "Heal",
         "Key": "3",
