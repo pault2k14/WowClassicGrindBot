@@ -332,8 +332,10 @@ public sealed partial class GoapAgent : IDisposable
 
             State.LastCombatKillCount++;
             State.ConsumableCorpseCount++;
-
-            BroadcastGoapEvent(GoapKey.producedcorpse, true);
+            if(classConfig.Loot)
+            {
+                BroadcastGoapEvent(GoapKey.producedcorpse, true);
+            }
 
             LogActiveKillDetected(logger, SessionStat.Kills, State.LastCombatKillCount, combatLog.DamageTakenCount());
         }

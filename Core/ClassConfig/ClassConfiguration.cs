@@ -31,6 +31,8 @@ public sealed partial class ClassConfiguration
     public bool Log { get; set; } = true;
     public bool LogBagChanges { get; set; } = true;
     public bool Loot { get; set; } = true;
+    public bool AssistApproach { get; set; } = true;
+    public bool AssistPull { get; set; } = true;
     public string UnitToFollow { get; set; } = "focus";
     public bool Skin { get; set; }
     public bool Herb { get; set; }

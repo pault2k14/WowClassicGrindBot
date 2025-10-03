@@ -147,11 +147,13 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
+        /* Probably can remove now that we are using classConfig.AssistPull 
         if (classConfig.Mode == Mode.AssistFocus)
         {
             logger.LogInformation("PullTargetGoal: AssistFocus skipping PullTargetGoal");
             return;
         }
+        */
 
         if (PullDurationMs > MAX_PULL_DURATION)
         {

@@ -161,7 +161,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 // The target had a raid icon, and at least one of our
                 // combat actions had a matching raid icon requirement
                 // so we should approach
-                if (foundCrowdControlAction)
+                if (foundCrowdControlAction || classConfig.AssistApproach)
                 {
                     input.PressApproach();
                     wait.Update();

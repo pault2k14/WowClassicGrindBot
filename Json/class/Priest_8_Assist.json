@@ -6,6 +6,8 @@
   "PathFilename": "_pack\\1-20\\Draenei\\1-5_Azuremyst Isle.json",
   "PathThereAndBack": true,
   "PathReduceSteps": true,
+  "AssistPull": false,
+  "AssistApproach": false,
   "RaidIconsToSkipInCombat": [
     5, // Moon
     6, // Square

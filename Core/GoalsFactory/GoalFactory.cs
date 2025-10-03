@@ -124,8 +124,11 @@ public static class GoalFactory
         }
         else if (classConfig.Mode == Mode.AssistFocus)
         {
-            services.AddScoped<GoapGoal, CrowdControlGoal>();
-            services.AddScoped<GoapGoal, PullTargetGoal>();
+            if(classConfig.AssistPull)
+            {
+                services.AddScoped<GoapGoal, PullTargetGoal>();
+            }
+
             services.AddScoped<GoapGoal, ApproachTargetGoal>();
             services.AddScoped<GoapGoal, AssistFocusGoal>();
             services.AddScoped<GoapGoal, PartyMember1Goal>();
@@ -196,11 +199,12 @@ public static class GoalFactory
     private static void ResolveLootAndSkin(IServiceCollection services,
         ClassConfiguration classConfig)
     {
-        services.AddScoped<GoapGoal, ConsumeCorpseGoal>();
-        services.AddScoped<GoapGoal, CorpseConsumedGoal>();
 
         if (classConfig.Loot)
         {
+            services.AddScoped<GoapGoal, ConsumeCorpseGoal>();
+            services.AddScoped<GoapGoal, CorpseConsumedGoal>();
+
             services.AddScoped<GoapGoal, LootGoal>();
 
             if (classConfig.GatherCorpse)
