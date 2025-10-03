@@ -213,7 +213,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 && !playerReader.IsInMeleeRange() 
                 && !keyAction.CrowdControl)
             {
-                // Do we need to stop following the target as well?
                 input.PressFastInteract();
                 wait.Update();
                 continue;
@@ -262,7 +261,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
-        if (bits.SoftInteract_Enabled())
+        if (classConfig.Loot && bits.SoftInteract_Enabled())
         {
             DealWithSoftInteract();
         }
