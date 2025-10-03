@@ -276,7 +276,7 @@ public sealed partial class GoapAgent : IDisposable
             (B(b.Dead()) << (int)GoapKey.isdead) |
             (B(State.LootableCorpseCount > 0) << (int)GoapKey.shouldloot) |
             (B(State.GatherableCorpseCount > 0) << (int)GoapKey.shouldgather) |
-            (B(State.LastCombatKillCount > 0) << (int)GoapKey.producedcorpse) |
+            (classConfig.Loot ? (B(State.LastCombatKillCount > 0) << (int)GoapKey.producedcorpse) : 0 ) |
             (B(State.ShouldConsumeCorpse) << (int)GoapKey.consumecorpse) |
             (B(b.Swimming()) << (int)GoapKey.isswimming) |
             (B(b.Items_Broken()) << (int)GoapKey.itemsbroken) |
