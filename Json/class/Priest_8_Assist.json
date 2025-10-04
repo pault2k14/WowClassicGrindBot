@@ -32,9 +32,12 @@
         "Cost": 1,
         "Cooldown": 250,
         "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
         "Requirements": [
           "PartyMember1Health% < 30",
-          "Mana > 125"
+          "Mana > 125",
+          "TargetAlive",
+          "SpellInRange:8"
         ]
       },
       {
@@ -43,9 +46,12 @@
         "Cost": 2,
         "Cooldown": 500,
         "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
         "Requirements": [
           "PartyMember1Health% < 60",
-          "Mana > 155"
+          "Mana > 155",
+          "TargetAlive",
+          "SpellInRange:8"
         ]
       },
       {
@@ -57,7 +63,9 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 105"
+          "Mana > 105",
+          "TargetAlive",
+          "SpellInRange:10"
         ]
       },
       {
@@ -71,7 +79,9 @@
           "!FocusCombat",
           "Mana% > 70",
           "!Food",
-          "!Drink"
+          "!Drink",
+          "TargetAlive",
+          "SpellInRange:6"
         ]
       },
       {
@@ -85,7 +95,9 @@
           "InCombat",
           "!P1_Shield",
           "!Food",
-          "!Drink"
+          "!Drink",
+          "TargetAlive",
+          "SpellInRange:7"
         ]
       }
     ]
@@ -96,10 +108,13 @@
         "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
         "Cooldown": 500,
         "Requirements": [
           "PartyMember2Health% < 50",
-          "Mana > 155"
+          "Mana > 155",
+          "TargetAlive",
+          "SpellInRange:8"
         ]
       },
       {
@@ -113,7 +128,9 @@
           "!FocusCombat",
           "Mana% > 70",
           "!Food",
-          "!Drink"
+          "!Drink",
+          "TargetAlive",
+          "SpellInRange:6"
         ]
       },
       {
@@ -127,7 +144,9 @@
           "InCombat",
           "!Food",
           "!Drink",
-          "!P2_Shield"
+          "!P2_Shield",
+          "TargetAlive",
+          "SpellInRange:7"
         ]
       }
     ]
@@ -138,10 +157,13 @@
         "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
         "Cooldown": 500,
         "Requirements": [
           "PartyMember3Health% < 50",
-          "Mana > 155"
+          "Mana > 155",
+          "TargetAlive",
+          "SpellInRange:8"
         ]
       },
       {
@@ -155,7 +177,9 @@
           "!FocusCombat",
           "Mana% > 70",
           "!Food",
-          "!Drink"
+          "!Drink",
+          "TargetAlive",
+          "SpellInRange:6"
         ]
       },
       {
@@ -167,7 +191,9 @@
           "PartyMember3Health% < 30",
           "Mana > 80",
           "InCombat",
-          "!P3_Shield"
+          "!P3_Shield",
+          "TargetAlive",
+          "SpellInRange:7"
         ]
       }
     ]
@@ -178,10 +204,13 @@
         "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
         "Cooldown": 500,
         "Requirements": [
           "PartyMember4Health% < 50",
-          "Mana > 155"
+          "Mana > 155",
+          "TargetAlive",
+          "SpellInRange:8"
         ]
       },
       {
@@ -195,7 +224,9 @@
           "!FocusCombat",
           "Mana% > 70",
           "!Food",
-          "!Drink"
+          "!Drink",
+          "TargetAlive",
+          "SpellInRange:6"
         ]
       },
       {
@@ -207,7 +238,9 @@
           "PartyMember4Health% < 30",
           "Mana > 80",
           "InCombat",
-          "!P4_Shield"
+          "!P4_Shield",
+          "TargetAlive",
+          "SpellInRange:7"
         ]
       }
     ]
@@ -229,7 +262,6 @@
         "WhenUsable": true,
         "AfterCastWaitBuff": true,
         "Requirements": [
-
           "MIN_MANA_OFFENSIVE% < Mana%",
           "!Shield"
         ]
@@ -262,6 +294,7 @@
         "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
         "Cooldown": 500,
         "Requirements": [
           "Health% < 60",
@@ -288,8 +321,7 @@
           "Mana > 20",
           "!Shield"
         ]
-      }
-      /*
+      },
       {
         "Name": "Shoot",
         "Key": "4",
@@ -300,7 +332,6 @@
           "SpellInRange:1"
         ]
       }
-      */
       //{
       //  "Name": "Lesser Heal",
       //  "Key": "3",
@@ -355,6 +386,7 @@
         "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
         "Cooldown": 500,
         "Requirements": [
           "Health% < 60",
