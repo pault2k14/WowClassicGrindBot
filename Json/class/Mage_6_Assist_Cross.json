@@ -34,12 +34,27 @@
       {
         "Name": "Arcane Intellect",
         "Key": "8",
-        "Requirement": "!P2_Arcane Intellect",
+        "Requirements": [
+          "!P2_Arcane Intellect",
+          "!InCombat",
+          "!FocusCombat",
+          "!Food",
+          "!Drink"
+        ],
         "Log": false
       }
     ]
   },
   */
+  "Wait": {
+    "Sequence": [
+      {
+        "Cost": 0.9,
+        "Name": "User",
+        "Requirement": "MenuOpen || ChatInputVisible"
+      }
+    ]
+  },
   "Pull": {
     "Sequence": [
       {

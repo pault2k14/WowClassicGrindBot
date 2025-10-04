@@ -7,7 +7,7 @@
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AssistPull": false,
-  "AssistApproach":  false,
+  "AssistApproach": false,
   "RaidIconsToSkipInCombat": [
     5, // Moon
     6, // Square
@@ -35,9 +35,21 @@
         "Key": "8",
         "Requirements": [
           "!P2_Arcane Intellect",
-          "!InCombat"
+          "!InCombat",
+          "!FocusCombat",
+          "!Food",
+          "!Drink"
         ],
         "Log": false
+      }
+    ]
+  },
+  "Wait": {
+    "Sequence": [
+      {
+        "Cost": 0.9,
+        "Name": "User",
+        "Requirement": "MenuOpen || ChatInputVisible"
       }
     ]
   },
@@ -67,7 +79,7 @@
   },
   "Combat": {
     "Sequence": [
-/*
+      /*
       {
         "Name": "Mana Potion",
         "Key": "F9",

@@ -197,7 +197,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
             */
 
-            /* Use the skull icon to force melee range */
+            /* Use the triangle icon to prevent combat to a target */
             if (classConfig.Mode == Mode.AssistFocus
                 && playerReader.hasTriangleIcon)
             {
@@ -222,6 +222,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 .TargetRaidIcon) != -1 && !keyAction.CrowdControl)
             {
                 input.PressStopAttack();
+                wait.Update();
                 continue;
             }
 
@@ -329,6 +330,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogWarning($"Found new combat target of focus.");
             ResetCooldowns();
 
+            wait.Update();
             input.PressTargetFocus();
             input.PressTargetOfTarget();
             wait.Update();

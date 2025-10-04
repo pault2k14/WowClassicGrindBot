@@ -1,4 +1,5 @@
 ﻿using Core.GOAP;
+using Microsoft.Extensions.Logging;
 
 namespace Core.Goals;
 
@@ -6,13 +7,14 @@ public sealed class TargetFocusTargetGoal : GoapGoal
 {
     public override float Cost => 10f;
 
+    private readonly ILogger<TargetFocusTargetGoal> logger;
     private readonly ConfigurableInput input;
     private readonly PlayerReader playerReader;
     private readonly AddonBits bits;
     private readonly Wait wait;
 
     public TargetFocusTargetGoal(ConfigurableInput input, PlayerReader playerReader,
-        AddonBits bits, ClassConfiguration classConfig, Wait wait)
+        AddonBits bits, ClassConfiguration classConfig, Wait wait, ILogger<TargetFocusTargetGoal> logger)
         : base(nameof(TargetFocusTargetGoal))
     {
         this.input = input;
@@ -34,6 +36,7 @@ public sealed class TargetFocusTargetGoal : GoapGoal
 
         AddPrecondition(GoapKey.hasfocus, true);
         AddPrecondition(GoapKey.focushastarget, true);
+        this.logger = logger;
     }
 
     public override bool CanRun()
@@ -64,6 +67,7 @@ public sealed class TargetFocusTargetGoal : GoapGoal
         }
         else if (playerReader.SpellInRange.FocusTarget_Trade)
         {
+            logger.LogInformation("TargetFocusTargetGoal: FocusTarget Not Hostile, Pressing Interact");
             input.PressTargetFocus();
             input.PressTargetOfTarget();
             input.PressInteract();

@@ -3,9 +3,9 @@
   "Mode": "AssistFocus",
   "Loot": false,
   "UnitToFollow": "party1",
-  "PathFilename": "_pack\\1-20\\Draenei\\1-5_Azuremyst Isle.json",
+  "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
-  "PathReduceSteps": true,
+  "PathReduceSteps": false,
   "AssistPull": false,
   "AssistApproach": false,
   "RaidIconsToSkipInCombat": [
@@ -68,6 +68,7 @@
         "Requirements": [
           "!P1_Fortitude",
           "!InCombat",
+          "!FocusCombat",
           "Mana% > 70",
           "!Food",
           "!Drink"
@@ -82,7 +83,9 @@
           "PartyMember1Health% < 30",
           "Mana > 80",
           "InCombat",
-          "!P1_Shield"
+          "!P1_Shield",
+          "!Food",
+          "!Drink"
         ]
       }
     ]
@@ -107,6 +110,7 @@
         "Requirements": [
           "!P2_Fortitude",
           "!InCombat",
+          "!FocusCombat",
           "Mana% > 70",
           "!Food",
           "!Drink"
@@ -121,6 +125,8 @@
           "PartyMember2Health% < 30",
           "Mana > 80",
           "InCombat",
+          "!Food",
+          "!Drink",
           "!P2_Shield"
         ]
       }
@@ -146,6 +152,7 @@
         "Requirements": [
           "!P3_Fortitude",
           "!InCombat",
+          "!FocusCombat",
           "Mana% > 70",
           "!Food",
           "!Drink"
@@ -185,6 +192,7 @@
         "Requirements": [
           "!P4_Fortitude",
           "!InCombat",
+          "!FocusCombat",
           "Mana% > 70",
           "!Food",
           "!Drink"
@@ -350,7 +358,9 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 60",
-          "Mana > 155"
+          "Mana > 155",
+          "!Food",
+          "!Drink"
         ]
       },
       {
