@@ -172,11 +172,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         */
 
         bool crowdControlAction = false;
+        bool foundValidCrowdControlAction = false;
         bool successfulCast = false;
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
             crowdControlAction = false;
+            foundValidCrowdControlAction = false;
             successfulCast = false;
             KeyAction keyAction = span[i];
 
@@ -242,6 +244,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     waitForTargetChange();
                     continue;
                 }
+                else
+                {
+                    foundValidCrowdControlAction = true;
+                }
             }
 
             logger.LogInformation("Update keyAction.CanRun(): " + keyAction.CanRun());
@@ -251,7 +257,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 && !keyAction.CrowdControl) || 
                 (classConfig.RaidIconsToSkipInCombat
                 .IndexOf(playerReader.TargetRaidIcon()) != -1 
-                && keyAction.CrowdControl && !keyAction.CanRun()))
+                && keyAction.CrowdControl && !foundValidCrowdControlAction))
             {
                 logger.LogInformation("Target has crowd control icon, but I don't have the right kind of crowd control");
                 input.PressStopAttack();
