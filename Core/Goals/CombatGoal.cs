@@ -205,7 +205,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if (classConfig.Mode == Mode.AssistFocus
                 && playerReader.hasTriangleIcon)
             {
-
                 input.PressClearTarget();
                 wait.Update();
                 return;
@@ -241,8 +240,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if (keyAction.CrowdControl)
             {
                 crowdControlAction = keyAction.CrowdControl;
+                logger.LogInformation("Checking Crowd Control");
                 if (!CheckCrowdControl(keyAction))
                 {
+                    logger.LogInformation("No crowd control mobs found, targeting focus target");
                     waitForTargetChange();
                     input.PressTargetFocus();
                     input.PressTargetOfTarget();
@@ -395,7 +396,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     public bool CheckCrowdControl(KeyAction item)
     {
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
-        int currentTargetGuid = playerReader.TargetGuid;
+        // Add current target
+        unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
 
         /* Tab through all nearby hostile units recording their GUID
          * if we find a mob with a raid icon add it to list of targets  
@@ -427,7 +429,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     public bool CheckNonFocusAttack()
     {
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
-        int currentTargetGuid = playerReader.TargetGuid;
+        // Add current target
+        unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
 
         /* Tab through all nearby hostile units recording their GUID
          * if we find a mob with a raid icon add it to list of targets  
@@ -438,7 +441,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         for (int x = 0; x < 10; x++)
         {
             input.PressNearestTarget();
-            wait.Update();
+            waitForTargetChange();
 
             if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
             {
