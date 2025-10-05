@@ -181,9 +181,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             crowdControlAction = false;
             foundValidCrowdControlAction = false;
             successfulCast = false;
-            originalTargetHasRaidIcon = playerReader.TargetRaidIcon() != 0 
-                && classConfig.RaidIconsToSkipInCombat
-                .IndexOf(playerReader.TargetRaidIcon()) != 1;
+            originalTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
+                .IndexOf(playerReader.TargetRaidIcon()) != -1;
             KeyAction keyAction = span[i];
 
             // Use specific raid icons to force attacking of a non focus target
