@@ -163,15 +163,15 @@ public sealed partial class RequirementFactory
             { "InCombatRange", playerReader.WithInCombatRange },
 
             // Raid Icon
-            { "HasNoIcon", () => playerReader.hasNoIcon },
-            { "HasStarIcon", () => playerReader.hasStarIcon },
-            { "HasCircleIcon", () => playerReader.hasCircleIcon },
-            { "HasDiamondIcon", () => playerReader.hasDiamondIcon },
-            { "HasTriangleIcon", () => playerReader.hasTriangleIcon },
-            { "HasMoonIcon", () => playerReader.hasMoonIcon },
-            { "HasSquareIcon", () => playerReader.hasSquareIcon },
-            { "HasCrossIcon", () => playerReader.hasCrossIcon },
-            { "HasSkullIcon", () => playerReader.hasSkullIcon },
+            { "HasNoIcon", playerReader.hasNoIcon },
+            { "HasStarIcon", playerReader.hasStarIcon },
+            { "HasCircleIcon", playerReader.hasCircleIcon },
+            { "HasDiamondIcon", playerReader.hasDiamondIcon },
+            { "HasTriangleIcon", playerReader.hasTriangleIcon },
+            { "HasMoonIcon", playerReader.hasMoonIcon },
+            { "HasSquareIcon", playerReader.hasSquareIcon },
+            { "HasCrossIcon", playerReader.hasCrossIcon },
+            { "HasSkullIcon", playerReader.hasSkullIcon },
             
 
 

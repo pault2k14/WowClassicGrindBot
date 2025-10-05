@@ -125,8 +125,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 // HasCrossIcon 7
                 bool foundCrowdControlAction = false;
                 string? raidIconRequirement = null;
-                int targetRaidIcon = classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
-                .TargetRaidIcon);
+                int targetRaidIcon = classConfig.RaidIconsToSkipInCombat
+                    .IndexOf(playerReader.TargetRaidIcon());
 
                 if(targetRaidIcon == 5)
                 {

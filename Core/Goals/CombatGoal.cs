@@ -203,7 +203,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             /* Use the triangle icon to prevent combat to a target */
             if (classConfig.Mode == Mode.AssistFocus
-                && playerReader.hasTriangleIcon)
+                && playerReader.hasTriangleIcon())
             {
                 input.PressClearTarget();
                 wait.Update();
@@ -212,7 +212,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             /* Use the skull icon to force melee range */
             if (classConfig.Mode == Mode.AssistFocus
-                && playerReader.hasSkullIcon 
+                && playerReader.hasSkullIcon() 
                 && !playerReader.IsInMeleeRange() 
                 && !keyAction.CrowdControl)
             {
@@ -245,10 +245,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
 
             if ((classConfig.RaidIconsToSkipInCombat
-                .IndexOf(playerReader.TargetRaidIcon) != -1 
+                .IndexOf(playerReader.TargetRaidIcon()) != -1 
                 && !keyAction.CrowdControl) || 
                 (classConfig.RaidIconsToSkipInCombat
-                .IndexOf(playerReader.TargetRaidIcon) != -1 
+                .IndexOf(playerReader.TargetRaidIcon()) != -1 
                 && keyAction.CrowdControl && !keyAction.CanRun()))
             {
                 logger.LogInformation("Target has crowd control icon, but I don't have the right kind of crowd control");
@@ -333,7 +333,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetOfTarget();
             wait.Update();
 
-            if(classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon) != -1)
+            if(classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
             {
                 input.PressClearTarget();
                 wait.Update();
@@ -354,7 +354,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetOfTarget();
             waitForTargetChange();
 
-            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon) != -1)
+            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
             {
                 input.PressClearTarget();
                 wait.Update();
@@ -374,7 +374,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())
             {
-                if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon) != -1)
+                if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
                 {
                     input.PressClearTarget();
                     wait.Update();
@@ -402,7 +402,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     {
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
         // Add current target
-        unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
+        unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
 
         /* Tab through all nearby hostile units recording their GUID
          * if we find a mob with a raid icon add it to list of targets  
@@ -425,7 +425,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 break;
             }
 
-            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
+            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
         }
 
         return false;
@@ -435,7 +435,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     {
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
         // Add current target
-        unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
+        unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
 
         /* Tab through all nearby hostile units recording their GUID
          * if we find a mob with a raid icon add it to list of targets  
@@ -449,7 +449,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             waitForTargetChange();
 
             if (bits.Target_Alive() && classConfig.RaidIconsToAttackWithoutFocus
-    .Contains(playerReader.TargetRaidIcon))
+    .Contains(playerReader.TargetRaidIcon()))
             {
                 //logger.LogInformation("CombatGoals: Found RaidIconsToAttackWithoutFocus");
                 return true;
@@ -460,7 +460,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 break;
             }
 
-            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
+            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
         }
 
         return false;
