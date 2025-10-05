@@ -410,17 +410,17 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressNearestTarget();
             waitForTargetChange();
 
+            if (bits.Target_Alive() && item.CanRun())
+            {
+                return true;
+            }
+
             if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
             {
                 break;
             }
 
             unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
-
-            if(bits.Target_Alive() && item.CanRun())
-            {
-                return true;
-            }
         }
 
         return false;
@@ -443,19 +443,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressNearestTarget();
             waitForTargetChange();
 
+            if (bits.Target_Alive() && classConfig.RaidIconsToAttackWithoutFocus
+    .Contains(playerReader.TargetRaidIcon))
+            {
+                //logger.LogInformation("CombatGoals: Found RaidIconsToAttackWithoutFocus");
+                return true;
+            }
+
             if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
             {
                 break;
             }
 
             unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon);
-
-            if (bits.Target_Alive() && classConfig.RaidIconsToAttackWithoutFocus
-                .Contains(playerReader.TargetRaidIcon))
-            {
-                //logger.LogInformation("CombatGoals: Found RaidIconsToAttackWithoutFocus");
-                return true;
-            }
         }
 
         return false;
