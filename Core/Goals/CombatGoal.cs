@@ -235,7 +235,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     
             if(keyAction.CrowdControl)
             {
-                crowdControlAction = true;
+                crowdControlAction = keyAction.CrowdControl;
                 if (!CheckCrowdControl(keyAction))
                 {
                     waitForTargetChange();
