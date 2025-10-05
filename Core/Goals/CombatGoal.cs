@@ -185,6 +185,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 .IndexOf(playerReader.TargetRaidIcon()) != -1;
             KeyAction keyAction = span[i];
 
+            logger.LogInformation("Update originalTargetHasRaidIcon: " + originalTargetHasRaidIcon);
+            logger.LogInformation("Update playerReader.TargetRaidIcon(): " + playerReader.TargetRaidIcon());
+
+
             // Use specific raid icons to force attacking of a non focus target
             /*
             if (classConfig.Mode == Mode.AssistFocus
@@ -264,6 +268,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
                 continue;
             }
+
+            logger.LogInformation("Update originalTargetHasRaidIcon #2: " + originalTargetHasRaidIcon);
+
 
             bool interrupt() => bits.Target_Alive() && keyAction.CanBeInterrupted();
 
