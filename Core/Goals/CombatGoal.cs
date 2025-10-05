@@ -174,12 +174,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool crowdControlAction = false;
         bool foundValidCrowdControlAction = false;
         bool successfulCast = false;
-        ReadOnlySpan<KeyAction> span = Keys;
+        bool originalTargetHasRaidIcon = false;
+        ReadOnlySpan <KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
             crowdControlAction = false;
             foundValidCrowdControlAction = false;
             successfulCast = false;
+            originalTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
+                .IndexOf(playerReader.TargetRaidIcon()) != 1;
             KeyAction keyAction = span[i];
 
             // Use specific raid icons to force attacking of a non focus target
@@ -231,7 +234,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("keyAction.Name: " + keyAction.Name);
             logger.LogInformation("keyAction.CrowdControl: " + keyAction.CrowdControl);
 
-            if (keyAction.CrowdControl)
+            if (keyAction.CrowdControl && originalTargetHasRaidIcon)
             {
                 crowdControlAction = keyAction.CrowdControl;
                 logger.LogInformation("Checking Crowd Control");
@@ -252,12 +255,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             logger.LogInformation("Update keyAction.CanRun(): " + keyAction.CanRun());
 
-            if ((classConfig.RaidIconsToSkipInCombat
-                .IndexOf(playerReader.TargetRaidIcon()) != -1 
-                && !keyAction.CrowdControl) || 
-                (classConfig.RaidIconsToSkipInCombat
-                .IndexOf(playerReader.TargetRaidIcon()) != -1 
-                && keyAction.CrowdControl && !foundValidCrowdControlAction))
+            // We Don't have the correct kind of crowd control continue on 
+            if ((originalTargetHasRaidIcon && !keyAction.CrowdControl) || 
+                (originalTargetHasRaidIcon && keyAction.CrowdControl && !foundValidCrowdControlAction))
             {
                 logger.LogInformation("Target has crowd control icon, but I don't have the right kind of crowd control");
                 input.PressStopAttack();
