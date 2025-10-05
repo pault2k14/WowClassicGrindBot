@@ -226,8 +226,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 continue;
             }
 
-            logger.LogInformation("keyAction.Name" + keyAction.Name);
-            logger.LogInformation("keyAction.CrowdControl " + keyAction.CrowdControl);
+            logger.LogInformation("keyAction.Name: " + keyAction.Name);
+            logger.LogInformation("keyAction.CrowdControl: " + keyAction.CrowdControl);
 
             if (keyAction.CrowdControl)
             {
@@ -243,6 +243,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     continue;
                 }
             }
+
+            logger.LogInformation("Update keyAction.CanRun(): " + keyAction.CanRun());
 
             if ((classConfig.RaidIconsToSkipInCombat
                 .IndexOf(playerReader.TargetRaidIcon()) != -1 
@@ -415,13 +417,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressNearestTarget();
             waitForTargetChange();
 
+            logger.LogInformation("CheckCrowdControl playerReader.TargetGuid: " + playerReader.TargetGuid);
+            logger.LogInformation("CheckCrowdControl playerReader.TargetRaidIcon(): " + playerReader.TargetRaidIcon());
+            logger.LogInformation("CheckCrowdControl item.CanRun(): " + item.CanRun());
+
             if (bits.Target_Alive() && item.CanRun())
             {
+                logger.LogInformation("CheckCrowdControl target alive and CanRun true");
                 return true;
             }
 
             if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
             {
+                logger.LogInformation("CheckCrowdControl Found the same target as we saw before break");
                 break;
             }
 
