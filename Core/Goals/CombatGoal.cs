@@ -221,14 +221,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 continue;
             }
 
-            if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
-                .TargetRaidIcon) != -1 && !keyAction.CrowdControl)
-            {
-                input.PressStopAttack();
-                wait.Update();
-                continue;
-            }
-
             if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
             {
                 continue;
@@ -251,7 +243,20 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     continue;
                 }
             }
-            
+
+            if ((classConfig.RaidIconsToSkipInCombat
+                .IndexOf(playerReader.TargetRaidIcon) != -1 
+                && !keyAction.CrowdControl) || 
+                (classConfig.RaidIconsToSkipInCombat
+                .IndexOf(playerReader.TargetRaidIcon) != -1 
+                && keyAction.CrowdControl && !keyAction.CanRun()))
+            {
+                logger.LogInformation("Target has crowd control icon, but I don't have the right kind of crowd control");
+                input.PressStopAttack();
+                wait.Update();
+                continue;
+            }
+
             bool interrupt() => bits.Target_Alive() && keyAction.CanBeInterrupted();
 
             if (castingHandler.CastIfReady(keyAction, interrupt))
