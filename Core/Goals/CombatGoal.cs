@@ -181,7 +181,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             crowdControlAction = false;
             foundValidCrowdControlAction = false;
             successfulCast = false;
-            originalTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
+            originalTargetHasRaidIcon = playerReader.TargetRaidIcon() != 0 
+                && classConfig.RaidIconsToSkipInCombat
                 .IndexOf(playerReader.TargetRaidIcon()) != 1;
             KeyAction keyAction = span[i];
 
