@@ -38,7 +38,9 @@
           "!InCombat",
           "!FocusCombat",
           "!Food",
-          "!Drink"
+          "!Drink",
+          "TargetAlive",
+          "SpellInRange:1"
         ],
         "Log": false
       }

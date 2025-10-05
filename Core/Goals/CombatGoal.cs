@@ -3,10 +3,12 @@
 using Game;
 
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
 using SharedLib;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading;
 
 namespace Core.Goals;
 
@@ -236,10 +238,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 crowdControlAction = true;
                 if (!CheckCrowdControl(keyAction))
                 {
-                    wait.Update();
+                    waitForTargetChange();
                     input.PressTargetFocus();
                     input.PressTargetOfTarget();
-                    wait.Update();
+                    waitForTargetChange();
                     continue;
                 }
             }
@@ -294,6 +296,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         }
     }
 
+    private void waitForTargetChange()
+    {
+        int totalTime = playerReader.GCD.Value + playerReader.NetworkLatency;
+        wait.Update(totalTime);
+    }
+
     private void FindPossibleThreats()
     {
         if (bits.Pet_Defensive())
@@ -330,10 +338,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogWarning($"Found new combat target of focus.");
             ResetCooldowns();
 
-            wait.Update();
+            waitForTargetChange();
             input.PressTargetFocus();
             input.PressTargetOfTarget();
-            wait.Update();
+            waitForTargetChange();
 
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon) != -1)
             {
@@ -393,7 +401,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         for (int x = 0; x < 10; x++)
         {
             input.PressNearestTarget();
-            wait.Update();
+            waitForTargetChange();
 
             if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
             {
