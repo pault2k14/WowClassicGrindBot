@@ -176,6 +176,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
+            crowdControlAction = false;
+            successfulCast = false;
             KeyAction keyAction = span[i];
 
             // Use specific raid icons to force attacking of a non focus target
@@ -232,8 +234,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 continue;
             }
-                    
-            if(keyAction.CrowdControl)
+
+            logger.LogInformation("keyAction.Name" + keyAction.Name);
+            logger.LogInformation("keyAction.CrowdControl " + keyAction.CrowdControl);
+
+            if (keyAction.CrowdControl)
             {
                 crowdControlAction = keyAction.CrowdControl;
                 if (!CheckCrowdControl(keyAction))
