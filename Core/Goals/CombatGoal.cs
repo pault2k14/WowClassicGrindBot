@@ -428,10 +428,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     public bool CheckCrowdControl(KeyAction item)
     {
+        int originalTargetGuid = playerReader.TargetGuid;
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
+        
         // Add current target
         unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
-
+        
         /* Tab through all nearby hostile units recording their GUID
          * if we find a mob with a raid icon add it to list of targets  
          */
@@ -441,7 +443,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         for (int x = 0; x < 10; x++)
         {
             input.PressNearestTarget();
-            waitForTargetChange();
+            wait.Update();
+            //waitForTargetChange();
 
             logger.LogInformation("CheckCrowdControl playerReader.TargetGuid: " + playerReader.TargetGuid);
             logger.LogInformation("CheckCrowdControl playerReader.TargetRaidIcon(): " + playerReader.TargetRaidIcon());
@@ -460,6 +463,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
 
             unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
+        }
+
+        if (playerReader.TargetGuid != originalTargetGuid)
+        {
+            input.PressClearTarget();
         }
 
         return false;
