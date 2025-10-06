@@ -108,6 +108,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     public override void OnEnter()
     {
+        logger.LogInformation("OnEnter enter CombatGoals");
+
         if (mountHandler.IsMounted())
         {
             mountHandler.Dismount();
@@ -118,6 +120,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
+        logger.LogInformation("OnExit leave CombatGoals");
+
         if (combatLog.DamageTakenCount() > 0 && !bits.Target())
         {
             stopMoving.Stop();
@@ -127,6 +131,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     public override void Update()
     {
         wait.Update();
+        logger.LogInformation("Update: Re-enter CombatGoal");
+        logger.LogInformation("Update  Re-enter playerReader.TargetId: " + playerReader.TargetId);
+        logger.LogInformation("Update  Re-enter playerReader.TargetGuid: " + playerReader.TargetGuid);
+        logger.LogInformation("Update  Re-enter playerReader.TargetRaidIcon(): " + playerReader.TargetRaidIcon());
 
         if (MathF.Abs(lastDirection - playerReader.Direction) > MathF.PI / 2)
         {
@@ -180,8 +188,18 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         ReadOnlySpan <KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
+            logger.LogInformation("CombatGoals Update Top of loop");
             // Will this fix the timing issue?
             wait.Update();
+
+            if(classConfig.Mode == Mode.AssistFocus && playerReader.TargetGuid != playerReader.FocusTargetGuid)
+            {
+                logger.LogInformation("targetGuid not equal to FocusTargetGuid");
+                wait.Update();
+                input.PressTargetFocus();
+                input.PressTargetOfTarget();
+                wait.Update();
+            }
 
             int originalTargetGuid = playerReader.TargetGuid;
             currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
@@ -254,6 +272,93 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 if (!CheckCrowdControl(keyAction))
                 {
                     logger.LogInformation("No valid crowd control mobs found for this action.");
+
+                    if(playerReader.TargetGuid != playerReader.FocusTargetGuid
+                        || !bits.Target() || (bits.Target() && bits.Target_Dead()))
+                    {
+                        if(!bits.Target())
+                        {
+                            logger.LogInformation("No Target returning.");
+                        }
+                        else if(bits.Target() && bits.Target_Dead()) {
+                            logger.LogInformation("We have a target but it's dead returning");
+                        }
+                        else if(playerReader.TargetGuid != playerReader.FocusTargetGuid)
+                        {
+                            logger.LogInformation("target is not the same as focus returning");
+                        }
+
+                        return;
+                    }
+
+                    currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
+                .IndexOf(playerReader.TargetRaidIcon()) != -1;
+
+                    logger.LogInformation("Post CheckCrowdControl: Ready to continue");
+                    logger.LogInformation("Post CheckCrowdControl TargetId: " + playerReader.TargetId);
+                    logger.LogInformation("Post CheckCrowdControl playerReader.TargetGuid: " + playerReader.TargetGuid);
+                    logger.LogInformation("Post CheckCrowdControl currentTargetHasRaidIcon: " + currentTargetHasRaidIcon);
+                    logger.LogInformation("Post CheckCrowdControl playerReader.TargetRaidIcon(): " + playerReader.TargetRaidIcon());
+                    logger.LogInformation("Post CheckCrowdControl playerReader.FocusTargetGuid: " + playerReader.FocusTargetGuid);
+
+                    continue;
+
+                    /*
+                    if(playerReader.TargetGuid != playerReader.FocusTargetGuid)
+                    {
+                        int targetAttempts = 0;
+                        logger.LogInformation("Update(): My target is not the same as the focus target, try to target focus");
+                        wait.Update();
+
+                        while (playerReader.TargetGuid != playerReader.FocusGuid)
+                        {
+                            input.PressTargetFocus();
+                            wait.Update();
+                            targetAttempts = targetAttempts + 1;
+                        }
+
+                        targetAttempts = 0;
+
+                        logger.LogInformation("Update(): Target is now focus");
+                        wait.Update();
+
+                        logger.LogInformation("Update(): My target is not the same as the focus target, try to target focus target");
+
+                        while (playerReader.TargetGuid != playerReader.FocusTargetGuid && targetAttempts < 4)
+                        {
+                            input.PressTargetOfTarget();
+                            wait.Update();
+                            targetAttempts = targetAttempts + 1;
+                        }
+
+                        targetAttempts = 0;
+
+                        logger.LogInformation("Update(): Target is now target focus target");
+                        wait.Update();
+
+                        
+                        //while (playerReader.TargetGuid != playerReader.FocusTargetGuid)
+                        //{
+                        //    logger.LogInformation("Update(): Attempt to target focus target");
+                        //    wait.Update();
+                        //    input.PressTargetFocus();
+                        //    input.PressTargetOfTarget();
+                        //    wait.Update();
+                       // }
+                       
+                }
+                */
+                    /*
+                    if (!bits.Target() || (bits.Target() && bits.Target_Dead()))
+                    {
+                        logger.LogInformation("Update(): I don't have a valid target, try to return");
+                        input.PressTargetFocus();
+                        input.PressTargetOfTarget();
+                        wait.Update();
+                        return;
+                    }
+                    */
+
                     /*
                     waitForTargetChange();
                     input.PressTargetFocus();
@@ -262,7 +367,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     */
                     // Timing issue after changing targets
                     //wait.Update(1000);
-                    continue;
+                    //continue;
                 }
                 else
                 {
@@ -278,6 +383,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 (currentTargetHasRaidIcon && keyAction.CrowdControl && !foundValidCrowdControlAction))
             {
                 logger.LogInformation("Target has crowd control icon, but I don't have the right kind of crowd control");
+                wait.Update();
                 input.PressStopAttack();
                 wait.Update();
                 continue;
@@ -299,12 +405,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         if (crowdControlAction && successfulCast)
         {
             logger.LogInformation("Clear target of crowdcontrol");
+            wait.Update();
             input.PressClearTarget();
             wait.Update();
         }
 
         if (classConfig.Loot && bits.SoftInteract_Enabled())
         {
+            logger.LogInformation("Deal with soft interact");
             DealWithSoftInteract();
         }
 
@@ -329,6 +437,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             else
             {
                 logger.LogInformation("No damage taken, clear target.");
+                wait.Update();
                 input.PressClearTarget();
                 wait.Update();
             }
@@ -363,6 +472,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if(classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
             {
+                wait.Update();
                 input.PressClearTarget();
                 wait.Update();
             }
@@ -377,13 +487,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogWarning($"Found new combat target of focus.");
             ResetCooldowns();
 
-            waitForTargetChange();
+            wait.Update();
             input.PressTargetFocus();
             input.PressTargetOfTarget();
-            waitForTargetChange();
+            wait.Update();
 
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
             {
+                wait.Update();
                 input.PressClearTarget();
                 wait.Update();
             }
@@ -442,9 +553,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         for (int x = 0; x < 10; x++)
         {
+            logger.LogInformation("CheckCrowdControl Top of loop");
+            wait.Update();
             input.PressNearestTarget();
             wait.Update();
-            //waitForTargetChange();
 
             logger.LogInformation("CheckCrowdControl playerReader.TargetGuid: " + playerReader.TargetGuid);
             logger.LogInformation("CheckCrowdControl playerReader.TargetRaidIcon(): " + playerReader.TargetRaidIcon());
@@ -467,7 +579,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         if (playerReader.TargetGuid != originalTargetGuid)
         {
+            logger.LogInformation("CheckCrowdControl exiting function, targetGuid and originalTargetGuid not the same, clear target!");
+            wait.Update();
             input.PressClearTarget();
+            wait.Update();
         }
 
         return false;
