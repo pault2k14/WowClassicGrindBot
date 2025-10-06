@@ -174,18 +174,27 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool crowdControlAction = false;
         bool foundValidCrowdControlAction = false;
         bool successfulCast = false;
-        bool originalTargetHasRaidIcon = false;
+        bool currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
+                .IndexOf(playerReader.TargetRaidIcon()) != -1;
+
         ReadOnlySpan <KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
+            // Will this fix the timing issue?
+            wait.Update();
+
+            int originalTargetGuid = playerReader.TargetGuid;
+            currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
+                .IndexOf(playerReader.TargetRaidIcon()) != -1;
             crowdControlAction = false;
             foundValidCrowdControlAction = false;
             successfulCast = false;
-            originalTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
-                .IndexOf(playerReader.TargetRaidIcon()) != -1;
+
             KeyAction keyAction = span[i];
 
-            logger.LogInformation("Update originalTargetHasRaidIcon: " + originalTargetHasRaidIcon);
+            logger.LogInformation("Update playerReader.TargetId: " + playerReader.TargetId);
+            logger.LogInformation("Update playerReader.TargetGuid: " + playerReader.TargetGuid);
+            logger.LogInformation("Update currentTargetHasRaidIcon: " + currentTargetHasRaidIcon);
             logger.LogInformation("Update playerReader.TargetRaidIcon(): " + playerReader.TargetRaidIcon());
 
 
@@ -238,21 +247,26 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("keyAction.Name: " + keyAction.Name);
             logger.LogInformation("keyAction.CrowdControl: " + keyAction.CrowdControl);
 
-            if (keyAction.CrowdControl && originalTargetHasRaidIcon)
+            if (keyAction.CrowdControl)
             {
                 crowdControlAction = keyAction.CrowdControl;
                 logger.LogInformation("Checking Crowd Control");
                 if (!CheckCrowdControl(keyAction))
                 {
-                    logger.LogInformation("No crowd control mobs found, targeting focus target");
+                    logger.LogInformation("No valid crowd control mobs found for this action.");
+                    /*
                     waitForTargetChange();
                     input.PressTargetFocus();
                     input.PressTargetOfTarget();
                     waitForTargetChange();
+                    */
+                    // Timing issue after changing targets
+                    //wait.Update(1000);
                     continue;
                 }
                 else
                 {
+                    currentTargetHasRaidIcon = true;
                     foundValidCrowdControlAction = true;
                 }
             }
@@ -260,8 +274,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("Update keyAction.CanRun(): " + keyAction.CanRun());
 
             // We Don't have the correct kind of crowd control continue on 
-            if ((originalTargetHasRaidIcon && !keyAction.CrowdControl) || 
-                (originalTargetHasRaidIcon && keyAction.CrowdControl && !foundValidCrowdControlAction))
+            if ((currentTargetHasRaidIcon && !keyAction.CrowdControl) || 
+                (currentTargetHasRaidIcon && keyAction.CrowdControl && !foundValidCrowdControlAction))
             {
                 logger.LogInformation("Target has crowd control icon, but I don't have the right kind of crowd control");
                 input.PressStopAttack();
@@ -269,8 +283,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 continue;
             }
 
-            logger.LogInformation("Update originalTargetHasRaidIcon #2: " + originalTargetHasRaidIcon);
-
+            logger.LogInformation("Update currentTargetHasRaidIcon #2: " + currentTargetHasRaidIcon);
 
             bool interrupt() => bits.Target_Alive() && keyAction.CanBeInterrupted();
 
