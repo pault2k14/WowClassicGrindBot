@@ -36,8 +36,7 @@
         "Requirements": [
           "PartyMember1Health% < 30",
           "Mana > 125",
-          "TargetAlive",
-          "SpellInRange:8"
+          "TargetAlive"
         ]
       },
       {
@@ -50,8 +49,7 @@
         "Requirements": [
           "PartyMember1Health% < 60",
           "Mana > 155",
-          "TargetAlive",
-          "SpellInRange:8"
+          "TargetAlive"
         ]
       },
       {
@@ -64,8 +62,8 @@
           "!P1_Renew",
           "PartyMember1Health% < 45",
           "Mana > 105",
-          "TargetAlive",
-          "SpellInRange:10"
+          "TargetAlive"
+
         ]
       },
       {
@@ -80,8 +78,7 @@
           "Mana% > 70",
           "!Food",
           "!Drink",
-          "TargetAlive",
-          "SpellInRange:6"
+          "TargetAlive"
         ]
       },
       {
@@ -96,8 +93,7 @@
           "!P1_Shield",
           "!Food",
           "!Drink",
-          "TargetAlive",
-          "SpellInRange:7"
+          "TargetAlive"
         ]
       }
     ]
@@ -113,8 +109,7 @@
         "Requirements": [
           "PartyMember2Health% < 50",
           "Mana > 155",
-          "TargetAlive",
-          "SpellInRange:8"
+          "TargetAlive"
         ]
       },
       {
@@ -129,8 +124,7 @@
           "Mana% > 70",
           "!Food",
           "!Drink",
-          "TargetAlive",
-          "SpellInRange:6"
+          "TargetAlive"
         ]
       },
       {
@@ -145,8 +139,7 @@
           "!Food",
           "!Drink",
           "!P2_Shield",
-          "TargetAlive",
-          "SpellInRange:7"
+          "TargetAlive"
         ]
       }
     ]
@@ -162,8 +155,7 @@
         "Requirements": [
           "PartyMember3Health% < 50",
           "Mana > 155",
-          "TargetAlive",
-          "SpellInRange:8"
+          "TargetAlive"
         ]
       },
       {
@@ -178,8 +170,7 @@
           "Mana% > 70",
           "!Food",
           "!Drink",
-          "TargetAlive",
-          "SpellInRange:6"
+          "TargetAlive"
         ]
       },
       {
@@ -192,8 +183,7 @@
           "Mana > 80",
           "InCombat",
           "!P3_Shield",
-          "TargetAlive",
-          "SpellInRange:7"
+          "TargetAlive"
         ]
       }
     ]
@@ -209,8 +199,7 @@
         "Requirements": [
           "PartyMember4Health% < 50",
           "Mana > 155",
-          "TargetAlive",
-          "SpellInRange:8"
+          "TargetAlive"
         ]
       },
       {
@@ -225,8 +214,7 @@
           "Mana% > 70",
           "!Food",
           "!Drink",
-          "TargetAlive",
-          "SpellInRange:6"
+          "TargetAlive"
         ]
       },
       {
@@ -239,8 +227,7 @@
           "Mana > 80",
           "InCombat",
           "!P4_Shield",
-          "TargetAlive",
-          "SpellInRange:7"
+          "TargetAlive"
         ]
       }
     ]
