@@ -54,6 +54,30 @@ public interface IAddonDataProvider : IDisposable
         return Data[index] / 100000f;
     }
 
+    string GetString(int index, int take)
+    {
+        int color = GetInt(index);
+
+        // If you want a safety check, keep it generous.
+        // Max with radix 10000/100/1 and value <=100 is 1,010,100.
+        if ((uint)color > 1_010_100)
+            return string.Empty;
+
+        int n1 = color / 10000;
+        int n2 = (color / 100) % 100;
+        int n3 = color % 100;
+
+        Span<char> slots = stackalloc char[3];
+        slots[0] = (char)n1;
+        slots[1] = (char)n2;
+        slots[2] = (char)n3;
+
+        // Lua right-aligns shorter chunks, so take from the end.
+        int start = 3 - take;
+        return new string(slots.Slice(start, take));
+    }
+
+    
     string GetString(int index)
     {
         int color = GetInt(index);
@@ -73,4 +97,5 @@ public interface IAddonDataProvider : IDisposable
 
         return buffer[..count].ToString();
     }
+    
 }

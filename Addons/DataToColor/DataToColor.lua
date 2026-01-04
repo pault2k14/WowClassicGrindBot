@@ -193,8 +193,11 @@ DataToColor.CombatDamageTakenQueue = DataToColor.TimedQueue:new(COMBAT_LOG_ITERA
 DataToColor.CombatCreatureDiedQueue = DataToColor.TimedQueue:new(COMBAT_LOG_ITERATION_FRAME_CHANGE_RATE, 0)
 DataToColor.CombatMissTypeQueue = DataToColor.TimedQueue:new(COMBAT_LOG_ITERATION_FRAME_CHANGE_RATE, 0)
 
-DataToColor.ChatQueue = DataToColor.TimedQueue:new(CHAT_ITERATION_FRAME_CHANGE_RATE, 0)
+DataToColor.ChatQueue = DataToColor.TimedQueue:new(0, 0)
 local chatMsgHead = -2
+local chatMsgId = 0
+local HOLD_SECONDS = 0.05     -- 50ms per chunk; tune 0.03–0.10
+local chatNextAdvance = 0
 
 DataToColor.playerPetSummons = {}
 
@@ -1088,27 +1091,56 @@ function DataToColor:CreateFrames()
             if not e then
                 Pixel(int, 0, 98)
                 Pixel(int, 0, 99)
+                chatMsgHead = 1
+                chatNextAdvance = 0
             else
-                chatMsgHead = chatMsgHead + 3
+                if chatMsgHead == nil or chatMsgHead < 1 then chatMsgHead = 1 end
+
+                local now = GetTime()
+                if chatNextAdvance == 0 then
+                    chatNextAdvance = now + HOLD_SECONDS
+                end
+
+                -- advance only when enough time has passed
+                if now >= chatNextAdvance then
+                    chatNextAdvance = now + HOLD_SECONDS
+
+                    if chatMsgHead ~= 1 then
+                        chatMsgHead = chatMsgHead + 3
+                    else
+                        chatMsgHead = 4
+                    end
+                end
+
                 if chatMsgHead > e.length then
                     DataToColor.ChatQueue:shift(globalTick)
-                    chatMsgHead = -2
+
+                    -- msgId must stay 0..15 so packed stays within 24-bit color range
+                    chatMsgId = (chatMsgId + 1) % 16
+
+                    chatMsgHead = 1
+                    chatNextAdvance = 0
+
+                    -- clear output so the last chunk isn't held forever
+                    Pixel(int, 0, 98)
+                    Pixel(int, 0, 99)
                 else
                     local part = sub(e.msg, chatMsgHead, chatMsgHead + 2)
                     local number = 0
-                    local length = len(part)
-                    for i = 1, length do
+                    local partLen = len(part)
+                    for i = 1, partLen do
                         local c = upper(sub(part, i))
-                        local b = byte(c) or 32 -- SPACE character fallback
-                        if b > 100 then
-                            b = 32
-                        end
-                        number = number + (b * IdxToRadix(i + (3 - length)))
+                        local b = byte(c) or 32
+                        if b > 100 then b = 32 end
+                        number = number + (b * IdxToRadix(i + (3 - partLen)))
                     end
 
-                    --print(e.length, chatMsgHead, "'" .. part .. "'", number)
-                    Pixel(int, number, 98)
+                    -- meta stays small (<= ~5,999,999)
                     Pixel(int, e.type * 1000000 + 1000 * e.length + chatMsgHead, 99)
+
+                    -- pack msgId into cMsg (24-bit safe when msgId is 0..15)
+                    local packed = number + chatMsgId * 1048576
+                    Pixel(int, packed, 98)
                 end
             end
 
