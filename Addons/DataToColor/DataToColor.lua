@@ -556,6 +556,17 @@ function DataToColor:CreateFrames()
         return 0
     end
 
+    local function SanitizeToUnderscore(s)
+        -- Uppercase first so ASCII letters become <= 90 (safe),
+        -- then replace any remaining bytes > 100 (UTF-8 bytes, etc.) with '_'.
+        s = upper(s)
+        return s:gsub(".", function(ch)
+            local b = byte(ch) or 32
+            if b > 100 then return "_" end
+            return ch
+        end)
+    end
+
     local function updateFrames()
         if not SETUP_SEQUENCE and globalTick >= initPhase then
             Pixel(int, 0, 0)
@@ -1095,7 +1106,10 @@ function DataToColor:CreateFrames()
                 chatNextAdvance = 0
             else
                 if chatMsgHead == nil or chatMsgHead < 1 then chatMsgHead = 1 end
-
+                
+                local msg = SanitizeToUnderscore(e.msg)
+                local msgLen = len(msg)
+                
                 local now = GetTime()
                 if chatNextAdvance == 0 then
                     chatNextAdvance = now + HOLD_SECONDS
@@ -1112,7 +1126,7 @@ function DataToColor:CreateFrames()
                     end
                 end
 
-                if chatMsgHead > e.length then
+                if chatMsgHead > msgLen then
                     DataToColor.ChatQueue:shift(globalTick)
 
                     -- msgId must stay 0..15 so packed stays within 24-bit color range
@@ -1125,18 +1139,18 @@ function DataToColor:CreateFrames()
                     Pixel(int, 0, 98)
                     Pixel(int, 0, 99)
                 else
-                    local part = sub(e.msg, chatMsgHead, chatMsgHead + 2)
+                    local part = sub(msg, chatMsgHead, chatMsgHead + 2)
                     local number = 0
                     local partLen = len(part)
                     for i = 1, partLen do
                         local c = upper(sub(part, i))
                         local b = byte(c) or 32
-                        if b > 100 then b = 32 end
+                        if b > 100 then b = 95 end -- extra safety; '_' = 95
                         number = number + (b * IdxToRadix(i + (3 - partLen)))
                     end
 
                     -- meta stays small (<= ~5,999,999)
-                    Pixel(int, e.type * 1000000 + 1000 * e.length + chatMsgHead, 99)
+                    Pixel(int, e.type * 1000000 + 1000 * msgLen + chatMsgHead, 99)
 
                     -- pack msgId into cMsg (24-bit safe when msgId is 0..15)
                     local packed = number + chatMsgId * 1048576

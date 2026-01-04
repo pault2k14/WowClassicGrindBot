@@ -99,9 +99,9 @@ public sealed class ChatReader : IReader
         if (meta == _lastDbgMeta && packed == _lastDbgPacked)
             return; // identical frame, ignore completely
 
-        _lastDbgMeta = meta;
-        _lastDbgPacked = packed;
-        logger.LogDebug($"meta={meta} packed={packed}");
+        //_lastDbgMeta = meta;
+        //_lastDbgPacked = packed;
+        //logger.LogDebug($"meta={meta} packed={packed}");
 
         if (meta == 0 || packed == 0)
             return;
@@ -175,6 +175,16 @@ public sealed class ChatReader : IReader
 
         string author = text[..firstSpaceIdx];
         string msg = text[(firstSpaceIdx + 1)..];
+
+        if(type == ChatMessageType.Party && msg.Equals("follow me"))
+        {
+            logger.LogInformation("Received follow me");
+        }
+
+        if (type == ChatMessageType.Party && msg.Equals("stop following me"))
+        {
+            logger.LogInformation("Received stop following me");
+        }
 
         Messages.Add(new ChatMessageEntry(DateTime.Now, type, author, msg));
         logger.LogInformation($"[{type}] {author}: {msg}");
