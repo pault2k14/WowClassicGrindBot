@@ -31,6 +31,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     private readonly IMountHandler mountHandler;
     private readonly CombatTracker combatTracker;
     private readonly IBlacklist targetBlacklist;
+    private readonly ChatReader chatReader;
 
     private readonly KeyAction? approachKey;
     private readonly Action approachAction;
@@ -48,7 +49,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         StopMoving stopMoving, CastingHandler castingHandler,
         IMountHandler mountHandler, NpcNameTargeting npcNameTargeting,
         StuckDetector stuckDetector, CombatTracker combatTracker,
-        ClassConfiguration classConfig)
+        ClassConfiguration classConfig, ChatReader chatReader)
         : base(nameof(PullTargetGoal))
     {
         this.logger = logger;
@@ -65,6 +66,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         this.combatTracker = combatTracker;
         this.targetBlacklist = targetBlacklist;
         this.classConfig = classConfig;
+        this.chatReader = chatReader;
 
         Keys = classConfig.Pull.Sequence;
 
@@ -91,12 +93,14 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             AddPrecondition(GoapKey.targettargetsus, false);
         }
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
         AddPrecondition(GoapKey.targethostile, true);
         AddPrecondition(GoapKey.withinpullrange, true);
 
         AddEffect(GoapKey.pulled, true);
+        this.chatReader = chatReader;
     }
 
     public override void OnEnter()
@@ -146,6 +150,12 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     public override void Update()
     {
         wait.Update();
+
+        if(chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
 
         /* Probably can remove now that we are using classConfig.AssistPull 
         if (classConfig.Mode == Mode.AssistFocus)

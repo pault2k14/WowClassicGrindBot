@@ -17,6 +17,7 @@ public sealed class AssistFocusGoal : GoapGoal
     private readonly IMountHandler mountHandler;
     private readonly CombatLog combatLog;
     private readonly RestHandler restHandler;
+    private readonly ChatReader chatReader;
 
     public AssistFocusGoal(ILogger<AssistFocusGoal> logger,
         ConfigurableInput input,
@@ -28,7 +29,8 @@ public sealed class AssistFocusGoal : GoapGoal
         CastingHandler castingHandler,
         IMountHandler mountHandler,
         CombatLog combatLog,
-        RestHandler restHandler
+        RestHandler restHandler,
+        ChatReader chatReader
         )
         : base(nameof(AssistFocusGoal))
     {
@@ -43,9 +45,11 @@ public sealed class AssistFocusGoal : GoapGoal
         this.mountHandler = mountHandler;
         this.combatLog = combatLog;
         this.restHandler = restHandler;
+        this.chatReader = chatReader;
 
         this.Keys = classConfig.AssistFocus.Sequence;
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hasfocus, true);
     }
 
@@ -88,6 +92,12 @@ public sealed class AssistFocusGoal : GoapGoal
 
         for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
         {
+            if (chatReader.ForcedFollow)
+            {
+                AddEffect(GoapKey.forcedfollow, true);
+                return;
+            }
+
             KeyAction keyAction = Keys[i];
 
             if (castingHandler.SpellInQueue() && !keyAction.BaseAction)

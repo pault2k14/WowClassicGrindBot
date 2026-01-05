@@ -35,6 +35,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
     private readonly GoapAgentState state;
     private readonly CancellationToken token;
     private readonly RestHandler restHandler;
+    private readonly ChatReader chatReader;
 
     private bool canRun;
     private int bagHashNewOrStackGain;
@@ -47,7 +48,8 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         AddonBits bits, Wait wait, StopMoving stopMoving,
         NpcNameTargeting npcNameTargeting, CombatTracker combatTracker,
         GoapAgentState state, ClassConfiguration classConfig,
-        CancellationTokenSource cts, RestHandler restHandler)
+        CancellationTokenSource cts, RestHandler restHandler,
+        ChatReader chatReader)
         : base(nameof(SkinningGoal))
     {
         this.logger = logger;
@@ -60,6 +62,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         this.stopMoving = stopMoving;
         this.bagReader = bagReader;
         this.equipmentReader = equipmentReader;
+        this.chatReader = chatReader;
 
         this.npcNameTargeting = npcNameTargeting;
         this.combatTracker = combatTracker;
@@ -75,6 +78,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
         //AddPrecondition(GoapKey.dangercombat, false);
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.shouldgather, true);
         AddEffect(GoapKey.shouldgather, false);
         this.restHandler = restHandler;
@@ -98,6 +102,12 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
     public override void OnEnter()
     {
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
         while (restHandler.IsResting())
         {
             wait.Update(1000);

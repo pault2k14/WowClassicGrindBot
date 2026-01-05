@@ -12,15 +12,18 @@ public sealed class TargetFocusTargetGoal : GoapGoal
     private readonly PlayerReader playerReader;
     private readonly AddonBits bits;
     private readonly Wait wait;
+    private readonly ChatReader chatReader;
 
     public TargetFocusTargetGoal(ConfigurableInput input, PlayerReader playerReader,
-        AddonBits bits, ClassConfiguration classConfig, Wait wait, ILogger<TargetFocusTargetGoal> logger)
+        AddonBits bits, ClassConfiguration classConfig, Wait wait, 
+        ILogger<TargetFocusTargetGoal> logger, ChatReader chatReader)
         : base(nameof(TargetFocusTargetGoal))
     {
         this.input = input;
         this.playerReader = playerReader;
         this.bits = bits;
         this.wait = wait;
+        this.chatReader = chatReader;
 
         /* This was preventing AssistFocus mode from returning to combat 
          *  when combat is temporarily left for other plans. Seen when 2 or 3
@@ -34,6 +37,7 @@ public sealed class TargetFocusTargetGoal : GoapGoal
         }
         */
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hasfocus, true);
         AddPrecondition(GoapKey.focushastarget, true);
         this.logger = logger;
@@ -57,6 +61,12 @@ public sealed class TargetFocusTargetGoal : GoapGoal
 
     public override void Update()
     {
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
         if (bits.FocusTarget_Hostile())
         {
             if (bits.FocusTarget_Combat())

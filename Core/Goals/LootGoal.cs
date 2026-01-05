@@ -37,6 +37,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
     private readonly PlayerDirection playerDirection;
     private readonly GoapAgentState state;
     private readonly RestHandler restHandler;
+    private readonly ChatReader chatReader;
 
     private readonly CancellationToken token;
 
@@ -52,7 +53,8 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         ClassConfiguration classConfig, NpcNameTargeting npcNameTargeting,
         PlayerDirection playerDirection,
         GoapAgentState state, CombatLog combatLog,
-        CancellationTokenSource cts, RestHandler restHandler)
+        CancellationTokenSource cts, RestHandler restHandler,
+        ChatReader chatReader)
         : base(nameof(LootGoal))
     {
         this.logger = logger;
@@ -68,8 +70,10 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         this.npcNameTargeting = npcNameTargeting;
         this.playerDirection = playerDirection;
         this.state = state;
+        this.chatReader = chatReader;
 
         this.token = cts.Token;
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.pulled, false);
         AddPrecondition(GoapKey.dangercombat, false);
         AddPrecondition(GoapKey.shouldloot, true);
@@ -79,6 +83,12 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
 
     public override void OnEnter()
     {
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
         while (restHandler.IsResting())
         {
             wait.Update(1000);

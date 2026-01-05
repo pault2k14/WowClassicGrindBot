@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Core.Goals;
 
-public sealed class FollowFocusGoal : GoapGoal
+public sealed class ForcedFollowGoal : GoapGoal
 {
     public override float Cost => 19f;
 
@@ -12,20 +12,20 @@ public sealed class FollowFocusGoal : GoapGoal
     private readonly AddonBits bits;
     private readonly Wait wait;
     private readonly ClassConfiguration classConfig;
-    private readonly ILogger<FollowFocusGoal> logger;
+    private readonly ILogger<ForcedFollowGoal> logger;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
-    
-    public FollowFocusGoal(ConfigurableInput input,
+
+    public ForcedFollowGoal(ConfigurableInput input,
         PlayerReader playerReader,
         AddonBits bits,
         Wait wait,
         ClassConfiguration classConfig,
-        ILogger<FollowFocusGoal> logger,
+        ILogger<ForcedFollowGoal> logger,
         RestHandler restHandler,
         ChatReader chatReader
         )
-        : base(nameof(FollowFocusGoal))
+        : base(nameof(ForcedFollowGoal))
     {
         this.input = input;
         this.playerReader = playerReader;
@@ -41,21 +41,11 @@ public sealed class FollowFocusGoal : GoapGoal
             AddPrecondition(GoapKey.hasfocus, true);
         }
 
-        AddPrecondition(GoapKey.forcedfollow, false);
-        AddPrecondition(GoapKey.dangercombat, false);
-        AddPrecondition(GoapKey.damagedone, false);
-        AddPrecondition(GoapKey.damagetaken, false);
-        AddPrecondition(GoapKey.producedcorpse, false);
-        AddPrecondition(GoapKey.consumecorpse, false);
+        AddPrecondition(GoapKey.forcedfollow, true);
     }
 
     public override void OnEnter()
     {
-        while (restHandler.IsResting())
-        {
-            wait.Update(1000);
-        }
-
         if (input.IsKeyDown(input.ForwardKey))
         {
             input.StopForward(true);
@@ -109,11 +99,10 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void Update()
     {
-        if (chatReader.ForcedFollow)
-        {
-            AddEffect(GoapKey.forcedfollow, true);
-            return;
-        }
+        //logger.LogInformation("ForcedFollowGoal: Inside Update");
+        // Removed check for playerReader.SpellInRange.PartyMember4_Inspect
+        // As inpect can't be used in combat
+        wait.Update();
 
         if (classConfig.UnitToFollow == "focus")
         {
@@ -124,11 +113,14 @@ public sealed class FollowFocusGoal : GoapGoal
             }
 
             if (playerReader.TargetGuid == playerReader.FocusGuid &&
-                playerReader.SpellInRange.Focus_Inspect &&
                 !bits.AutoFollow() &&
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+            }
+            else
+            {
+                logger.LogInformation("ForcedFollowGoal: Couldn't follow focus");
             }
         }
         else if (classConfig.UnitToFollow == "party1")
@@ -139,12 +131,23 @@ public sealed class FollowFocusGoal : GoapGoal
                 wait.Update();
             }
 
+            /*
+            logger.LogInformation("ForcedFollowGoal: playerReader.TargetGuid " + playerReader.TargetGuid);
+            logger.LogInformation("ForcedFollowGoal: playerReader.PartyMember1Guid " + playerReader.PartyMember1Guid);
+            logger.LogInformation("ForcedFollowGoal: playerReader.SpellInRange.PartyMember1_Inspect " + playerReader.SpellInRange.PartyMember1_Inspect);
+            logger.LogInformation("ForcedFollowGoal: !bits.AutoFollow() " + !bits.AutoFollow());
+            logger.LogInformation("ForcedFollowGoal: !input.FollowTarget.OnCooldown() " + !input.FollowTarget.OnCooldown());
+            */
+          
             if (playerReader.TargetGuid == playerReader.PartyMember1Guid &&
-                playerReader.SpellInRange.PartyMember1_Inspect &&
                 !bits.AutoFollow() &&
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+            }
+            else
+            {
+                logger.LogInformation("ForcedFollowGoal: Couldn't follow party1");
             }
         }
         else if (classConfig.UnitToFollow == "party2")
@@ -155,12 +158,15 @@ public sealed class FollowFocusGoal : GoapGoal
                 wait.Update();
             }
 
-            if (playerReader.TargetGuid == playerReader.PartyMember2Guid &&
-                playerReader.SpellInRange.PartyMember2_Inspect &&
+            if (playerReader.TargetGuid == playerReader.PartyMember2Guid &&         
                 !bits.AutoFollow() &&
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+            }
+            else
+            {
+                logger.LogInformation("ForcedFollowGoal: Couldn't follow party2");
             }
         }
         else if (classConfig.UnitToFollow == "party3")
@@ -172,11 +178,14 @@ public sealed class FollowFocusGoal : GoapGoal
             }
 
             if (playerReader.TargetGuid == playerReader.PartyMember3Guid &&
-                playerReader.SpellInRange.PartyMember3_Inspect &&
                 !bits.AutoFollow() &&
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+            }
+            else
+            {
+                logger.LogInformation("ForcedFollowGoal: Couldn't follow party3");
             }
         }
         else if (classConfig.UnitToFollow == "party4")
@@ -188,14 +197,18 @@ public sealed class FollowFocusGoal : GoapGoal
             }
 
             if (playerReader.TargetGuid == playerReader.PartyMember4Guid &&
-                playerReader.SpellInRange.PartyMember4_Inspect &&
                 !bits.AutoFollow() &&
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+            }
+            else
+            {
+                logger.LogInformation("ForcedFollowGoal: Couldn't follow party4");
             }
         }
 
         wait.Update();
     }
 }
+

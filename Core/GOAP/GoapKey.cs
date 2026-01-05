@@ -28,6 +28,7 @@ public enum GoapKey
     focushastarget,
     focuscombat,
     consumablecorpsenearby,
+    forcedfollow,
     LENGTH
 }
 
@@ -62,6 +63,7 @@ public static class GoapKey_Extension
         GoapKey.targethostile => "Target Hostile",
         GoapKey.damagetakenordone => "Damage Taken or Done",
         GoapKey.consumablecorpsenearby => "Consume Corpse nearby",
+        GoapKey.forcedfollow => "Forced Follow",
         _ => unknown
     };
 
@@ -92,6 +94,7 @@ public static class GoapKey_Extension
         GoapKey.targethostile => "!Target Hostile",
         GoapKey.damagetakenordone => "!Damage Taken or Done",
         GoapKey.consumablecorpsenearby => "!Consume Corpse nearby",
+        GoapKey.forcedfollow => "!Forced Follow",
         _ => unknown
     };
 

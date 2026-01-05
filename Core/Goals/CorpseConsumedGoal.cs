@@ -14,17 +14,19 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
     private readonly GoapAgentState goapAgentState;
     private readonly Wait wait;
     private readonly RestHandler restHandler;
+    private readonly ChatReader chatReader;
 
     private readonly bool lootEnabled;
 
     public CorpseConsumedGoal(ILogger<CorpseConsumedGoal> logger,
         ClassConfiguration classConfig, GoapAgentState goapAgentState, 
-        Wait wait, RestHandler restHandler)
+        Wait wait, RestHandler restHandler, ChatReader chatReader)
         : base(nameof(CorpseConsumedGoal))
     {
         this.logger = logger;
         this.goapAgentState = goapAgentState;
         this.wait = wait;
+        this.chatReader = chatReader;
 
         this.lootEnabled = classConfig.Loot;
 
@@ -32,6 +34,7 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
         {
             AddPrecondition(GoapKey.consumablecorpsenearby, true);
         }
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.pulled, false);
         AddPrecondition(GoapKey.dangercombat, false);
         AddPrecondition(GoapKey.incombat, false);
@@ -44,6 +47,12 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
 
     public override void OnEnter()
     {
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
         while (restHandler.IsResting())
         {
             wait.Update(1000);

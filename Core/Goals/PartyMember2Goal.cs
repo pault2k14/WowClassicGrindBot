@@ -17,7 +17,8 @@ public sealed class PartyMember2Goal : GoapGoal
     private readonly IMountHandler mountHandler;
     private readonly CombatLog combatLog;
     private readonly RestHandler restHandler;
-
+    private readonly ChatReader chatReader;
+    
     public PartyMember2Goal(ILogger<PartyMember2Goal> logger,
         ConfigurableInput input,
         ClassConfiguration classConfig,
@@ -28,7 +29,8 @@ public sealed class PartyMember2Goal : GoapGoal
         CastingHandler castingHandler,
         IMountHandler mountHandler,
         CombatLog combatLog,
-        RestHandler restHandler
+        RestHandler restHandler,
+        ChatReader chatReader
         )
         : base(nameof(PartyMember2Goal))
     {
@@ -45,6 +47,9 @@ public sealed class PartyMember2Goal : GoapGoal
 
         this.Keys = classConfig.PartyMember2.Sequence;
         this.restHandler = restHandler;
+        this.chatReader = chatReader;
+
+        AddPrecondition(GoapKey.forcedfollow, false);
     }
 
     public override float Cost => 3.9f;
@@ -86,6 +91,12 @@ public sealed class PartyMember2Goal : GoapGoal
 
         for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
         {
+            if (chatReader.ForcedFollow)
+            {
+                AddEffect(GoapKey.forcedfollow, true);
+                return;
+            }
+
             KeyAction keyAction = Keys[i];
 
             if (castingHandler.SpellInQueue() && !keyAction.BaseAction)

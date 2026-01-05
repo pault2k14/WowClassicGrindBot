@@ -26,6 +26,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private readonly CastingHandler castingHandler;
     private readonly IMountHandler mountHandler;
     private readonly CombatLog combatLog;
+    private readonly ChatReader chatReader;
     
     private float lastDirection;
     private float lastMinDistance;
@@ -35,7 +36,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
         ClassConfiguration classConfiguration, ClassConfiguration classConfig,
         CastingHandler castingHandler, CombatLog combatLog,
-        IMountHandler mountHandler)
+        IMountHandler mountHandler, ChatReader chatReader)
         : base(nameof(CombatGoal))
     {
         this.logger = logger;
@@ -50,6 +51,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.castingHandler = castingHandler;
         this.mountHandler = mountHandler;
         this.classConfig = classConfig;
+        this.chatReader = chatReader;
 
         if(classConfig.Mode == Mode.AssistFocus)
         {
@@ -60,6 +62,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             AddPrecondition(GoapKey.incombat, true);
         }
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
         AddPrecondition(GoapKey.targethostile, true);
@@ -128,6 +131,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
         if (MathF.Abs(lastDirection - playerReader.Direction) > MathF.PI / 2)
         {
             logger.LogInformation("Turning too fast!");
@@ -161,6 +170,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         ReadOnlySpan <KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
+            if (chatReader.ForcedFollow)
+            {
+                AddEffect(GoapKey.forcedfollow, true);
+                return;
+            }
+
             logger.LogInformation("CombatGoals Update Top of loop");
             wait.Update();
 

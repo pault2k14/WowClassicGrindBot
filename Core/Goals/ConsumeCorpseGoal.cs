@@ -11,19 +11,23 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal
     private readonly ILogger<ConsumeCorpseGoal> logger;
     private readonly ClassConfiguration classConfig;
     private readonly GoapAgentState state;
+    private readonly ChatReader chatReader;
 
     public ConsumeCorpseGoal(ILogger<ConsumeCorpseGoal> logger,
-        ClassConfiguration classConfig, GoapAgentState state)
+        ClassConfiguration classConfig, GoapAgentState state,
+        ChatReader chatReader)
         : base(nameof(ConsumeCorpseGoal))
     {
         this.logger = logger;
         this.classConfig = classConfig;
         this.state = state;
+        this.chatReader = chatReader;
 
         if (classConfig.KeyboardOnly)
         {
             AddPrecondition(GoapKey.consumablecorpsenearby, true);
         }
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.damagedone, false);
         AddPrecondition(GoapKey.damagetaken, false);
 
@@ -46,6 +50,12 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal
 
     public override void OnEnter()
     {
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
         LogConsume(logger);
         SendGoapEvent(new GoapStateEvent(GoapKey.consumecorpse, true));
 

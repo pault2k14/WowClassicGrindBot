@@ -18,6 +18,7 @@ public sealed class ParallelGoal : GoapGoal
     private readonly CastingHandler castingHandler;
     private readonly IMountHandler mountHandler;
     private readonly RestHandler restHandler;
+    private readonly ChatReader chatReader;
 
     private static bool None() => false;
 
@@ -25,7 +26,8 @@ public sealed class ParallelGoal : GoapGoal
 
     public ParallelGoal(ILogger logger, ConfigurableInput input, Wait wait,
         PlayerReader playerReader, StopMoving stopMoving, ClassConfiguration classConfig,
-        CastingHandler castingHandler, IMountHandler mountHandler, RestHandler restHandler)
+        CastingHandler castingHandler, IMountHandler mountHandler, 
+        RestHandler restHandler, ChatReader chatReader)
         : base(nameof(ParallelGoal))
     {
         this.logger = logger;
@@ -35,7 +37,9 @@ public sealed class ParallelGoal : GoapGoal
         this.playerReader = playerReader;
         this.castingHandler = castingHandler;
         this.mountHandler = mountHandler;
+        this.chatReader = chatReader;
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.incombat, false);
 
         Keys = classConfig.Parallel.Sequence;
@@ -77,6 +81,12 @@ public sealed class ParallelGoal : GoapGoal
 
     public override void Update()
     {
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
         if (castingHandler.SpellInQueue())
         {
             wait.Update();

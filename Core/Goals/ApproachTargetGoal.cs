@@ -30,7 +30,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly IBlacklist targetBlacklist;
     private readonly CombatLog combatLog;
     private readonly ClassConfiguration classConfig;
-
+    private readonly ChatReader chatReader;
+    
     private long approachStart;
 
     private double nextStuckCheckTime;
@@ -47,7 +48,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         IBlacklist blacklist,
         IMountHandler mountHandler,
         CombatLog combatLog,
-        ClassConfiguration classConfig)
+        ClassConfiguration classConfig,
+        ChatReader chatReader)
         : base(nameof(ApproachTargetGoal))
     {
         this.logger = logger;
@@ -63,7 +65,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.targetBlacklist = blacklist;
         this.combatLog = combatLog;
         this.classConfig = classConfig;
+        this.chatReader = chatReader;
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
         AddPrecondition(GoapKey.targethostile, true);
@@ -100,6 +104,12 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     public override void Update()
     {
         wait.Update();
+
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
 
         if (bits.Combat() && !bits.Target_Combat() &&
             !combatLog.ToPull.Contains(playerReader.TargetGuid))

@@ -21,6 +21,7 @@ public sealed class AdhocGoal : GoapGoal
     private readonly AddonBits bits;
     private readonly CombatLog combatLog;
     private readonly RestHandler restHandler;
+    private readonly ChatReader chatReader;
 
     private readonly bool? combatMatters;
 
@@ -28,7 +29,8 @@ public sealed class AdhocGoal : GoapGoal
         ConfigurableInput input, Wait wait,
         PlayerReader playerReader, StopMoving stopMoving,
         CastingHandler castingHandler, IMountHandler mountHandler,
-        AddonBits bits, CombatLog combatLog, RestHandler restHandler)
+        AddonBits bits, CombatLog combatLog, RestHandler restHandler,
+        ChatReader chatReader)
         : base(nameof(AdhocGoal))
     {
         this.logger = logger;
@@ -42,6 +44,7 @@ public sealed class AdhocGoal : GoapGoal
         this.bits = bits;
         this.combatLog = combatLog;
         this.restHandler = restHandler;
+        this.chatReader = chatReader;
 
         if (bool.TryParse(key.InCombat, out bool result))
         {
@@ -49,6 +52,7 @@ public sealed class AdhocGoal : GoapGoal
             combatMatters = result;
         }
 
+        AddPrecondition(GoapKey.forcedfollow, false);
         Keys = [key];
     }
 
@@ -70,6 +74,12 @@ public sealed class AdhocGoal : GoapGoal
     public override void Update()
     {
         wait.Update();
+
+        if (chatReader.ForcedFollow)
+        {
+            AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
 
         if (!CanRun() || castingHandler.SpellInQueue())
             return;

@@ -1,5 +1,6 @@
-﻿using Microsoft.Extensions.Logging;
-
+﻿using Core.Goals;
+using Core.GOAP;
+using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -30,6 +31,7 @@ public sealed class ChatReader : IReader
 
     public ObservableCollection<ChatMessageEntry> Messages { get; } = new();
     private const int MsgIdRadix = 1 << 20; // 1048576
+    public bool ForcedFollow;
 
     private static string DecodeChatPart(int number, int take)
     {
@@ -179,11 +181,13 @@ public sealed class ChatReader : IReader
         if(type == ChatMessageType.Party && msg.Equals("follow me"))
         {
             logger.LogInformation("Received follow me");
+            ForcedFollow = true;
         }
 
         if (type == ChatMessageType.Party && msg.Equals("stop following me"))
         {
             logger.LogInformation("Received stop following me");
+            ForcedFollow = false;
         }
 
         Messages.Add(new ChatMessageEntry(DateTime.Now, type, author, msg));

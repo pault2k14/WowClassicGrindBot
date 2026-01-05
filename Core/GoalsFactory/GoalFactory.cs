@@ -141,6 +141,7 @@ public static class GoalFactory
 
             services.AddScoped<GoapGoal, TargetFocusTargetGoal>();
             services.AddScoped<GoapGoal, FollowFocusGoal>();
+            services.AddScoped<GoapGoal, ForcedFollowGoal>();
 
             if (classConfig.Parallel.Sequence.Length > 0)
             {
@@ -230,7 +231,8 @@ public static class GoalFactory
                 x.GetRequiredService<IMountHandler>(),
                 x.GetRequiredService<AddonBits>(),
                 x.GetRequiredService<CombatLog>(),
-                x.GetRequiredService<RestHandler>()));
+                x.GetRequiredService<RestHandler>(),
+                x.GetRequiredService<ChatReader>()));
         }
     }
 
