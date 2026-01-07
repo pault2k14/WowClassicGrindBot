@@ -26,6 +26,12 @@ public sealed partial class KeyAction
         get => features[ActionMask.CrowdControl];
         set => features[ActionMask.CrowdControl] = value;
     }
+
+    public bool UseWithForcedFollow
+    {
+        get => features[ActionMask.UseWithForcedFollow];
+        set => features[ActionMask.UseWithForcedFollow] = value;
+    }
     public string Key { get; set; } = string.Empty;
     public int Slot { get; set; }
     public int SlotIndex { get; private set; }

@@ -23,4 +23,5 @@ public static class ActionMask
     public const int AfterCastAuraExpected = 1 << 16;
     public const int CancelOnInterrupt = 1 << 17;
     public const int CrowdControl = 1 << 18;
+    public const int UseWithForcedFollow = 1 << 19;
 }

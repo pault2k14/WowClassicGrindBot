@@ -1,6 +1,7 @@
 ﻿using Core.GOAP;
 
 using Microsoft.Extensions.Logging;
+using System;
 
 namespace Core.Goals;
 
@@ -52,7 +53,7 @@ public sealed class AdhocGoal : GoapGoal
             combatMatters = result;
         }
 
-        AddPrecondition(GoapKey.forcedfollow, false);
+        //AddPrecondition(GoapKey.forcedfollow, false);
         Keys = [key];
     }
 
@@ -74,18 +75,23 @@ public sealed class AdhocGoal : GoapGoal
     public override void Update()
     {
         wait.Update();
-
+        /*
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
             return;
         }
+        */
 
         if (!CanRun() || castingHandler.SpellInQueue())
             return;
 
         if (key.Charge >= 1 && key.CanRun())
-            castingHandler.CastIfReady(key, Interrupt);
+            if (chatReader.ForcedFollow && !key.UseWithForcedFollow)
+            {
+                return;
+            } 
+        castingHandler.CastIfReady(key, Interrupt);
     }
 
     private bool Interrupt()

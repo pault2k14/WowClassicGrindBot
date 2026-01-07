@@ -81,6 +81,7 @@ public sealed partial class ClassConfiguration
     public KeyActions NPC { get; } = new();
     public KeyActions AssistFocus { get; } = new();
     public KeyActions CrowdControl { get; } = new();
+    public KeyActions UseWithForcedFollow { get; } = new();
     public KeyActions PartyMember1 { get; } = new();
     public KeyActions PartyMember2 { get; } = new();
     public KeyActions PartyMember3 { get; } = new();

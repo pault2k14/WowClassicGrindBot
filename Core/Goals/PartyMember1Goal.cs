@@ -49,7 +49,7 @@ public sealed class PartyMember1Goal : GoapGoal
         this.restHandler = restHandler;
         this.chatReader = chatReader;
 
-        AddPrecondition(GoapKey.forcedfollow, false);
+        //AddPrecondition(GoapKey.forcedfollow, false);
     }
 
     public override float Cost => 3.9f;
@@ -91,11 +91,13 @@ public sealed class PartyMember1Goal : GoapGoal
 
         for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
         {
+            /*
             if (chatReader.ForcedFollow)
             {
                 AddEffect(GoapKey.forcedfollow, true);
                 return;
             }
+            */
 
             KeyAction keyAction = Keys[i];
 
@@ -107,6 +109,11 @@ public sealed class PartyMember1Goal : GoapGoal
             if (keyAction.BeforeCastDismount && mountHandler.IsMounted())
             {
                 mountHandler.Dismount();
+            }
+
+            if (chatReader.ForcedFollow && !keyAction.UseWithForcedFollow)
+            {
+                continue;
             }
 
             if (castingHandler.CastIfReady(keyAction,
