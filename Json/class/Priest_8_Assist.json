@@ -60,7 +60,7 @@
         "Cost": 3,
         "Cooldown": 10000,
         "HasCastBar": false,
-        "UseWithForcedFollow":  true,
+        "UseWithForcedFollow": true,
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
@@ -237,216 +237,249 @@
     ]
   },
   */
-      "Wait"
-      :
+  "Wait": {
+    "Sequence": [
       {
-        "Sequence": [
-          {
-            "Cost": 0.9,
-            "Name": "User",
-            "Requirement": "MenuOpen || ChatInputVisible"
-          }
+        "Cost": 0.9,
+        "Name": "User",
+        "Requirement": "MenuOpen || ChatInputVisible"
+      }
+    ]
+  },
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "AfterCastWaitBuff": true,
+        "Requirements": [
+          "MIN_MANA_OFFENSIVE% < Mana%",
+          "!Shield"
         ]
       },
-      "Pull"
-      :
       {
-        "Sequence": [
-          {
-            "Name": "Power Word: Shield",
-            "Key": "9",
-            "WhenUsable": true,
-            "AfterCastWaitBuff": true,
-            "Requirements": [
-              "MIN_MANA_OFFENSIVE% < Mana%",
-              "!Shield"
-            ]
-          },
-          {
-            "Name": "Shadow Word: Pain",
-            "Key": "5",
-            "BeforeCastFaceTarget": true,
-            "Requirements": [
-              "MIN_MANA_OFFENSIVE% < Mana%"
-            ]
-          }
+        "Name": "Shadow Word: Pain",
+        "Key": "5",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "MIN_MANA_OFFENSIVE% < Mana%"
         ]
-      },
-      "Combat"
-      :
-      {
-        "Sequence": [
-          /*
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      /*
       {
         "Name": "Mana Potion",
         "Key": "F9",
         "Requirement": "Mana% < 20"
+      },
+      */
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirement": "Health% < 15"
+      },
+      {
+        "Name": "Heal",
+        "Key": "3",
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 30"
+        ]
+      },
+      {
+        "Name": "Shadow Word: Pain",
+        "Key": "5",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 12000,
+        "Requirements": [
+          "MIN_MANA_OFFENSIVE% < Mana%"
+        ]
+      },
+      {
+        "Name": "Fade",
+        "Key": "7",
+        "WhenUsable": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 40"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 45",
+          "!Shield"
+        ]
+      },
+      {
+        "Name": "Shoot",
+        "Key": "4",
+        "Item": true,
+        "Requirements": [
+          //"HasRangedWeapon",
+          "!Shooting",
+          "SpellInRange:1"
+        ]
+      }
+      //{
+      //  "Name": "Lesser Heal",
+      //  "Key": "3",
+      //  "Requirements": [
+      //    "Mana% > MIN_MANA_LESSER_HEAL%",
+      //    "Health% < 40"
+      //  ],
+      //  "Cooldown": 1000,
+      //  "HasCastBar": true
+      //},
+      //{
+      //  "Name": "Shadow Word: Pain",
+      //  "Key": "5",
+      //  "BeforeCastFaceTarget": true,
+      //  "Cooldown": 12000,
+      //  "Requirements": [
+      //    "TargetHealth% > MIN_TARGET_HP%",
+      //    "Mana% > MIN_MANA_OFFENSIVE%"
+      //  ]
+      //},
+      //{
+      //  "Name": "Smite",
+      //  "Key": "2",
+      //  "HasCastBar": true,
+      //  "Requirements": [
+      //    "TargetHealth% > MIN_TARGET_HP%",
+      //    "Mana% > MIN_MANA_OFFENSIVE%"
+      //  ]
+      //},
+      //{
+      //  "Name": "AutoAttack",
+      //  "Requirements": [
+      //"InMeleeRange",
+      //"!InCombat",
+      //    "TargetHealth% < 0",
+      //  ]
+      //},
+      //{
+      //  "Name": "Approach",
+      //  "Requirements": [
+      //"!InMeleeRange",
+      //"!InCombat",
+      //"TargetHealth% < 0"
+      // ],
+      // "Log": false
+      //}
+    ]
+  },
+  "ForcedFollow": {
+    "Sequence": [
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "AfterCastWaitBuff": true,
+        "Requirements": [
+          "Mana > 45",
+          "!Shield"
+        ]
       },
       {
         "Name": "HP Potion",
         "Key": "F10",
         "Requirement": "Health% < 15"
       },
-      */
-          {
-            "Name": "Heal",
-            "Key": "3",
-            "HasCastBar": true,
-            "AfterCastWaitCastbar": true,
-            "Cooldown": 500,
-            "Requirements": [
-              "Health% < 70",
-              "Mana > 30"
-            ]
-          },
-          {
-            "Name": "Shadow Word: Pain",
-            "Key": "5",
-            "BeforeCastFaceTarget": true,
-            "Cooldown": 12000,
-            "Requirements": [
-              "MIN_MANA_OFFENSIVE% < Mana%"
-            ]
-          },
-          {
-            "Name": "Fade",
-            "Key": "7",
-            "WhenUsable": true,
-            "Cooldown": 30000,
-            "Requirements": [
-              "Health% < 70",
-              "Mana > 40"
-            ]
-          },
-          {
-            "Name": "Power Word: Shield",
-            "Key": "9",
-            "WhenUsable": true,
-            "Cooldown": 500,
-            "Requirements": [
-              "Health% < 70",
-              "Mana > 45",
-              "!Shield"
-            ]
-          },
-          {
-            "Name": "Shoot",
-            "Key": "4",
-            "Item": true,
-            "Requirements": [
-              //"HasRangedWeapon",
-              "!Shooting",
-              "SpellInRange:1"
-            ]
-          }
-          //{
-          //  "Name": "Lesser Heal",
-          //  "Key": "3",
-          //  "Requirements": [
-          //    "Mana% > MIN_MANA_LESSER_HEAL%",
-          //    "Health% < 40"
-          //  ],
-          //  "Cooldown": 1000,
-          //  "HasCastBar": true
-          //},
-          //{
-          //  "Name": "Shadow Word: Pain",
-          //  "Key": "5",
-          //  "BeforeCastFaceTarget": true,
-          //  "Cooldown": 12000,
-          //  "Requirements": [
-          //    "TargetHealth% > MIN_TARGET_HP%",
-          //    "Mana% > MIN_MANA_OFFENSIVE%"
-          //  ]
-          //},
-          //{
-          //  "Name": "Smite",
-          //  "Key": "2",
-          //  "HasCastBar": true,
-          //  "Requirements": [
-          //    "TargetHealth% > MIN_TARGET_HP%",
-          //    "Mana% > MIN_MANA_OFFENSIVE%"
-          //  ]
-          //},
-          //{
-          //  "Name": "AutoAttack",
-          //  "Requirements": [
-          //"InMeleeRange",
-          //"!InCombat",
-          //    "TargetHealth% < 0",
-          //  ]
-          //},
-          //{
-          //  "Name": "Approach",
-          //  "Requirements": [
-          //"!InMeleeRange",
-          //"!InCombat",
-          //"TargetHealth% < 0"
-          // ],
-          // "Log": false
-          //}
+      {
+        "Name": "Renew",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 15000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "Requirements": [
+          "!Renew",
+          "Mana > 30",
+          "TargetAlive"
         ]
       },
-      "Adhoc"
-      :
       {
-        "Sequence": [
-          {
-            "Name": "Heal",
-            "Key": "3",
-            "HasCastBar": true,
-            "AfterCastWaitCastbar": true,
-            "Cooldown": 500,
-            "Requirements": [
-              "Health% < 60",
-              "Mana > 30",
-              "!Food",
-              "!Drink"
-            ]
-          },
-          {
-            "Name": "Renew",
-            "Key": "6",
-            "Cost": 3,
-            "Cooldown": 10000,
-            "HasCastBar": false,
-            "UseWithForcedFollow": true,
-            "Requirements": [
-              "!Renew",
-              "Health% < 30",
-              "Mana > 30",
-              "TargetAlive",
-              "!InCombat"
-            ]
-          },
-          {
-            "Name": "Power Word: Shield",
-            "Key": "9",
-            "WhenUsable": true,
-            "UseWithForcedFollow": true,
-            "Cooldown": 500,
-            "Requirements": [
-              "Health% < 70",
-              "Mana > 45",
-              "!Shield",
-              "InCombat"
-            ]
-          },
-          {
-            "Name": "Power Word Fortitude",
-            "Key": "0",
-            "Cooldown": 1000,
-            "HasCastBar": false,
-            "Requirements": [
-              "Mana% > 80",
-              "!InCombat",
-              "!FocusCombat",
-              "!Fortitude",
-              "!Food",
-              "!Drink"
-            ]
-          }
-          /*
+        "Name": "Fade",
+        "Key": "7",
+        "WhenUsable": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "Mana > 40"
+        ]
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Heal",
+        "Key": "3",
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 60",
+          "Mana > 30",
+          "!Food",
+          "!Drink"
+        ]
+      },
+      {
+        "Name": "Renew",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 10000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "Requirements": [
+          "!Renew",
+          "Health% < 30",
+          "Mana > 30",
+          "TargetAlive",
+          "!InCombat"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "UseWithForcedFollow": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 45",
+          "!Shield",
+          "InCombat"
+        ]
+      },
+      {
+        "Name": "Power Word Fortitude",
+        "Key": "0",
+        "Cooldown": 1000,
+        "HasCastBar": false,
+        "Requirements": [
+          "Mana% > 80",
+          "!InCombat",
+          "!FocusCombat",
+          "!Fortitude",
+          "!Food",
+          "!Drink"
+        ]
+      }
+      /*
       {
         "Name": "Inner Fire",
         "Key": "8",
@@ -460,30 +493,28 @@
         ]
       }
       */
+    ]
+  },
+  "Parallel": {
+    "Sequence": [
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirements": [
+          "Health% < 50",
+          "!InCombat",
+          "!FocusCombat"
         ]
       },
-      "Parallel"
-      :
       {
-        "Sequence": [
-          {
-            "Name": "Food",
-            "Key": "F12",
-            "Requirements": [
-              "Health% < 50",
-              "!InCombat",
-              "!FocusCombat"
-            ]
-          },
-          {
-            "Name": "Drink",
-            "Key": "F11",
-            "Requirements": [
-              "Mana% < 40",
-              "!InCombat",
-              "!FocusCombat"
-            ]
-          }
+        "Name": "Drink",
+        "Key": "F11",
+        "Requirements": [
+          "Mana% < 40",
+          "!InCombat",
+          "!FocusCombat"
         ]
       }
+    ]
+  }
 }

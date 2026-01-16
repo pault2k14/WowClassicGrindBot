@@ -49,27 +49,25 @@
         "HasCastBar": true,
         "AfterCastWaitCastbar": true,
         "Requirements": [
-          "PartyMember1Health% < 65",
+          "PartyMember1Health% < 60",
           "Mana > 30",
           "TargetAlive"
         ]
       },
-      /*
       {
         "Name": "Renew",
         "Key": "6",
         "Cost": 3,
         "Cooldown": 10000,
         "HasCastBar": false,
+        "UseWithForcedFollow": true,
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 105",
+          "Mana > 30",
           "TargetAlive"
-
         ]
       },
-      */
       {
         "Name": "Power Word Fortitude",
         "Key": "0",
@@ -90,9 +88,10 @@
         "Key": "9",
         "WhenUsable": true,
         "Cooldown": 500,
+        "UseWithForcedFollow": true,
         "Requirements": [
-          "PartyMember1Health% < 75",
-          "Mana > 80",
+          "PartyMember1Health% < 20",
+          "Mana > 45",
           "InCombat",
           "!P1_Shield",
           "!Food",
@@ -277,12 +276,12 @@
         "Key": "F9",
         "Requirement": "Mana% < 20"
       },
+      */
       {
         "Name": "HP Potion",
         "Key": "F10",
         "Requirement": "Health% < 15"
       },
-      */
       {
         "Name": "Heal",
         "Key": "3",
@@ -303,7 +302,6 @@
           "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       },
-      /*
       {
         "Name": "Fade",
         "Key": "7",
@@ -314,7 +312,6 @@
           "Mana > 40"
         ]
       },
-      */
       {
         "Name": "Power Word: Shield",
         "Key": "9",
@@ -324,15 +321,6 @@
           "Health% < 70",
           "Mana > 45",
           "!Shield"
-        ]
-      },
-      {
-        "Name": "Smite",
-        "Key": "2",
-        "HasCastBar": true,
-        "Requirements": [
-          "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {
@@ -409,11 +397,42 @@
         "Name": "HP Potion",
         "Key": "F10",
         "Requirement": "Health% < 15"
+      },
+      {
+        "Name": "Renew",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 15000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "Requirements": [
+          "!Renew",
+          "Mana > 30",
+          "TargetAlive"
+        ]
+      },
+      {
+        "Name": "Fade",
+        "Key": "7",
+        "WhenUsable": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "Mana > 40"
+        ]
       }
     ]
   },
   "Adhoc": {
     "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "UseWithForcedFollow": true,
+        "Requirements": [
+          "Health% < 15",
+          "!InCombat"
+        ]
+      },
       {
         "Name": "Heal",
         "Key": "3",
@@ -425,6 +444,34 @@
           "Mana > 30",
           "!Food",
           "!Drink"
+        ]
+      },
+      {
+        "Name": "Renew",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 10000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "Requirements": [
+          "!Renew",
+          "Health% < 30",
+          "Mana > 30",
+          "TargetAlive",
+          "!InCombat"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "UseWithForcedFollow": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 45",
+          "!Shield",
+          "InCombat"
         ]
       },
       {

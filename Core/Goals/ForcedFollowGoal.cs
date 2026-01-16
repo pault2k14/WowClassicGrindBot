@@ -15,6 +15,8 @@ public sealed class ForcedFollowGoal : GoapGoal
     private readonly ILogger<ForcedFollowGoal> logger;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
+    private readonly CastingHandler castingHandler;
+    private readonly IMountHandler mountHandler;
 
     public ForcedFollowGoal(ConfigurableInput input,
         PlayerReader playerReader,
@@ -23,7 +25,9 @@ public sealed class ForcedFollowGoal : GoapGoal
         ClassConfiguration classConfig,
         ILogger<ForcedFollowGoal> logger,
         RestHandler restHandler,
-        ChatReader chatReader
+        ChatReader chatReader,
+        CastingHandler castingHandler,
+        IMountHandler mountHandler
         )
         : base(nameof(ForcedFollowGoal))
     {
@@ -35,6 +39,10 @@ public sealed class ForcedFollowGoal : GoapGoal
         this.logger = logger;
         this.restHandler = restHandler;
         this.chatReader = chatReader;
+        this.castingHandler = castingHandler;
+        this.mountHandler = mountHandler;
+
+        this.Keys = classConfig.ForcedFollow.Sequence;
 
         if (classConfig.UnitToFollow == "focus")
         {
@@ -50,6 +58,47 @@ public sealed class ForcedFollowGoal : GoapGoal
         {
             input.StopForward(true);
         }
+
+        wait.Update();
+
+        input.PressClearTarget();
+
+        wait.Update();
+
+        if (!bits.Target() || (
+            playerReader.TargetGuid != playerReader.FocusGuid
+            && playerReader.TargetGuid != playerReader.PartyMember1Guid
+            && playerReader.TargetGuid != playerReader.PartyMember2Guid
+            && playerReader.TargetGuid != playerReader.PartyMember3Guid
+            && playerReader.TargetGuid != playerReader.PartyMember4Guid
+            ))
+        {
+            for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
+            {
+
+                KeyAction keyAction = Keys[i];
+
+                if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
+                {
+                    continue;
+                }
+
+                if (keyAction.BeforeCastDismount && mountHandler.IsMounted())
+                {
+                    mountHandler.Dismount();
+                }
+
+                if (castingHandler.CastIfReady(keyAction,
+                    keyAction.Interrupts.Count > 0
+                    ? keyAction.CanBeInterrupted
+                    : bits.Target_Alive))
+                {
+                    break;
+                }
+            }
+        }
+
+        wait.Update();
     }
 
     public override void OnExit()
@@ -95,6 +144,7 @@ public sealed class ForcedFollowGoal : GoapGoal
             }
         }
 
+        wait.Update();
     }
 
     public override void Update()
@@ -102,6 +152,57 @@ public sealed class ForcedFollowGoal : GoapGoal
         //logger.LogInformation("ForcedFollowGoal: Inside Update");
         // Removed check for playerReader.SpellInRange.PartyMember4_Inspect
         // As inpect can't be used in combat
+        wait.Update();
+
+        input.PressClearTarget();
+
+        wait.Update();
+
+        if (!bits.Target() || (
+            playerReader.TargetGuid != playerReader.FocusGuid
+            && playerReader.TargetGuid != playerReader.PartyMember1Guid
+            && playerReader.TargetGuid != playerReader.PartyMember2Guid
+            && playerReader.TargetGuid != playerReader.PartyMember3Guid
+            && playerReader.TargetGuid != playerReader.PartyMember4Guid
+            ))
+        {
+            for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
+            {
+
+                KeyAction keyAction = Keys[i];
+
+                if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
+                {
+                    continue;
+                }
+
+                if (keyAction.BeforeCastDismount && mountHandler.IsMounted())
+                {
+                    mountHandler.Dismount();
+                }
+
+                if (castingHandler.CastIfReady(keyAction,
+                    keyAction.Interrupts.Count > 0
+                    ? keyAction.CanBeInterrupted
+                    : bits.Target_Alive))
+                {
+                    break;
+                }
+            }
+        }
+
+        wait.Update();
+
+        if(!bits.AutoFollow() && !input.FollowTarget.OnCooldown())
+        {
+            startFollowing();
+        }
+        
+        wait.Update();
+    }
+
+    public void startFollowing()
+    {
         wait.Update();
 
         if (classConfig.UnitToFollow == "focus")
@@ -138,7 +239,7 @@ public sealed class ForcedFollowGoal : GoapGoal
             logger.LogInformation("ForcedFollowGoal: !bits.AutoFollow() " + !bits.AutoFollow());
             logger.LogInformation("ForcedFollowGoal: !input.FollowTarget.OnCooldown() " + !input.FollowTarget.OnCooldown());
             */
-          
+
             if (playerReader.TargetGuid == playerReader.PartyMember1Guid &&
                 !bits.AutoFollow() &&
                 !input.FollowTarget.OnCooldown())
@@ -158,7 +259,7 @@ public sealed class ForcedFollowGoal : GoapGoal
                 wait.Update();
             }
 
-            if (playerReader.TargetGuid == playerReader.PartyMember2Guid &&         
+            if (playerReader.TargetGuid == playerReader.PartyMember2Guid &&
                 !bits.AutoFollow() &&
                 !input.FollowTarget.OnCooldown())
             {
@@ -209,6 +310,7 @@ public sealed class ForcedFollowGoal : GoapGoal
         }
 
         wait.Update();
+
     }
 }
 

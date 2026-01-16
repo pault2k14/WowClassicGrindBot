@@ -345,52 +345,99 @@
           "SpellInRange:1"
         ]
       }
-      //{
-      //  "Name": "Lesser Heal",
-      //  "Key": "3",
-      //  "Requirements": [
-      //    "Mana% > MIN_MANA_LESSER_HEAL%",
-      //    "Health% < 40"
-      //  ],
-      //  "Cooldown": 1000,
-      //  "HasCastBar": true
-      //},
-      //{
-      //  "Name": "Shadow Word: Pain",
-      //  "Key": "5",
-      //  "BeforeCastFaceTarget": true,
-      //  "Cooldown": 12000,
-      //  "Requirements": [
-      //    "TargetHealth% > MIN_TARGET_HP%",
-      //    "Mana% > MIN_MANA_OFFENSIVE%"
-      //  ]
-      //},
-      //{
-      //  "Name": "Smite",
-      //  "Key": "2",
-      //  "HasCastBar": true,
-      //  "Requirements": [
-      //    "TargetHealth% > MIN_TARGET_HP%",
-      //    "Mana% > MIN_MANA_OFFENSIVE%"
-      //  ]
-      //},
-      //{
-      //  "Name": "AutoAttack",
-      //  "Requirements": [
-      //"InMeleeRange",
-      //"!InCombat",
-      //    "TargetHealth% < 0",
-      //  ]
-      //},
-      //{
-      //  "Name": "Approach",
-      //  "Requirements": [
-      //"!InMeleeRange",
-      //"!InCombat",
-      //"TargetHealth% < 0"
-      // ],
-      // "Log": false
-      //}
+          //{
+          //  "Name": "Lesser Heal",
+          //  "Key": "3",
+          //  "Requirements": [
+          //    "Mana% > MIN_MANA_LESSER_HEAL%",
+          //    "Health% < 40"
+          //  ],
+          //  "Cooldown": 1000,
+          //  "HasCastBar": true
+          //},
+          //{
+          //  "Name": "Shadow Word: Pain",
+          //  "Key": "5",
+          //  "BeforeCastFaceTarget": true,
+          //  "Cooldown": 12000,
+          //  "Requirements": [
+          //    "TargetHealth% > MIN_TARGET_HP%",
+          //    "Mana% > MIN_MANA_OFFENSIVE%"
+          //  ]
+          //},
+          //{
+          //  "Name": "Smite",
+          //  "Key": "2",
+          //  "HasCastBar": true,
+          //  "Requirements": [
+          //    "TargetHealth% > MIN_TARGET_HP%",
+          //    "Mana% > MIN_MANA_OFFENSIVE%"
+          //  ]
+          //},
+          //{
+          //  "Name": "AutoAttack",
+          //  "Requirements": [
+          //"InMeleeRange",
+          //"!InCombat",
+          //    "TargetHealth% < 0",
+          //  ]
+          //},
+          //{
+          //  "Name": "Approach",
+          //  "Requirements": [
+          //"!InMeleeRange",
+          //"!InCombat",
+          //"TargetHealth% < 0"
+          // ],
+          // "Log": false
+          //}
+        ]
+      },
+      "Adhoc"
+      :
+      {
+        "Sequence": [
+          {
+            "Name": "Heal",
+            "Key": "3",
+            "HasCastBar": true,
+            "AfterCastWaitCastbar": true,
+            "Cooldown": 500,
+            "Requirements": [
+              "Health% < 60",
+              "Mana > 30",
+              "!Food",
+              "!Drink"
+            ]
+          },
+          {
+            "Name": "Power Word Fortitude",
+            "Key": "0",
+            "Cooldown": 1000,
+            "HasCastBar": false,
+            "Requirements": [
+              "Mana% > 80",
+              "!InCombat",
+              "!FocusCombat",
+              "!Fortitude",
+              "!Food",
+              "!Drink"
+            ]
+          }
+          /*
+      {
+        "Name": "Inner Fire",
+        "Key": "8",
+        "Cooldown": 1000,
+        "HasCastBar": false,
+        "Requirements": [
+          "Mana% > 20",
+          "!Inner Fire",
+          "!Food",
+          "!Drink"
+        ]
+      }
+      */
     ]
   },
   "ForcedFollow": {
@@ -410,51 +457,6 @@
         "Key": "F10",
         "Requirement": "Health% < 15"
       }
-    ]
-  },
-  "Adhoc": {
-    "Sequence": [
-      {
-        "Name": "Heal",
-        "Key": "3",
-        "HasCastBar": true,
-        "AfterCastWaitCastbar": true,
-        "Cooldown": 500,
-        "Requirements": [
-          "Health% < 60",
-          "Mana > 30",
-          "!Food",
-          "!Drink"
-        ]
-      },
-      {
-        "Name": "Power Word Fortitude",
-        "Key": "0",
-        "Cooldown": 1000,
-        "HasCastBar": false,
-        "Requirements": [
-          "Mana% > 80",
-          "!InCombat",
-          "!FocusCombat",
-          "!Fortitude",
-          "!Food",
-          "!Drink"
-        ]
-      }
-      /*
-      {
-        "Name": "Inner Fire",
-        "Key": "8",
-        "Cooldown": 1000,
-        "HasCastBar": false,
-        "Requirements": [
-          "Mana% > 20",
-          "!Inner Fire",
-          "!Food",
-          "!Drink"
-        ]
-      }
-      */
     ]
   },
   "Parallel": {
