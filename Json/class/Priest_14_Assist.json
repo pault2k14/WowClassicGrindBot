@@ -64,7 +64,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 30",
+          "Mana > 65",
           "TargetAlive"
         ]
       },
@@ -334,11 +334,21 @@
         ]
       },
       {
+        "Name": "Smite",
+        "Key": "2",
+        "HasCastBar": true,
+        "Requirements": [
+          "TargetHealth% > MIN_TARGET_HP%",
+          "Mana% > 50"
+        ]
+      },
+      {
         "Name": "Shoot",
         "Key": "4",
         "Item": true,
         "Requirements": [
           //"HasRangedWeapon",
+          "TargetHealth% < MIN_TARGET_HP% || Mana% < MIN_MANA_OFFENSIVE%",
           "!Shooting",
           "SpellInRange:1"
         ]
@@ -417,7 +427,7 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "!Renew",
-          "Mana > 30",
+          "Mana > 65",
           "TargetAlive"
         ]
       },
@@ -428,6 +438,16 @@
         "Cooldown": 30000,
         "Requirements": [
           "Mana > 40"
+        ]
+      },
+      {
+        "Name": "Inner Fire",
+        "Key": "8",
+        "Cooldown": 1000,
+        "HasCastBar": false,
+        "Requirements": [
+          "Mana > 30",
+          "!Inner Fire",
         ]
       }
     ]
@@ -466,7 +486,7 @@
         "Requirements": [
           "!Renew",
           "Health% < 30",
-          "Mana > 30",
+          "Mana > 65",
           "TargetAlive",
           "!InCombat"
         ]
@@ -497,8 +517,7 @@
           "!Food",
           "!Drink"
         ]
-      }
-      /*
+      },
       {
         "Name": "Inner Fire",
         "Key": "8",
@@ -511,7 +530,7 @@
           "!Drink"
         ]
       }
-      */
+
     ]
   },
   "Parallel": {

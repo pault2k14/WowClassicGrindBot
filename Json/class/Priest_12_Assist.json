@@ -429,6 +429,16 @@
         "Requirements": [
           "Mana > 40"
         ]
+      },
+      {
+        "Name": "Inner Fire",
+        "Key": "8",
+        "Cooldown": 1000,
+        "HasCastBar": false,
+        "Requirements": [
+          "Mana > 30",
+          "!Inner Fire",
+        ]
       }
     ]
   },
