@@ -60,6 +60,7 @@ public static class GoapKey_Extension
         GoapKey.gathering => "Gathering",
         GoapKey.hasfocus => "Focus",
         GoapKey.focushastarget => "Focus Target",
+        GoapKey.focuscombat => "Focus Combat",
         GoapKey.targethostile => "Target Hostile",
         GoapKey.damagetakenordone => "Damage Taken or Done",
         GoapKey.consumablecorpsenearby => "Consume Corpse nearby",

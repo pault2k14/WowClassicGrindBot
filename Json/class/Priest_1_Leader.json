@@ -1,9 +1,9 @@
 {
   "ClassName": "Priest",
-  "Mode": "AssistFocus",
+  "Mode": "PartyLeader",
   "Loot": true,
   "UnitToFollow": "party1",
-  "PathFilename": "5_Gnome.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/01-04_Durotar_Valley of Trials.json",
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AssistPull": false,
@@ -49,11 +49,11 @@
         "HasCastBar": true,
         "AfterCastWaitCastbar": true,
         "Requirements": [
-          "PartyMember1Health% < 65",
+          "PartyMember1Health% < 60",
           "Mana > 30",
           "TargetAlive"
         ]
-      },
+      }
       /*
       {
         "Name": "Renew",
@@ -70,6 +70,7 @@
         ]
       },
       */
+      /*
       {
         "Name": "Power Word Fortitude",
         "Key": "0",
@@ -91,7 +92,7 @@
         "WhenUsable": true,
         "Cooldown": 500,
         "Requirements": [
-          "PartyMember1Health% < 75",
+          "PartyMember1Health% < 20",
           "Mana > 80",
           "InCombat",
           "!P1_Shield",
@@ -100,6 +101,7 @@
           "TargetAlive"
         ]
       }
+      */
     ]
   },
   /*
@@ -249,24 +251,26 @@
   },
   "Pull": {
     "Sequence": [
-      {
-        "Name": "Power Word: Shield",
-        "Key": "9",
-        "WhenUsable": true,
-        "AfterCastWaitBuff": true,
-        "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%",
-          "!Shield"
-        ]
-      },
-      {
-        "Name": "Shadow Word: Pain",
-        "Key": "5",
-        "BeforeCastFaceTarget": true,
-        "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%"
-        ]
-      }
+      /*
+          {
+            "Name": "Power Word: Shield",
+            "Key": "9",
+            "WhenUsable": true,
+            "AfterCastWaitBuff": true,
+            "Requirements": [
+              "MIN_MANA_OFFENSIVE% < Mana%",
+              "!Shield"
+            ]
+          },
+          {
+            "Name": "Shadow Word: Pain",
+            "Key": "5",
+            "BeforeCastFaceTarget": true,
+            "Requirements": [
+              "MIN_MANA_OFFENSIVE% < Mana%"
+            ]
+          }
+          */
     ]
   },
   "Combat": {
@@ -294,15 +298,17 @@
           "Mana > 30"
         ]
       },
-      {
-        "Name": "Shadow Word: Pain",
-        "Key": "5",
-        "BeforeCastFaceTarget": true,
-        "Cooldown": 12000,
-        "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%"
-        ]
-      },
+      /*
+          {
+            "Name": "Shadow Word: Pain",
+            "Key": "5",
+            "BeforeCastFaceTarget": true,
+            "Cooldown": 12000,
+            "Requirements": [
+              "MIN_MANA_OFFENSIVE% < Mana%"
+            ]
+          },
+          */
       /*
       {
         "Name": "Fade",
@@ -315,17 +321,19 @@
         ]
       },
       */
-      {
-        "Name": "Power Word: Shield",
-        "Key": "9",
-        "WhenUsable": true,
-        "Cooldown": 500,
-        "Requirements": [
-          "Health% < 70",
-          "Mana > 45",
-          "!Shield"
-        ]
-      },
+      /*
+          {
+            "Name": "Power Word: Shield",
+            "Key": "9",
+            "WhenUsable": true,
+            "Cooldown": 500,
+            "Requirements": [
+              "Health% < 70",
+              "Mana > 45",
+              "!Shield"
+            ]
+          },
+          */
       {
         "Name": "Smite",
         "Key": "2",
@@ -335,6 +343,15 @@
           "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       }
+      /*
+          {
+            "Name": "AutoAttack"
+          },
+          {
+            "Name": "Approach",
+            "Log": false
+          }
+          */
       /*
       {
         "Name": "Shoot",
@@ -377,14 +394,6 @@
       //  ]
       //},
       //{
-      //  "Name": "AutoAttack",
-      //  "Requirements": [
-      //"InMeleeRange",
-      //"!InCombat",
-      //    "TargetHealth% < 0",
-      //  ]
-      //},
-      //{
       //  "Name": "Approach",
       //  "Requirements": [
       //"!InMeleeRange",
@@ -393,25 +402,6 @@
       // ],
       // "Log": false
       //}
-    ]
-  },
-  "ForcedFollow": {
-    "Sequence": [
-      {
-        "Name": "Power Word: Shield",
-        "Key": "9",
-        "WhenUsable": true,
-        "AfterCastWaitBuff": true,
-        "Requirements": [
-          "Mana > 45",
-          "!Shield"
-        ]
-      },
-      {
-        "Name": "HP Potion",
-        "Key": "F10",
-        "Requirement": "Health% < 15"
-      }
     ]
   },
   "Adhoc": {
@@ -428,21 +418,23 @@
           "!Food",
           "!Drink"
         ]
-      },
-      {
-        "Name": "Power Word Fortitude",
-        "Key": "0",
-        "Cooldown": 1000,
-        "HasCastBar": false,
-        "Requirements": [
-          "Mana% > 80",
-          "!InCombat",
-          "!FocusCombat",
-          "!Fortitude",
-          "!Food",
-          "!Drink"
-        ]
       }
+      /*
+          {
+            "Name": "Power Word Fortitude",
+            "Key": "0",
+            "Cooldown": 1000,
+            "HasCastBar": false,
+            "Requirements": [
+              "Mana% > 80",
+              "!InCombat",
+              "!FocusCombat",
+              "!Fortitude",
+              "!Food",
+              "!Drink"
+            ]
+          }
+          */
       /*
       {
         "Name": "Inner Fire",

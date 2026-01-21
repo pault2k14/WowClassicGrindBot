@@ -41,7 +41,7 @@ public static class GoalFactory
             services.AddScoped<IBagChangeTracker, NoBagChangeTracker>();
 
 
-        if (classConfig.Mode != Mode.Grind)
+        if (classConfig.Mode != Mode.Grind && classConfig.Mode != Mode.PartyLeader)
         {
             services.AddScoped<IBlacklist, NoBlacklist>();
 
@@ -150,7 +150,7 @@ public static class GoalFactory
 
             ResolveAdhocGoals(services, classConfig);
         }
-        else if (classConfig.Mode is Mode.Grind or Mode.AttendedGrind)
+        else if (classConfig.Mode is Mode.Grind or Mode.AttendedGrind or Mode.PartyLeader)
         {
             if (classConfig.Mode == Mode.AttendedGrind)
             {
@@ -159,6 +159,11 @@ public static class GoalFactory
             else
             {
                 ResolveFollowRouteGoal(services, classConfig);
+            }
+
+            if (classConfig.Mode is Mode.PartyLeader)
+            {
+                services.AddScoped<GoapGoal, TargetFocusInCombatTargetGoal>();
             }
 
             services.AddScoped<GoapGoal, WalkToCorpseGoal>();

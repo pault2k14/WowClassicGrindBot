@@ -1,9 +1,9 @@
 {
   "ClassName": "Priest",
-  "Mode": "AssistFocus",
+  "Mode": "PartyLeader",
   "Loot": true,
   "UnitToFollow": "party1",
-  "PathFilename": "5_Gnome.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/05-07_Durotar_Road.json",
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AssistPull": false,

@@ -22,7 +22,8 @@ public enum Mode
     CorpseRun = 1,
     AttendedGather = 2,
     AttendedGrind = 3,
-    AssistFocus = 4
+    AssistFocus = 4,
+    PartyLeader = 5
 }
 
 
