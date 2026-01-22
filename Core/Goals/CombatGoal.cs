@@ -176,7 +176,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 return;
             }
 
-            logger.LogInformation("CombatGoals Update Top of loop");
             wait.Update();
 
             if(classConfig.Mode == Mode.AssistFocus && playerReader.TargetGuid != playerReader.FocusTargetGuid)

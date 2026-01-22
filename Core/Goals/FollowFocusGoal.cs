@@ -49,6 +49,9 @@ public sealed class FollowFocusGoal : GoapGoal
         AddPrecondition(GoapKey.damagetaken, false);
         AddPrecondition(GoapKey.producedcorpse, false);
         AddPrecondition(GoapKey.consumecorpse, false);
+        AddPrecondition(GoapKey.consumecorpse, false);
+        AddPrecondition(GoapKey.eating, false);
+        AddPrecondition(GoapKey.drinking, false);
     }
 
     public override void OnEnter()
@@ -117,25 +120,6 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void Update()
     {
-        if(bits.AutoFollow() != previousState)
-        {
-            
-            if(bits.AutoFollow())
-            {
-                // Use Macro to send i'm following in party chat
-                input.PressAssistIsFollowing();
-                wait.Update();
-
-            }
-            else
-            {
-                // Use Macro to send i'm not following in party chat
-                input.PressAssistIsNotFollowing();
-                wait.Update();
-            }
-
-            previousState = bits.AutoFollow();
-        }
 
         if (chatReader.ForcedFollow)
         {
@@ -157,6 +141,11 @@ public sealed class FollowFocusGoal : GoapGoal
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+
+                wait.Update();
+                // Use Macro to send i'm following in party chat
+                input.PressAssistIsFollowing();
+                wait.Update();
             }
         }
         else if (classConfig.UnitToFollow == "party1")
@@ -173,6 +162,12 @@ public sealed class FollowFocusGoal : GoapGoal
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+                wait.Update();
+
+                // Use Macro to send i'm following in party chat
+                input.PressAssistIsFollowing();
+                wait.Update();
+
             }
         }
         else if (classConfig.UnitToFollow == "party2")
@@ -189,6 +184,11 @@ public sealed class FollowFocusGoal : GoapGoal
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+                wait.Update();
+
+                // Use Macro to send i'm following in party chat
+                input.PressAssistIsFollowing();
+                wait.Update();
             }
         }
         else if (classConfig.UnitToFollow == "party3")
@@ -205,6 +205,11 @@ public sealed class FollowFocusGoal : GoapGoal
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+                wait.Update();
+
+                // Use Macro to send i'm following in party chat
+                input.PressAssistIsFollowing();
+                wait.Update();
             }
         }
         else if (classConfig.UnitToFollow == "party4")

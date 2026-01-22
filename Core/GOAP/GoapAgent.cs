@@ -26,6 +26,7 @@ public sealed partial class GoapAgent : IDisposable
     private readonly AddonReader addonReader;
     private readonly PlayerReader playerReader;
     private readonly ChatReader chatReader;
+    private readonly RestHandler restHandler;
     private readonly AddonBits bits;
     private readonly IWowScreen screen;
     private readonly RouteInfo routeInfo;
@@ -120,7 +121,8 @@ public sealed partial class GoapAgent : IDisposable
         StopMoving stopMoving,
         IGrindSessionHandler sessionHandler,
         IEnumerable<GoapGoal> availableGoals,
-        ChatReader chatReader
+        ChatReader chatReader,
+        RestHandler restHandler
         )
     {
         this.routeInfo = routeInfo;
@@ -153,6 +155,7 @@ public sealed partial class GoapAgent : IDisposable
 
         this.AvailableGoals = availableGoals.OrderBy(a => a.Cost).ToArray();
         this.chatReader = chatReader;
+        this.restHandler = restHandler;
 
         combatLog.KillCredit += OnKillCredit;
         combatLog.PlayerDeath += PlayerDied;
@@ -289,7 +292,9 @@ public sealed partial class GoapAgent : IDisposable
             (B(b.FocusTarget()) << (int)GoapKey.focushastarget) |
             (B(State.ConsumableCorpseCount > 0) << (int)GoapKey.consumablecorpsenearby) |
             (B(chatReader.ForcedFollow) << (int)GoapKey.forcedfollow) |
-            (B(chatReader.AssistIsFollowing) << (int)GoapKey.assistisfollowing)
+            (B(chatReader.AssistIsFollowing) << (int)GoapKey.assistisfollowing) |
+            (B(restHandler.IsEating()) << (int)GoapKey.eating) |
+            (B(restHandler.IsDrinking()) << (int)GoapKey.drinking) 
             ;
 
         WorldState = new(data);

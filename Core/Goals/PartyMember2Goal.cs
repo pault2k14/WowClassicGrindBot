@@ -49,7 +49,7 @@ public sealed class PartyMember2Goal : GoapGoal
         this.restHandler = restHandler;
         this.chatReader = chatReader;
 
-        AddPrecondition(GoapKey.forcedfollow, false);
+        AddPrecondition(GoapKey.assistisfollowing, false);
     }
 
     public override float Cost => 3.9f;

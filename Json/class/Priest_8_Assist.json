@@ -1,7 +1,7 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": true,
+  "Loot": false,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
@@ -49,7 +49,7 @@
         "HasCastBar": true,
         "AfterCastWaitCastbar": true,
         "Requirements": [
-          "PartyMember1Health% < 60",
+          "PartyMember1Health% < 80",
           "Mana > 30",
           "TargetAlive"
         ]
@@ -63,7 +63,7 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "!P1_Renew",
-          "PartyMember1Health% < 45",
+          "PartyMember1Health% < 60",
           "Mana > 30",
           "TargetAlive"
         ]
@@ -90,7 +90,7 @@
         "Cooldown": 500,
         "UseWithForcedFollow": true,
         "Requirements": [
-          "PartyMember1Health% < 20",
+          "PartyMember1Health% < 60",
           "Mana > 45",
           "InCombat",
           "!P1_Shield",
@@ -396,6 +396,7 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
+        "Cooldown":  120000,
         "Requirement": "Health% < 15"
       },
       {
@@ -500,6 +501,8 @@
       {
         "Name": "Food",
         "Key": "F12",
+        "AfterCastWaitBuff": true,
+        "AfterCastDelay": 1000,
         "Requirements": [
           "Health% < 50",
           "!InCombat",
@@ -509,6 +512,8 @@
       {
         "Name": "Drink",
         "Key": "F11",
+        "AfterCastWaitBuff": true,
+        "AfterCastDelay": 1000,
         "Requirements": [
           "Mana% < 40",
           "!InCombat",
