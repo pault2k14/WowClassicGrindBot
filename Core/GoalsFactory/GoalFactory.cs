@@ -328,7 +328,8 @@ public static class GoalFactory
                 x.GetRequiredService<IMountHandler>(),
                 x.GetRequiredService<TargetFinder>(),
                 x.GetRequiredService<IBlacklist>(),
-                x.GetRequiredService<RestHandler>()
+                x.GetRequiredService<RestHandler>(),
+                x.GetRequiredService<ChatReader>()
                 ));
         }
     }

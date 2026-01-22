@@ -49,6 +49,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private readonly PathSettings pathSettings;
     private readonly RestHandler restHandler;
+    private readonly ChatReader chatReader;
 
     private Vector3[] mapRoute
     {
@@ -90,7 +91,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         ClassConfiguration classConfig,
         Navigation navigation,
         IMountHandler mountHandler, TargetFinder targetFinder,
-        IBlacklist targetBlacklist, RestHandler restHandler)
+        IBlacklist targetBlacklist, RestHandler restHandler,
+        ChatReader chatReader)
     : base("Follow " + System.IO.Path.GetFileNameWithoutExtension(pathSettings.FileName))
     {
         this.cost = cost;
@@ -121,6 +123,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         navigation.OnPathCalculated += Navigation_OnPathCalculated;
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
         navigation.OnWayPointReached += Navigation_OnWayPointReached;
+
+        this.chatReader = chatReader;
 
         if(classConfig.Mode == Mode.PartyLeader)
         {
@@ -248,6 +252,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             input.PressJump();
         }
+
+        if (!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader) { return; }
 
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
 
