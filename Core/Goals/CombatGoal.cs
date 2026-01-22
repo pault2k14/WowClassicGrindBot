@@ -53,7 +53,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.classConfig = classConfig;
         this.chatReader = chatReader;
 
-        if(classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader)
+        if(classConfig.Mode == Mode.AssistFocus)
         {
             AddPrecondition(GoapKey.focuscombat, true);
         }

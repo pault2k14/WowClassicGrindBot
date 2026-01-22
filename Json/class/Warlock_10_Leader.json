@@ -1,0 +1,164 @@
+{
+  "ClassName": "Warlock",
+  "Mode": "PartyLeader",
+  "Loot": true,
+  "NPCMaxLevels_Below": 5,
+  "PathFilename": "_pack/1-20/Troll.Orc/07-10_Durotar.json",
+  "PathThereAndBack": false,
+  "PathReduceSteps": true,
+  "AutoPetAttack": true,
+  "IntVariables": {
+    "DOT_MIN_HEALTH%": 35,
+    "Item_Soul_Shard": 6265
+  },
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Immolate",
+        "Key": "1",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 1000,
+        "Requirements": [
+          "MaxRange < 25"
+        ]
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirement": "Health% < 15"
+      },
+      {
+        "Name": "Drain Soul",
+        "Key": "7",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "MaxRange < 25",
+          "TargetHealth% < 25",
+          "!BagItem:Item_Soul_Shard:3",
+          "TargetYieldXP"
+        ]
+      },
+      {
+        "Name": "Curse of Agony",
+        "Key": "2",
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "Cooldown": 2000,
+        "Requirements": [
+          "MaxRange < 25",
+          "TargetHealth% > DOT_MIN_HEALTH%",
+          "!Curse of Agony"
+        ]
+      },
+      {
+        "Name": "Corruption",
+        "Key": "3",
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "Cooldown": 2000,
+        "HasCastBar": true,
+        "Requirements": [
+          "MaxRange < 25",
+          "TargetHealth% > DOT_MIN_HEALTH%",
+          "!Corruption"
+        ]
+      },
+      {
+        "Name": "Shadow Bolt",
+        "Key": "5",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "Cooldown": 2000,
+        "Requirements": [
+          "MaxRange < 25",
+          "TargetHealth% > DOT_MIN_HEALTH%",
+          "TargetsPet"
+        ]
+      },
+      {
+        "Name": "Immolate",
+        "Key": "1",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "Cooldown": 2000,
+        "Requirements": [
+          "MaxRange < 25",
+          "TargetHealth% > DOT_MIN_HEALTH%",
+          "!Immolate"
+        ]
+      },
+      {
+        "Name": "Shoot",
+        "Key": "4",
+        "Item": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          //"HasRangedWeapon",
+          "!Shooting",
+          "SpellInRange:1"
+        ]
+      }
+      /*
+      {
+        "Name": "AutoAttack",
+        "Requirements": [
+          "!HasRangedWeapon"
+        ]
+      }
+      */
+    ]
+  },
+  "Parallel": {
+    "Sequence": [
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health% < 50"
+      },
+      {
+        "Name": "Drink",
+        "Key": "F11",
+        "Requirement": "Mana% < 40"
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Demon Skin",
+        "Key": "9",
+        "Requirement": "!Demon Skin"
+      },
+      {
+        "Name": "Summon Imp",
+        "Key": "0",
+        "HasCastBar": true,
+        "AfterCastDelay": 2000,
+        "Requirements": [
+          "!Has Pet"
+        ],
+        "AfterCastWaitCastbar": true,
+        "AfterCastAuraExpected": true
+      },
+      {
+        "Name": "Life Tap",
+        "Key": "6",
+        "Charge": 2,
+        "Requirements": [
+          "Health% > 70",
+          "Mana% < 60"
+        ]
+      }
+    ]
+  }
+}

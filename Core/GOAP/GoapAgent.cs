@@ -62,7 +62,7 @@ public sealed partial class GoapAgent : IDisposable
                 input.Reset();
                 stopMoving.Stop();
 
-                if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind)
+                if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind or Mode.PartyLeader)
                 {
                     sessionHandler.Stop("Stopped", false);
                 }
@@ -81,7 +81,7 @@ public sealed partial class GoapAgent : IDisposable
 
                 manualReset.Set();
 
-                if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind)
+                if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind or Mode.PartyLeader)
                 {
                     SessionStat.Start();
                     sessionHandler.Start(classConfig.OverridePathFilename ?? classConfig.PathFilename);
