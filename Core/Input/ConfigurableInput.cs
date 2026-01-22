@@ -9,18 +9,24 @@ namespace Core;
 
 public sealed partial class ConfigurableInput
 {
+    public const int MIN_GCD = 1000;
     private readonly ILogger<ConfigurableInput> logger;
     private readonly WowProcessInput input;
     private readonly ClassConfiguration classConfig;
+    private readonly PlayerReader playerReader;
+    private readonly Wait wait;
 
     private readonly bool Log;
 
     public ConfigurableInput(ILogger<ConfigurableInput> logger,
-        WowProcessInput input, ClassConfiguration classConfig)
+        WowProcessInput input, ClassConfiguration classConfig,
+        PlayerReader playerReader, Wait wait)
     {
         this.logger = logger;
         this.input = input;
         this.classConfig = classConfig;
+        this.playerReader = playerReader;
+        this.wait = wait;
         Log = classConfig.Log;
 
         input.ForwardKey = classConfig.ForwardKey;
@@ -54,6 +60,22 @@ public sealed partial class ConfigurableInput
     {
         if (input.IsKeyDown(BackwardKey))
             input.SetKeyState(BackwardKey, false, forced);
+    }
+
+    public void StepBackwards()
+    {
+        int pressDurationMs = playerReader.GCD.Value != 0
+        ? playerReader.GCD.Value 
+        : MIN_GCD - playerReader.SpellQueueTimeMs;
+
+        StartBackward(true);
+
+        if (Random.Shared.Next(3) == 0)
+            PressJump();
+
+        float elapsedMs = wait.Until(pressDurationMs, () => false);
+
+        StopBackward(false);
     }
 
     public void SetKeyState(ConsoleKey key, bool state, bool forced)

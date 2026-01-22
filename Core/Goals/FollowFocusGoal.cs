@@ -71,9 +71,6 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void OnExit()
     {
-        // Use Macro to say I'm not following in party chat
-        input.PressAssistIsNotFollowing();
-        wait.Update();
 
         if (classConfig.UnitToFollow == "focus")
         {
@@ -115,6 +112,12 @@ public sealed class FollowFocusGoal : GoapGoal
                 wait.Update();
             }
         }
+
+        input.StepBackwards();
+        
+        // Use Macro to say I'm not following in party chat
+        input.PressAssistIsNotFollowing();
+        wait.Update();
 
     }
 
