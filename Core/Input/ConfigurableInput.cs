@@ -163,6 +163,10 @@ public sealed partial class ConfigurableInput
 
     public void PressFollowTarget(CancellationToken token = default) => PressRandom(FollowTarget, token);
 
+    public void PressAssistIsFollowing(CancellationToken token = default) => PressRandom(AssistIsFollowing, token);
+
+    public void PressAssistIsNotFollowing(CancellationToken token = default) => PressRandom(AssistIsNotFollowing, token);
+
     public void PressESC(CancellationToken token = default)
     {
         input.PressRandom(ConsoleKey.Escape, InputDuration.VeryFastPress, token);

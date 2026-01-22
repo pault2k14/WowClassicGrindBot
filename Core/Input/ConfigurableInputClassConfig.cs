@@ -29,5 +29,10 @@ public sealed partial class ConfigurableInput
     public KeyAction TargetFocusPartyMemberThree => classConfig.TargetFocusPartyMemberThree;
     public KeyAction TargetFocusPartyMemberFour => classConfig.TargetFocusPartyMemberFour;
     public KeyAction FollowTarget => classConfig.FollowTarget;
+
+    public KeyAction AssistIsFollowing => classConfig.AssistIsFollowing;
+
+    public KeyAction AssistIsNotFollowing => classConfig.AssistIsNotFollowing;
+
     public KeyAction Mount => classConfig.Mount;
 }

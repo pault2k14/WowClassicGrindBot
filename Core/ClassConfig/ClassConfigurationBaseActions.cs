@@ -150,6 +150,22 @@ public sealed partial class ClassConfiguration
         BaseAction = true,
     };
 
+    public KeyAction AssistIsFollowing { get; } = new()
+    {
+        Key = "F3",
+        Name = nameof(AssistIsFollowing),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
+    public KeyAction AssistIsNotFollowing { get; } = new()
+    {
+        Key = "F4",
+        Name = nameof(AssistIsNotFollowing),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
     public KeyAction Mount { get; } = new()
     {
         Key = "O",

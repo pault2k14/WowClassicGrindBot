@@ -122,6 +122,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
         navigation.OnWayPointReached += Navigation_OnWayPointReached;
 
+        if(classConfig.Mode == Mode.PartyLeader)
+        {
+            AddPrecondition(GoapKey.assistisfollowing, true);
+        }
+
         if (classConfig.Mode == Mode.AttendedGather)
         {
             AddPrecondition(GoapKey.dangercombat, false);

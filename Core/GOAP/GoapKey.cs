@@ -29,6 +29,7 @@ public enum GoapKey
     focuscombat,
     consumablecorpsenearby,
     forcedfollow,
+    assistisfollowing,
     LENGTH
 }
 
@@ -65,6 +66,7 @@ public static class GoapKey_Extension
         GoapKey.damagetakenordone => "Damage Taken or Done",
         GoapKey.consumablecorpsenearby => "Consume Corpse nearby",
         GoapKey.forcedfollow => "Forced Follow",
+        GoapKey.assistisfollowing => "assist is following",
         _ => unknown
     };
 
@@ -96,6 +98,7 @@ public static class GoapKey_Extension
         GoapKey.damagetakenordone => "!Damage Taken or Done",
         GoapKey.consumablecorpsenearby => "!Consume Corpse nearby",
         GoapKey.forcedfollow => "!Forced Follow",
+        GoapKey.assistisfollowing => "!assist is following",
         _ => unknown
     };
 

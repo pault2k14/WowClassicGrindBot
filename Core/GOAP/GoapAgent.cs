@@ -288,7 +288,8 @@ public sealed partial class GoapAgent : IDisposable
             (B(b.Focus()) << (int)GoapKey.hasfocus) |
             (B(b.FocusTarget()) << (int)GoapKey.focushastarget) |
             (B(State.ConsumableCorpseCount > 0) << (int)GoapKey.consumablecorpsenearby) |
-            (B(chatReader.ForcedFollow) << (int)GoapKey.forcedfollow)
+            (B(chatReader.ForcedFollow) << (int)GoapKey.forcedfollow) |
+            (B(chatReader.AssistIsFollowing) << (int)GoapKey.assistisfollowing)
             ;
 
         WorldState = new(data);

@@ -1,5 +1,6 @@
 ﻿using Core.GOAP;
 using Microsoft.Extensions.Logging;
+using System;
 
 namespace Core.Goals;
 
@@ -15,6 +16,7 @@ public sealed class FollowFocusGoal : GoapGoal
     private readonly ILogger<FollowFocusGoal> logger;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
+    private Boolean previousState;
     
     public FollowFocusGoal(ConfigurableInput input,
         PlayerReader playerReader,
@@ -51,6 +53,8 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void OnEnter()
     {
+        previousState = bits.AutoFollow();
+
         while (restHandler.IsResting())
         {
             wait.Update(1000);
@@ -64,6 +68,10 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void OnExit()
     {
+        // Use Macro to say I'm not following in party chat
+        input.PressAssistIsNotFollowing();
+        wait.Update();
+
         if (classConfig.UnitToFollow == "focus")
         {
             if (playerReader.TargetGuid == playerReader.FocusGuid)
@@ -109,6 +117,26 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void Update()
     {
+        if(bits.AutoFollow() != previousState)
+        {
+            
+            if(bits.AutoFollow())
+            {
+                // Use Macro to send i'm following in party chat
+                input.PressAssistIsFollowing();
+                wait.Update();
+
+            }
+            else
+            {
+                // Use Macro to send i'm not following in party chat
+                input.PressAssistIsNotFollowing();
+                wait.Update();
+            }
+
+            previousState = bits.AutoFollow();
+        }
+
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
