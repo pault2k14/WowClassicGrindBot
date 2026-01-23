@@ -219,6 +219,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public void OnGoapEvent(GoapEventArgs e)
     {
+        if (e is GoapStateEvent g)
+        {
+            switch (g.Key)
+            {
+                case GoapKey.assistisfollowing:
+                    if(!chatReader.AssistIsFollowing)
+                    {
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - !chatReader.AssistIsFollowing");
+                        Abort();
+                    }
+                    
+                    break;
+            }
+        }
+
         if (e.GetType() == typeof(AbortEvent))
         {
             Abort();
@@ -253,7 +268,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             input.PressJump();
         }
 
-        if (!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader) { return; }
+        if (!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader) 
+        {
+            logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
+            Dispose(); 
+            return; 
+        }
 
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
 
@@ -372,6 +392,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private void Navigation_OnWayPointReached()
     {
         MountIfPossible();
+    }
+
+    public void ClearWaypoints()
+    {
+        logger.LogInformation("FollowRouteGoal: ClearWaypoints!");
+        navigation.SetWayPoints(stackalloc Vector3[1] { playerReader.MapPos });
+        return;
     }
 
     public void RefillWaypoints(bool onlyClosest)

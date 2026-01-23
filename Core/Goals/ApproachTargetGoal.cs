@@ -67,6 +67,11 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.classConfig = classConfig;
         this.chatReader = chatReader;
 
+        if(classConfig.Mode == Mode.PartyLeader)
+        {
+            AddPrecondition(GoapKey.assistisfollowing, true);
+        }
+
         AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
@@ -108,6 +113,12 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
+        if(!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
+        {
+            logger.LogInformation("ApproachTargetGoal: Not approaching due to assist target not following");
             return;
         }
 

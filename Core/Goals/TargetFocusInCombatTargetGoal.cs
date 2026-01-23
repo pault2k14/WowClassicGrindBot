@@ -42,6 +42,7 @@ public sealed class TargetFocusInCombatTargetGoal : GoapGoal
         AddPrecondition(GoapKey.hastarget, false);
         AddPrecondition(GoapKey.focushastarget, true);
         AddPrecondition(GoapKey.focuscombat, true);
+        AddPrecondition(GoapKey.incombat, false);
         this.logger = logger;
     }
 

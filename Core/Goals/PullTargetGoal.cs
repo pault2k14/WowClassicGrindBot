@@ -157,6 +157,12 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        if(!bits.Combat() && !chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
+        {
+            logger.LogInformation("PullTargetGoal: Not pulling due to assist not following");
+            return;
+        }
+
         /* Probably can remove now that we are using classConfig.AssistPull 
         if (classConfig.Mode == Mode.AssistFocus)
         {

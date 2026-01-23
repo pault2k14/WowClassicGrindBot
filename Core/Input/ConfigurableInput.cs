@@ -64,9 +64,13 @@ public sealed partial class ConfigurableInput
 
     public void StepBackwards()
     {
+        /*
         int pressDurationMs = playerReader.GCD.Value != 0
         ? playerReader.GCD.Value 
         : MIN_GCD - playerReader.SpellQueueTimeMs;
+        */
+
+        int pressDurationMs = 100;
 
         StartBackward(true);
 

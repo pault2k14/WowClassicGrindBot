@@ -14,6 +14,7 @@ using System.Collections.Specialized;
 using System.Linq;
 using System.Numerics;
 using System.Threading;
+using System.Transactions;
 
 namespace Core.GOAP;
 
@@ -204,11 +205,26 @@ public sealed partial class GoapAgent : IDisposable
     private void GoapThread()
     {
         bool wasEmpty = false;
+        bool previousAssistIsFollowing = false;
 
         manualReset.Wait();
 
         while (!cts.IsCancellationRequested)
         {
+            if(previousAssistIsFollowing != chatReader.AssistIsFollowing)
+            {
+                if (chatReader.AssistIsFollowing)
+                {
+                    AssistIsFollowing();
+                    previousAssistIsFollowing = true;
+                }
+                else
+                {
+                    AssistIsNotFollowing();
+                    previousAssistIsFollowing = false;
+                }
+            }
+
             GoapGoal? newGoal = NextGoal();
             if (newGoal != null)
             {
@@ -399,6 +415,16 @@ public sealed partial class GoapAgent : IDisposable
     {
         State.Gathering = true;
         BroadcastGoapEvent(GoapKey.gathering, true);
+    }
+
+    public void AssistIsNotFollowing()
+    {
+        BroadcastGoapEvent(GoapKey.assistisfollowing, false);
+    }
+
+    public void AssistIsFollowing()
+    {
+        BroadcastGoapEvent(GoapKey.assistisfollowing, true);
     }
 
     #region Logging
