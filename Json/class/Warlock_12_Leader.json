@@ -1,12 +1,12 @@
 {
   "ClassName": "Warlock",
-  "Mode": "Grind",
+  "Mode": "PartyLeader",
   "Loot": true,
   "NPCMaxLevels_Below": 5,
-  "PathFilename": "_pack/1-20/Troll.Orc/07-10_Durotar.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/09-14_Durotar_Thunder Ridge.json",
   "PathThereAndBack": false,
   "PathReduceSteps": true,
-  "AutoPetAttack": true,
+  "AutoPetAttack": false,
   "IntVariables": {
     "DOT_MIN_HEALTH%": 35,
     "HEALTHSTONE_HP%": 40,
@@ -53,7 +53,7 @@
         "Requirements": [
           "MaxRange < 25",
           "TargetHealth% < 25",
-          "!BagItem:Item_Soul_Shard:1",
+          "!BagItem:Item_Soul_Shard",
           "TargetYieldXP"
         ]
       },

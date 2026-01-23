@@ -231,6 +231,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     }
                     
                     break;
+
+                case GoapKey.assistrequestreturn:
+                    if (chatReader.AssistRequestReturn)
+                    {
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - AssistRequestReturn to X: " 
+                            + chatReader.AssistXPos
+                            + " Y: "
+                            + chatReader.AssistYPos);
+                    }
+
+                    break;
             }
         }
 

@@ -30,6 +30,7 @@ public enum GoapKey
     consumablecorpsenearby,
     forcedfollow,
     assistisfollowing,
+    assistrequestreturn,
     drinking,
     eating,
     LENGTH
@@ -69,6 +70,7 @@ public static class GoapKey_Extension
         GoapKey.consumablecorpsenearby => "Consume Corpse nearby",
         GoapKey.forcedfollow => "Forced Follow",
         GoapKey.assistisfollowing => "assist is following",
+        GoapKey.assistrequestreturn => "assist request return",
         GoapKey.eating => "eating",
         GoapKey.drinking => "drinking",
         _ => unknown
@@ -103,6 +105,7 @@ public static class GoapKey_Extension
         GoapKey.consumablecorpsenearby => "!Consume Corpse nearby",
         GoapKey.forcedfollow => "!Forced Follow",
         GoapKey.assistisfollowing => "!assist is following",
+        GoapKey.assistrequestreturn => "!assist request return",
         GoapKey.eating => "!eating",
         GoapKey.drinking => "!drinking",
         _ => unknown

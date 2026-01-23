@@ -171,6 +171,17 @@ public sealed class FollowFocusGoal : GoapGoal
                 input.PressAssistIsFollowing();
                 wait.Update();
 
+            } else if(!playerReader.SpellInRange.PartyMember1_Inspect) 
+            {
+                // I want to follow but the party member has gone too far
+                // let's tell them and give them our coordinates to find us at
+                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
+                // 2. Party leader will recieve the chatReader event, parse the map coordinates
+                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
+                //    move to the indicated Map Pos
+                input.PressAssistCantFollow();
+                wait.Update();
+                return;
             }
         }
         else if (classConfig.UnitToFollow == "party2")

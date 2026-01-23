@@ -283,7 +283,7 @@ public sealed partial class Navigation : IDisposable
         return WorldMapAreaDB.ToMap_FlipXY(routeToNextWaypoint.Peek(), playerReader.WorldMapArea);
     }
 
-    public void SetWayPoints(Span<Vector3> points)
+    public void  SetWayPoints(Span<Vector3> points)
     {
         wayPoints.Clear();
         routeToNextWaypoint.Clear();

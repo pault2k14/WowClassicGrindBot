@@ -33,6 +33,9 @@ public sealed class ChatReader : IReader
     private const int MsgIdRadix = 1 << 20; // 1048576
     public bool ForcedFollow;
     public bool AssistIsFollowing;
+    public bool AssistRequestReturn;
+    public float AssistXPos;
+    public float AssistYPos;
 
     private static string DecodeChatPart(int number, int take)
     {
@@ -201,6 +204,43 @@ public sealed class ChatReader : IReader
         {
             logger.LogInformation("Received i'm not following");
             AssistIsFollowing = false;
+        }
+
+        // "i tried following but you are too far away my position:x,y"
+        if (type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
+        {
+            logger.LogInformation("Received: " + msg);
+            var msgSubstrings = msg.Split(":");
+            if(msgSubstrings.Length != 2)
+            {
+                logger.LogInformation("msgSubstrings length is not 2, it is " + msgSubstrings.Length);
+
+                for(int i = 0; i < msgSubstrings[i].Length; i++)
+                {
+                    logger.LogInformation("msgSubstrings[" + i + "]: " + msgSubstrings[i]);
+                }
+            }
+            else
+            {
+                logger.LogInformation("coordinate substring: " + msgSubstrings[1]);
+                var coordinateSubstrings = msgSubstrings[1].Split(",");
+
+                if(coordinateSubstrings.Length != 2)
+                {
+                    logger.LogInformation("coordinateSubstrings length is not 2, it is " + coordinateSubstrings.Length);
+                }
+                else
+                {
+                    for (int i = 0; i < coordinateSubstrings[i].Length; i++)
+                    {
+                        logger.LogInformation("coordinateSubstrings[" + i + "]: " + coordinateSubstrings[i]);
+                    }
+
+                    AssistRequestReturn = true;
+                    AssistXPos = float.Parse(coordinateSubstrings[0]);
+                    AssistYPos = float.Parse(coordinateSubstrings[1]);
+                }
+            }
         }
 
         Messages.Add(new ChatMessageEntry(DateTime.Now, type, author, msg));

@@ -166,6 +166,14 @@ public sealed partial class ClassConfiguration
         BaseAction = true,
     };
 
+    public KeyAction AssistCantFollow { get; } = new()
+    {
+        Key = "F5",
+        Name = nameof(AssistCantFollow),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
     public KeyAction Mount { get; } = new()
     {
         Key = "O",

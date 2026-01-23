@@ -206,6 +206,7 @@ public sealed partial class GoapAgent : IDisposable
     {
         bool wasEmpty = false;
         bool previousAssistIsFollowing = false;
+        bool previousAssistRequestReturn = false;
 
         manualReset.Wait();
 
@@ -222,6 +223,20 @@ public sealed partial class GoapAgent : IDisposable
                 {
                     AssistIsNotFollowing();
                     previousAssistIsFollowing = false;
+                }
+            }
+
+            if (previousAssistRequestReturn != chatReader.AssistRequestReturn)
+            {
+                if (chatReader.AssistRequestReturn)
+                {
+                    AssistRequestReturn();
+                    previousAssistRequestReturn = true;
+                }
+                else
+                {
+                    AssistNotRequestReturn();
+                    previousAssistRequestReturn = false;
                 }
             }
 
@@ -309,6 +324,7 @@ public sealed partial class GoapAgent : IDisposable
             (B(State.ConsumableCorpseCount > 0) << (int)GoapKey.consumablecorpsenearby) |
             (B(chatReader.ForcedFollow) << (int)GoapKey.forcedfollow) |
             (B(chatReader.AssistIsFollowing) << (int)GoapKey.assistisfollowing) |
+            (B(chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturn) |
             (B(restHandler.IsEating()) << (int)GoapKey.eating) |
             (B(restHandler.IsDrinking()) << (int)GoapKey.drinking) 
             ;
@@ -425,6 +441,16 @@ public sealed partial class GoapAgent : IDisposable
     public void AssistIsFollowing()
     {
         BroadcastGoapEvent(GoapKey.assistisfollowing, true);
+    }
+
+    public void AssistRequestReturn()
+    {
+        BroadcastGoapEvent(GoapKey.assistrequestreturn, true);
+    }
+
+    public void AssistNotRequestReturn()
+    {
+        BroadcastGoapEvent(GoapKey.assistrequestreturn, false);
     }
 
     #region Logging

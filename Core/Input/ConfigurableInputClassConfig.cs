@@ -32,6 +32,9 @@ public sealed partial class ConfigurableInput
 
     public KeyAction AssistIsFollowing => classConfig.AssistIsFollowing;
 
+    public KeyAction AssistCantFollow => classConfig.AssistCantFollow;
+    
+
     public KeyAction AssistIsNotFollowing => classConfig.AssistIsNotFollowing;
 
     public KeyAction Mount => classConfig.Mount;
