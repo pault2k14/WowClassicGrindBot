@@ -233,12 +233,13 @@ public sealed class ChatReader : IReader
                 {
                     for (int i = 0; i < coordinateSubstrings[i].Length; i++)
                     {
+                        logger.LogInformation("i: " + i);
                         logger.LogInformation("coordinateSubstrings[" + i + "]: " + coordinateSubstrings[i]);
                     }
 
                     AssistRequestReturn = true;
-                    AssistXPos = float.Parse(coordinateSubstrings[0]);
-                    AssistYPos = float.Parse(coordinateSubstrings[1]);
+                    //AssistXPos = float.Parse(coordinateSubstrings[0]);
+                    //AssistYPos = float.Parse(coordinateSubstrings[1]);
                 }
             }
         }
