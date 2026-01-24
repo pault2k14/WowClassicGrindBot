@@ -163,7 +163,6 @@ public static class GoalFactory
 
             if (classConfig.Mode is Mode.PartyLeader)
             {
-                services.AddScoped<GoapGoal, TargetFocusInCombatTargetGoal>();
                 services.AddScoped<GoapGoal, PartyMember1Goal>();
                 services.AddScoped<GoapGoal, PartyMember2Goal>();
                 services.AddScoped<GoapGoal, PartyMember3Goal>();

@@ -259,6 +259,7 @@ public sealed partial class GoapAgent : IDisposable
             else if (!wasEmpty)
             {
                 LogNewEmptyGoal(logger);
+                LogCompleteGoapState();
                 wasEmpty = true;
             }
 
@@ -268,6 +269,53 @@ public sealed partial class GoapAgent : IDisposable
 
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogDebug("Thread stopped!");
+    }
+
+    public void LogCompleteGoapState()
+    {
+        AddonBits b = bits;
+
+        bool dmgTaken = combatLog.DamageTakenCount() > 0;
+        bool dmgDone = combatLog.DamageDoneCount() > 0;
+        bool hasTarget = b.Target();
+        bool playerCombat = b.Combat();
+
+        logger.LogInformation("---- Complate GoapKey State ----");
+        logger.LogInformation("GoapKey.hastarget: " + hasTarget);
+        logger.LogInformation("GoapKey.dangercombat: " + (playerCombat && dmgTaken));
+        logger.LogInformation("GoapKey.damagetaken: " + dmgTaken);
+        logger.LogInformation("GoapKey.damagedone: " + dmgDone);
+        logger.LogInformation("GoapKey.damagetakenordone: " + (dmgTaken || dmgDone));
+        logger.LogInformation("GoapKey.targetisalive: " + (hasTarget && !b.Target_Dead()));
+        logger.LogInformation("GoapKey.targettargetsus: " + ((hasTarget && playerReader.TargetHealthPercent() < 30) ||
+            playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet or UnitsTarget.PartyOrPet));
+        logger.LogInformation("GoapKey.incombat: " + playerCombat);
+        logger.LogInformation("GoapKey.pethastarget: " + (playerReader.PetTarget() && !b.PetTarget_Dead()));
+        logger.LogInformation("GoapKey.ismounted: " + mountHandler.IsMounted());
+        logger.LogInformation("GoapKey.withinpullrange: " + playerReader.WithInPullRange());
+        logger.LogInformation("GoapKey.incombatrange: " + playerReader.WithInCombatRange());
+        logger.LogInformation("GoapKey.pulled: " + (bits.Combat() && bits.Target_Combat() && combatLog.ToPullCount() > 0));
+        logger.LogInformation("GoapKey.isdead: " + b.Dead());
+        logger.LogInformation("GoapKey.shouldloot: " + (State.LootableCorpseCount > 0));
+        logger.LogInformation("GoapKey.shouldgather: " + (State.GatherableCorpseCount > 0));
+        logger.LogInformation("GoapKey.producedcorpse: " + (State.LastCombatKillCount > 0));
+        logger.LogInformation("GoapKey.consumecorpse: " + State.ShouldConsumeCorpse);
+        logger.LogInformation("GoapKey.isswimming: " + b.Swimming());
+        logger.LogInformation("GoapKey.itemsbroken: " + b.Items_Broken());
+        logger.LogInformation("GoapKey.gathering: " + State.Gathering);
+        logger.LogInformation("GoapKey.targethostile: " + (b.Target_Hostile() || (bits.Target() 
+            && combatLog.ToPull.Contains(playerReader.TargetGuid))));
+        logger.LogInformation("GoapKey.hasfocus: " + b.Focus());
+        logger.LogInformation("GoapKey.focushastarget: " + b.FocusTarget());
+        logger.LogInformation("GoapKey.focuscombat: " + bits.FocusTarget_Combat());
+        logger.LogInformation("GoapKey.consumablecorpsenearby: " + (State.ConsumableCorpseCount > 0));
+        logger.LogInformation("GoapKey.forcedfollow: " + chatReader.ForcedFollow);
+        logger.LogInformation("GoapKey.assistisfollowing: " + chatReader.AssistIsFollowing);
+        logger.LogInformation("GoapKey.assistrequestreturn: " + chatReader.AssistRequestReturn);
+        logger.LogInformation("GoapKey.assistrequestreturnorisfollowing: " + (chatReader.AssistIsFollowing || chatReader.AssistRequestReturn));
+        logger.LogInformation("GoapKey.drinking: " + restHandler.IsDrinking());
+        logger.LogInformation("GoapKey.eating: " + restHandler.IsDrinking());
+        
     }
 
     private GoapGoal? NextGoal()
