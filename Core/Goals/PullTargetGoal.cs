@@ -98,6 +98,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.targetisalive, true);
         AddPrecondition(GoapKey.targethostile, true);
         AddPrecondition(GoapKey.withinpullrange, true);
+        AddPrecondition(GoapKey.assistrequestreturn, false);
 
         AddEffect(GoapKey.pulled, true);
         this.chatReader = chatReader;

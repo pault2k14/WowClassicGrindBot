@@ -149,6 +149,9 @@ public sealed class FollowFocusGoal : GoapGoal
                 // Use Macro to send i'm following in party chat
                 input.PressAssistIsFollowing();
                 wait.Update();
+
+                chatReader.AssistRequestReturn = false;
+                wait.Update();
             }
         }
         else if (classConfig.UnitToFollow == "party1")
@@ -169,6 +172,9 @@ public sealed class FollowFocusGoal : GoapGoal
 
                 // Use Macro to send i'm following in party chat
                 input.PressAssistIsFollowing();
+                wait.Update();
+
+                chatReader.AssistRequestReturn = false;
                 wait.Update();
 
             } else if(!playerReader.SpellInRange.PartyMember1_Inspect) 
@@ -203,6 +209,9 @@ public sealed class FollowFocusGoal : GoapGoal
                 // Use Macro to send i'm following in party chat
                 input.PressAssistIsFollowing();
                 wait.Update();
+
+                chatReader.AssistRequestReturn = false;
+                wait.Update();
             }
         }
         else if (classConfig.UnitToFollow == "party3")
@@ -224,6 +233,9 @@ public sealed class FollowFocusGoal : GoapGoal
                 // Use Macro to send i'm following in party chat
                 input.PressAssistIsFollowing();
                 wait.Update();
+
+                chatReader.AssistRequestReturn = false;
+                wait.Update();
             }
         }
         else if (classConfig.UnitToFollow == "party4")
@@ -240,6 +252,14 @@ public sealed class FollowFocusGoal : GoapGoal
                 !input.FollowTarget.OnCooldown())
             {
                 input.PressFollowTarget();
+                wait.Update();
+
+                // Use Macro to send i'm following in party chat
+                input.PressAssistIsFollowing();
+                wait.Update();
+
+                chatReader.AssistRequestReturn = false;
+                wait.Update();
             }
         }
 

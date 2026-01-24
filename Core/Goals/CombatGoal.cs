@@ -68,6 +68,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.targethostile, true);
         //AddPrecondition(GoapKey.targettargetsus, true);
         AddPrecondition(GoapKey.incombatrange, true);
+        AddPrecondition(GoapKey.assistrequestreturn, false);
 
         if(classConfig.Loot)
         {

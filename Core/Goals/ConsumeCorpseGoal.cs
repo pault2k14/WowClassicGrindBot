@@ -33,6 +33,7 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal
 
         AddPrecondition(GoapKey.producedcorpse, true);
         AddPrecondition(GoapKey.consumecorpse, false);
+        AddPrecondition(GoapKey.assistrequestreturn, false);
 
         AddEffect(GoapKey.producedcorpse, false);
         

@@ -207,6 +207,7 @@ public sealed class ChatReader : IReader
         }
 
         // "i tried following but you are too far away my position:x,y"
+        
         if (type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
         {
             logger.LogInformation("Received: " + msg);
@@ -215,7 +216,7 @@ public sealed class ChatReader : IReader
             {
                 logger.LogInformation("msgSubstrings length is not 2, it is " + msgSubstrings.Length);
 
-                for(int i = 0; i < msgSubstrings[i].Length; i++)
+                for(int i = 0; i < msgSubstrings.Length; i++)
                 {
                     logger.LogInformation("msgSubstrings[" + i + "]: " + msgSubstrings[i]);
                 }
@@ -231,15 +232,15 @@ public sealed class ChatReader : IReader
                 }
                 else
                 {
-                    for (int i = 0; i < coordinateSubstrings[i].Length; i++)
+                    for (int i = 0; i < coordinateSubstrings.Length; i++)
                     {
                         logger.LogInformation("i: " + i);
                         logger.LogInformation("coordinateSubstrings[" + i + "]: " + coordinateSubstrings[i]);
                     }
 
                     AssistRequestReturn = true;
-                    //AssistXPos = float.Parse(coordinateSubstrings[0]);
-                    //AssistYPos = float.Parse(coordinateSubstrings[1]);
+                    AssistXPos = float.Parse(coordinateSubstrings[0]);
+                    AssistYPos = float.Parse(coordinateSubstrings[1]);
                 }
             }
         }

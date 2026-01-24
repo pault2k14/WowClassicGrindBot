@@ -41,6 +41,7 @@ public sealed class ParallelGoal : GoapGoal
 
         AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.incombat, false);
+        AddPrecondition(GoapKey.assistrequestreturn, false);
 
         Keys = classConfig.Parallel.Sequence;
         this.restHandler = restHandler;

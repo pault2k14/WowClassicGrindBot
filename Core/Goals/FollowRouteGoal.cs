@@ -191,7 +191,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Resume()
     {
-        while (restHandler.IsResting())
+        while (restHandler.IsResting() && !chatReader.AssistRequestReturn)
         {
             wait.Update(1000);
         }
@@ -204,7 +204,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         sideActivityManualReset.Set();
 
-        if (!navigation.HasWaypoint())
+        // If we are the PartyLeader and our assist has requested a return to them
+        // let's use their location as a waypoint and go to them.
+        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+        {
+            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+            logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
+            GoToOneWaypoint(assistWaypoint);
+        }
+        else if (!navigation.HasWaypoint())
         {
             RefillWaypoints(true);
         }
@@ -231,7 +239,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     }
                     
                     break;
-
+                
                 case GoapKey.assistrequestreturn:
                     if (chatReader.AssistRequestReturn)
                     {
@@ -279,7 +287,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             input.PressJump();
         }
 
-        if (!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader) 
+        if (!chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn && classConfig.Mode == Mode.PartyLeader) 
         {
             logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
             Dispose(); 
@@ -409,6 +417,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     {
         logger.LogInformation("FollowRouteGoal: ClearWaypoints!");
         navigation.SetWayPoints(stackalloc Vector3[1] { playerReader.MapPos });
+        return;
+    }
+
+    public void GoToOneWaypoint(Vector3 waypointToGoTo)
+    {
+        logger.LogInformation("FollowRouteGoal: GoToOneWaypoint!");
+        navigation.SetWayPoints(stackalloc Vector3[1] { waypointToGoTo });
         return;
     }
 
