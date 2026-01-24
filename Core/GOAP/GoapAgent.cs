@@ -240,6 +240,7 @@ public sealed partial class GoapAgent : IDisposable
                 }
             }
 
+
             GoapGoal? newGoal = NextGoal();
             if (newGoal != null)
             {
@@ -325,6 +326,7 @@ public sealed partial class GoapAgent : IDisposable
             (B(chatReader.ForcedFollow) << (int)GoapKey.forcedfollow) |
             (B(chatReader.AssistIsFollowing) << (int)GoapKey.assistisfollowing) |
             (B(chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturn) |
+            (B(chatReader.AssistIsFollowing || chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturnorisfollowing) |
             (B(restHandler.IsEating()) << (int)GoapKey.eating) |
             (B(restHandler.IsDrinking()) << (int)GoapKey.drinking) 
             ;

@@ -128,7 +128,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if(classConfig.Mode == Mode.PartyLeader)
         {
-            AddPrecondition(GoapKey.assistisfollowing, true);
+            AddPrecondition(GoapKey.assistrequestreturnorisfollowing, true);
         }
 
         if (classConfig.Mode == Mode.AttendedGather)
@@ -209,6 +209,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
             Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+            sideActivityCts.Cancel();
+            sideActivityManualReset.Reset();
             logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
             GoToOneWaypoint(assistWaypoint);
         }
@@ -247,6 +249,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                             + chatReader.AssistXPos
                             + " Y: "
                             + chatReader.AssistYPos);
+
+                        Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+                        sideActivityCts.Cancel();
+                        sideActivityManualReset.Reset();
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - Calling GoToOneWaypoint of " + assistWaypoint);
+                        GoToOneWaypoint(assistWaypoint);
                     }
 
                     break;
@@ -403,8 +411,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     {
         if (debug)
             LogDebug("Navigation_OnDestinationReached");
-
-        RefillWaypoints(false);
+        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+        {
+            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+            sideActivityCts.Cancel();
+            sideActivityManualReset.Reset();
+            logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
+            GoToOneWaypoint(assistWaypoint);
+        } else
+        {
+            RefillWaypoints(false);
+        }
         MountIfPossible();
     }
 

@@ -198,6 +198,7 @@ public sealed class ChatReader : IReader
         {
             logger.LogInformation("Received i'm following");
             AssistIsFollowing = true;
+            AssistRequestReturn = false;
         }
 
         if (type == ChatMessageType.Party && msg.Equals("i'm not following"))

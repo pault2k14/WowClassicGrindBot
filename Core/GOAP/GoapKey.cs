@@ -31,6 +31,7 @@ public enum GoapKey
     forcedfollow,
     assistisfollowing,
     assistrequestreturn,
+    assistrequestreturnorisfollowing,
     drinking,
     eating,
     LENGTH
@@ -71,6 +72,7 @@ public static class GoapKey_Extension
         GoapKey.forcedfollow => "Forced Follow",
         GoapKey.assistisfollowing => "assist is following",
         GoapKey.assistrequestreturn => "assist request return",
+        GoapKey.assistrequestreturnorisfollowing => "assist request return or is following",
         GoapKey.eating => "eating",
         GoapKey.drinking => "drinking",
         _ => unknown
@@ -106,6 +108,7 @@ public static class GoapKey_Extension
         GoapKey.forcedfollow => "!Forced Follow",
         GoapKey.assistisfollowing => "!assist is following",
         GoapKey.assistrequestreturn => "!assist request return",
+        GoapKey.assistrequestreturnorisfollowing => "assist request return or is following",
         GoapKey.eating => "!eating",
         GoapKey.drinking => "!drinking",
         _ => unknown
