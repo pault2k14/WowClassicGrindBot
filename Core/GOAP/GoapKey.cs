@@ -1,4 +1,6 @@
-﻿namespace Core.GOAP;
+﻿using System;
+
+namespace Core.GOAP;
 
 public enum GoapKey
 {
