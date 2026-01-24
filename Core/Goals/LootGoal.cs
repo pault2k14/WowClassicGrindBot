@@ -78,6 +78,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.dangercombat, false);
         AddPrecondition(GoapKey.shouldloot, true);
         AddPrecondition(GoapKey.assistrequestreturn, false);
+        AddPrecondition(GoapKey.focuscombat, false);
         AddEffect(GoapKey.shouldloot, false);
         this.restHandler = restHandler;
     }

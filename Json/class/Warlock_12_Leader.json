@@ -3,7 +3,7 @@
   "Mode": "PartyLeader",
   "Loot": true,
   "NPCMaxLevels_Below": 5,
-  "PathFilename": "_pack/1-20/Troll.Orc/09-14_Durotar_Thunder Ridge.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle.json",
   "PathThereAndBack": false,
   "PathReduceSteps": true,
   "AutoPetAttack": false,

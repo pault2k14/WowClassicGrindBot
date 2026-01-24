@@ -68,7 +68,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.targethostile, true);
         //AddPrecondition(GoapKey.targettargetsus, true);
         AddPrecondition(GoapKey.incombatrange, true);
-        AddPrecondition(GoapKey.assistrequestreturn, false);
+
+        // Removed this due to if getting attack in combat while
+        // moving back to the assist location would not be able to fight
+        // back and assist also won't fight back.
+        //AddPrecondition(GoapKey.assistrequestreturn, false);
 
         if(classConfig.Loot)
         {
@@ -356,38 +360,41 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     private void FindPossibleThreats()
     {
+
         if (bits.Pet_Defensive())
         {
             float elapsedPetFoundTarget = wait.Until(CastingHandler.GCD,
                 () => playerReader.PetTarget() && bits.PetTarget_Alive());
 
-            if (elapsedPetFoundTarget < 0)
+            if (elapsedPetFoundTarget < 0
+                 && classConfig.Mode != Mode.AssistFocus && classConfig.Mode != Mode.PartyLeader)
             {
                 logger.LogWarning("Pet not found target!");
                 input.PressClearTarget();
                 return;
-            }
-
-            ResetCooldowns();
-
-            input.PressTargetPet();
-            input.PressTargetOfTarget();
-            wait.Update();
-
-            if(classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+            } else if(elapsedPetFoundTarget > 0)
             {
-                wait.Update();
-                input.PressClearTarget();
-                wait.Update();
-            }
-                
-            logger.LogWarning($"Found new target by pet. {elapsedPetFoundTarget}ms");
+                ResetCooldowns();
 
-            return;
+                input.PressTargetPet();
+                input.PressTargetOfTarget();
+                wait.Update();
+
+                if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
+                {
+                    wait.Update();
+                    input.PressClearTarget();
+                    wait.Update();
+                }
+
+                logger.LogWarning($"Found new target by pet. {elapsedPetFoundTarget}ms");
+
+                return;
+            }
         }
 
-        if (classConfig.Mode == Mode.AssistFocus && bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
-        { 
+        if ((classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader) && bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
+        {
             logger.LogWarning($"Found new combat target of focus.");
             ResetCooldowns();
 
@@ -411,7 +418,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressNearestTarget();
             wait.Update();
         }
-
 
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
