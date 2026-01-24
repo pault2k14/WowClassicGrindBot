@@ -1,7 +1,7 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": true,
+  "Loot": false,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,

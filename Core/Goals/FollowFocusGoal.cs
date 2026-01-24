@@ -164,6 +164,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 //    move to the indicated Map Pos
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
+                    lastExecution = DateTime.Now;
                     input.PressAssistCantFollow();
                 }
 
@@ -204,6 +205,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 //    move to the indicated Map Pos
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
+                    lastExecution = DateTime.Now;
                     input.PressAssistCantFollow();
                 }
 
@@ -244,6 +246,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 //    move to the indicated Map Pos
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
+                    lastExecution = DateTime.Now;
                     input.PressAssistCantFollow();
                 }
 
@@ -284,6 +287,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 //    move to the indicated Map Pos
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
+                    lastExecution = DateTime.Now;
                     input.PressAssistCantFollow();
                 }
 
@@ -324,6 +328,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 //    move to the indicated Map Pos
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
+                    lastExecution = DateTime.Now;
                     input.PressAssistCantFollow();
                 }
 
