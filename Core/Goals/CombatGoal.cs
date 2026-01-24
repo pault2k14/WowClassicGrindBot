@@ -367,7 +367,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 () => playerReader.PetTarget() && bits.PetTarget_Alive());
 
             if (elapsedPetFoundTarget < 0
-                 && classConfig.Mode != Mode.AssistFocus && classConfig.Mode != Mode.PartyLeader)
+                 && (classConfig.Mode != Mode.AssistFocus || classConfig.Mode != Mode.PartyLeader))
             {
                 logger.LogWarning("Pet not found target!");
                 input.PressClearTarget();
