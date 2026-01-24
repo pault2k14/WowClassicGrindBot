@@ -1,6 +1,8 @@
 ﻿using Core.GOAP;
 using Microsoft.Extensions.Logging;
+using Microsoft.VisualBasic;
 using System;
+
 
 namespace Core.Goals;
 
@@ -16,8 +18,9 @@ public sealed class FollowFocusGoal : GoapGoal
     private readonly ILogger<FollowFocusGoal> logger;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
-    private Boolean previousState;
-    
+    private DateTime lastExecution = DateTime.MinValue;
+    private TimeSpan gateInterval = TimeSpan.FromSeconds(30);
+
     public FollowFocusGoal(ConfigurableInput input,
         PlayerReader playerReader,
         AddonBits bits,
@@ -56,8 +59,6 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void OnEnter()
     {
-        previousState = bits.AutoFollow();
-
         while (restHandler.IsResting())
         {
             wait.Update(1000);
@@ -153,6 +154,22 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
             }
+            else if (!playerReader.SpellInRange.Focus_Inspect)
+            {
+                // I want to follow but the party member has gone too far
+                // let's tell them and give them our coordinates to find us at
+                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
+                // 2. Party leader will recieve the chatReader event, parse the map coordinates
+                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
+                //    move to the indicated Map Pos
+                if (DateTime.Now - lastExecution > gateInterval)
+                {
+                    input.PressAssistCantFollow();
+                }
+
+                wait.Update();
+                return;
+            }
         }
         else if (classConfig.UnitToFollow == "party1")
         {
@@ -185,7 +202,11 @@ public sealed class FollowFocusGoal : GoapGoal
                 // 2. Party leader will recieve the chatReader event, parse the map coordinates
                 // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
                 //    move to the indicated Map Pos
-                input.PressAssistCantFollow();
+                if (DateTime.Now - lastExecution > gateInterval)
+                {
+                    input.PressAssistCantFollow();
+                }
+
                 wait.Update();
                 return;
             }
@@ -213,6 +234,22 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
             }
+            else if (!playerReader.SpellInRange.PartyMember2_Inspect)
+            {
+                // I want to follow but the party member has gone too far
+                // let's tell them and give them our coordinates to find us at
+                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
+                // 2. Party leader will recieve the chatReader event, parse the map coordinates
+                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
+                //    move to the indicated Map Pos
+                if (DateTime.Now - lastExecution > gateInterval)
+                {
+                    input.PressAssistCantFollow();
+                }
+
+                wait.Update();
+                return;
+            }
         }
         else if (classConfig.UnitToFollow == "party3")
         {
@@ -237,6 +274,22 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
             }
+            else if (!playerReader.SpellInRange.PartyMember3_Inspect)
+            {
+                // I want to follow but the party member has gone too far
+                // let's tell them and give them our coordinates to find us at
+                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
+                // 2. Party leader will recieve the chatReader event, parse the map coordinates
+                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
+                //    move to the indicated Map Pos
+                if (DateTime.Now - lastExecution > gateInterval)
+                {
+                    input.PressAssistCantFollow();
+                }
+
+                wait.Update();
+                return;
+            }
         }
         else if (classConfig.UnitToFollow == "party4")
         {
@@ -260,6 +313,22 @@ public sealed class FollowFocusGoal : GoapGoal
 
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
+            }
+            else if (!playerReader.SpellInRange.PartyMember4_Inspect)
+            {
+                // I want to follow but the party member has gone too far
+                // let's tell them and give them our coordinates to find us at
+                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
+                // 2. Party leader will recieve the chatReader event, parse the map coordinates
+                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
+                //    move to the indicated Map Pos
+                if (DateTime.Now - lastExecution > gateInterval)
+                {
+                    input.PressAssistCantFollow();
+                }
+
+                wait.Update();
+                return;
             }
         }
 
