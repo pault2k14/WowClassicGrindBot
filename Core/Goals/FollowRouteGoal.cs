@@ -196,6 +196,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             wait.Update(1000);
         }
 
+        // Added this due to cancel sideActivityCtx searching for 
+        // a target thread can get killed
+        if (!chatReader.AssistRequestReturn && !sideActivityThread.IsAlive)
+        {
+            sideActivityThread.Start();
+        }
+
         onEnterTime = DateTime.UtcNow;
 
         if (sideActivityCts.IsCancellationRequested)
@@ -255,6 +262,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         sideActivityManualReset.Reset();
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - Calling GoToOneWaypoint of " + assistWaypoint);
                         GoToOneWaypoint(assistWaypoint);
+                    }
+                    else
+                    {
+                        // Added this due to cancel sideActivityCtx searching for 
+                        // a target thread can get killed
+                        if(!sideActivityThread.IsAlive)
+                        {
+                            sideActivityThread.Start();
+                        }
+
+                        sideActivityCts = new();
+                        sideActivityManualReset.Set();
                     }
 
                     break;
