@@ -249,6 +249,18 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
+        if(playerReader.PetGuid == playerReader.TargetGuid)
+        {
+            input.PressClearTarget();
+            wait.Update();
+        }
+
+        if (playerReader.FocusGuid == playerReader.TargetGuid)
+        {
+            input.PressClearTarget();
+            wait.Update();
+        }
+
         if (bits.Target())
         {
             SendGoapEvent(ScreenCaptureEvent.Default);

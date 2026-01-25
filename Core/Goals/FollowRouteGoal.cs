@@ -249,7 +249,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - !chatReader.AssistIsFollowing");
                         Abort();
                     }
-                    
+                    else if(chatReader.AssistIsFollowing)
+                    {
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - !chatReader.AssistIsFollowing");
+                        Resume();
+                    }
+
                     break;
                 
                 case GoapKey.assistrequestreturn:

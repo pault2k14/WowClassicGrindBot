@@ -128,6 +128,11 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void Update()
     {
+        while (restHandler.IsResting())
+        {
+            logger.LogInformation("FollowFocusGoal: I'm waiting while resting.");
+            wait.Update(1000);
+        }
 
         if (chatReader.ForcedFollow)
         {
