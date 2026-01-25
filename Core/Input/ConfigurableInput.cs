@@ -74,8 +74,8 @@ public sealed partial class ConfigurableInput
 
         StartBackward(true);
 
-        if (Random.Shared.Next(3) == 0)
-            PressJump();
+        //if (Random.Shared.Next(3) == 0)
+        //    PressJump();
 
         float elapsedMs = wait.Until(pressDurationMs, () => false);
 

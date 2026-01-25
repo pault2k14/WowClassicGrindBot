@@ -44,7 +44,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private const int CYCLE_PROFESSION_PERIOD = 8000;
 
     private readonly ManualResetEventSlim sideActivityManualReset;
-    private readonly Thread? sideActivityThread;
+    private Thread? sideActivityThread;
     private CancellationTokenSource sideActivityCts;
 
     private readonly PathSettings pathSettings;
@@ -200,7 +200,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // a target thread can get killed
         if (!chatReader.AssistRequestReturn && !sideActivityThread.IsAlive)
         {
+            logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
+            sideActivityThread = new(Thread_LookingForTarget);
             sideActivityThread.Start();
+            logger.LogInformation("FollowRouteGoal: Restarted sideActivityThread Thread_LookingForTarget");
         }
 
         onEnterTime = DateTime.UtcNow;
@@ -269,7 +272,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         // a target thread can get killed
                         if(!sideActivityThread.IsAlive)
                         {
+                            logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
+                            sideActivityThread = new(Thread_LookingForTarget);
                             sideActivityThread.Start();
+                            logger.LogInformation("FollowRouteGoal: Restarted sideActivityThread Thread_LookingForTarget");
                         }
 
                         sideActivityCts = new();

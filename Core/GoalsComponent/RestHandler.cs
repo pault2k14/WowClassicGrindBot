@@ -83,12 +83,12 @@ public sealed partial class RestHandler
 
     public bool IsEating()
     {
-        return HasAura("Drink");
+        return HasAura("Food");
     }
 
     public bool IsDrinking()
     {
-        return HasAura("Food");
+        return HasAura("Drink");
     }
 
     private bool HasAura(string requirement)
