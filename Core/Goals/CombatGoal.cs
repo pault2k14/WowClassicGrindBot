@@ -390,7 +390,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 logger.LogWarning("Pet not found target!");
                 input.PressClearTarget();
-                return;
+                // remove early return so we can check for targets on
+                // our focus or other hostile targets near us
+                // return;
             } else if(elapsedPetFoundTarget > 0)
             {
                 ResetCooldowns();
