@@ -185,7 +185,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
                 .IndexOf(playerReader.TargetRaidIcon()) != -1;
 
-        ReadOnlySpan <KeyAction> span = Keys;
+        ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
             if (chatReader.ForcedFollow)
@@ -196,8 +196,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             wait.Update();
 
-            // Pet check needs to be put here 
-            if(classConfig.Mode == Mode.AssistFocus && ((bits.Focus_Combat()
+            // TODO Do we need Pet check to be put here? 
+            if (classConfig.Mode == Mode.AssistFocus && ((bits.Focus_Combat()
                 && bits.FocusTarget_Combat() && playerReader.TargetGuid != playerReader.FocusTargetGuid)
                 || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged())))
             {
@@ -249,8 +249,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             /* Use the skull icon to force melee range */
             if (classConfig.Mode == Mode.AssistFocus
-                && playerReader.hasSkullIcon() 
-                && !playerReader.IsInMeleeRange() 
+                && playerReader.hasSkullIcon()
+                && !playerReader.IsInMeleeRange()
                 && !keyAction.CrowdControl)
             {
                 input.PressFastInteract();
@@ -271,17 +271,17 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 {
                     //logger.LogInformation("No valid crowd control mobs found for this action.");
 
-                    if(playerReader.TargetGuid != playerReader.FocusTargetGuid
+                    if (playerReader.TargetGuid != playerReader.FocusTargetGuid
                         || !bits.Target() || (bits.Target() && bits.Target_Dead()))
                     {
-                        if(!bits.Target())
+                        if (!bits.Target())
                         {
                             logger.LogInformation("No Target returning.");
                         }
-                        else if(bits.Target() && bits.Target_Dead()) {
+                        else if (bits.Target() && bits.Target_Dead()) {
                             logger.LogInformation("We have a target but it's dead returning");
                         }
-                        else if(playerReader.TargetGuid != playerReader.FocusTargetGuid)
+                        else if (playerReader.TargetGuid != playerReader.FocusTargetGuid)
                         {
                             logger.LogInformation("target is not the same as focus returning");
                         }
@@ -303,7 +303,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             //logger.LogInformation("Update keyAction.CanRun(): " + keyAction.CanRun());
 
             // We Don't have the correct kind of crowd control continue on 
-            if ((currentTargetHasRaidIcon && !keyAction.CrowdControl) || 
+            if ((currentTargetHasRaidIcon && !keyAction.CrowdControl) ||
                 (currentTargetHasRaidIcon && keyAction.CrowdControl && !foundValidCrowdControlAction))
             {
                 logger.LogInformation("Target has crowd control icon, but I don't have the right kind of crowd control");
@@ -344,7 +344,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             logger.LogInformation("Lost target!");
 
-            if (combatLog.DamageTakenCount() > 0)
+            if ((combatLog.DamageTakenCount() > 0)
+                || (bits.Pet())
+                || ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus) 
+                      && bits.FocusTarget_Combat() && bits.FocusTarget_Hostile()))
             {
                 if (bits.Target() && bits.Target_Dead())
                 {
