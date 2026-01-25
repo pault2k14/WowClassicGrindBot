@@ -56,8 +56,8 @@ public sealed class FollowFocusGoal : GoapGoal
         AddPrecondition(GoapKey.dangercombat, false);
         AddPrecondition(GoapKey.damagedone, false);
         AddPrecondition(GoapKey.damagetaken, false);
-        AddPrecondition(GoapKey.eating, false);
-        AddPrecondition(GoapKey.drinking, false);
+        //AddPrecondition(GoapKey.eating, false);
+        //AddPrecondition(GoapKey.drinking, false);
     }
 
     public override void OnEnter()
