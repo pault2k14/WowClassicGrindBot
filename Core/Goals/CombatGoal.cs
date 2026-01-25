@@ -194,7 +194,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             wait.Update();
 
-            if(classConfig.Mode == Mode.AssistFocus && playerReader.TargetGuid != playerReader.FocusTargetGuid)
+            if(classConfig.Mode == Mode.AssistFocus && (bits.Focus_Combat()
+                && bits.FocusTarget_Combat() && playerReader.TargetGuid != playerReader.FocusTargetGuid)
+                || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged()))
             {
                 logger.LogInformation("targetGuid not equal to FocusTargetGuid");
                 wait.Update();
