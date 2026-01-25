@@ -315,7 +315,11 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.assistrequestreturnorisfollowing: " + (chatReader.AssistIsFollowing || chatReader.AssistRequestReturn));
         logger.LogInformation("GoapKey.drinking: " + restHandler.IsDrinking());
         logger.LogInformation("GoapKey.eating: " + restHandler.IsDrinking());
-        
+        logger.LogInformation("GoapKey.partymembercombat: " + (playerCombat || bits.FocusTarget_Combat()));
+        logger.LogInformation("GoapKey.partyleadercombat: " + ((playerCombat && hasTarget && !b.Target_Dead()
+            && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
+            && playerReader.WithInCombatRange()) || (b.FocusTarget() && bits.FocusTarget_Combat())));
+
     }
 
     private GoapGoal? NextGoal()
@@ -376,7 +380,11 @@ public sealed partial class GoapAgent : IDisposable
             (B(chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturn) |
             (B(chatReader.AssistIsFollowing || chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturnorisfollowing) |
             (B(restHandler.IsEating()) << (int)GoapKey.eating) |
-            (B(restHandler.IsDrinking()) << (int)GoapKey.drinking) 
+            (B(restHandler.IsDrinking()) << (int)GoapKey.drinking) |
+            (B(playerCombat || bits.FocusTarget_Combat()) << (int)GoapKey.partymembercombat) |
+            (B((playerCombat && hasTarget && !b.Target_Dead() 
+            && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
+            && playerReader.WithInCombatRange()) || (b.FocusTarget() && bits.FocusTarget_Combat())) << (int)GoapKey.partyleadercombat)
             ;
 
         WorldState = new(data);

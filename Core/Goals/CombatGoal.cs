@@ -53,21 +53,32 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.classConfig = classConfig;
         this.chatReader = chatReader;
 
-        if(classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader)
+        if(classConfig.Mode == Mode.AssistFocus)
         {
-            AddPrecondition(GoapKey.focuscombat, true);
+            AddPrecondition(GoapKey.partymembercombat, true);
+            AddPrecondition(GoapKey.forcedfollow, false);
+            AddPrecondition(GoapKey.hastarget, true);
+            AddPrecondition(GoapKey.targetisalive, true);
+            AddPrecondition(GoapKey.targethostile, true);
+            //AddPrecondition(GoapKey.targettargetsus, true);
+            AddPrecondition(GoapKey.incombatrange, true);
+        }
+        else if(classConfig.Mode == Mode.PartyLeader)
+        {
+            AddPrecondition(GoapKey.partyleadercombat, true);
+            AddPrecondition(GoapKey.forcedfollow, false);
+
         }
         else
         {
             AddPrecondition(GoapKey.incombat, true);
+            AddPrecondition(GoapKey.forcedfollow, false);
+            AddPrecondition(GoapKey.hastarget, true);
+            AddPrecondition(GoapKey.targetisalive, true);
+            AddPrecondition(GoapKey.targethostile, true);
+            //AddPrecondition(GoapKey.targettargetsus, true);
+            AddPrecondition(GoapKey.incombatrange, true);
         }
-
-        AddPrecondition(GoapKey.forcedfollow, false);
-        AddPrecondition(GoapKey.hastarget, true);
-        AddPrecondition(GoapKey.targetisalive, true);
-        AddPrecondition(GoapKey.targethostile, true);
-        //AddPrecondition(GoapKey.targettargetsus, true);
-        AddPrecondition(GoapKey.incombatrange, true);
 
         // Removed this due to if getting attack in combat while
         // moving back to the assist location would not be able to fight

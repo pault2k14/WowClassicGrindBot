@@ -34,6 +34,8 @@ public enum GoapKey
     assistisfollowing,
     assistrequestreturn,
     assistrequestreturnorisfollowing,
+    partymembercombat,
+    partyleadercombat,
     drinking,
     eating,
     LENGTH
@@ -75,6 +77,8 @@ public static class GoapKey_Extension
         GoapKey.assistisfollowing => "assist is following",
         GoapKey.assistrequestreturn => "assist request return",
         GoapKey.assistrequestreturnorisfollowing => "assist request return or is following",
+        GoapKey.partymembercombat => "party member in combat",
+        GoapKey.partyleadercombat => "party leader in combat",
         GoapKey.eating => "eating",
         GoapKey.drinking => "drinking",
         _ => unknown
@@ -111,6 +115,8 @@ public static class GoapKey_Extension
         GoapKey.assistisfollowing => "!assist is following",
         GoapKey.assistrequestreturn => "!assist request return",
         GoapKey.assistrequestreturnorisfollowing => "assist request return or is following",
+        GoapKey.partymembercombat => "party member in combat",
+        GoapKey.partyleadercombat => "party leader in combat",
         GoapKey.eating => "!eating",
         GoapKey.drinking => "!drinking",
         _ => unknown
