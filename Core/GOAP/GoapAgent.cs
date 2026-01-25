@@ -207,6 +207,8 @@ public sealed partial class GoapAgent : IDisposable
         bool wasEmpty = false;
         bool previousAssistIsFollowing = false;
         bool previousAssistRequestReturn = false;
+        bool previousInCombat = false;
+        bool previousPartyInCombat = false;
 
         manualReset.Wait();
 
@@ -237,6 +239,36 @@ public sealed partial class GoapAgent : IDisposable
                 {
                     AssistNotRequestReturn();
                     previousAssistRequestReturn = false;
+                }
+            }
+
+            if ((classConfig.Mode != Mode.PartyLeader || classConfig.Mode != Mode.AssistFocus) 
+                && (previousInCombat != bits.Combat()))
+            {
+                if (bits.Combat())
+                {
+                    SendInCombat();
+                    previousInCombat = true;
+                }
+                else
+                {
+                    SendNotInCombat();
+                    previousInCombat = false;
+                }
+            }
+
+            if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus) 
+                && (previousPartyInCombat != PartyInCombat()))
+            {
+                if (PartyInCombat())
+                {
+                    SendPartyInCombat();
+                    previousPartyInCombat = true;
+                }
+                else
+                {
+                    SendPartyInCombat();
+                    previousPartyInCombat = false;
                 }
             }
 
@@ -315,13 +347,9 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.assistrequestreturnorisfollowing: " + (chatReader.AssistIsFollowing || chatReader.AssistRequestReturn));
         logger.LogInformation("GoapKey.drinking: " + restHandler.IsDrinking());
         logger.LogInformation("GoapKey.eating: " + restHandler.IsDrinking());
-        logger.LogInformation("GoapKey.partymembercombat: " + (((playerCombat || bits.FocusTarget_Combat()) && dmgTaken)
-                || ((playerCombat || bits.FocusTarget_Combat()) && hasTarget && (hasTarget && !b.Target_Dead())
-                     && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
-                     && playerReader.WithInCombatRange())));
-        logger.LogInformation("GoapKey.partyleadercombat: " + ((playerCombat && hasTarget && !b.Target_Dead()
-            && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
-            && playerReader.WithInCombatRange()) || (b.FocusTarget() && bits.FocusTarget_Combat())));
+        logger.LogInformation("GoapKey.partymembercombat: " + PartyMemberInCombat());
+        logger.LogInformation("GoapKey.partyleadercombat: " + PartyLeaderInCombat());
+        logger.LogInformation("GoapKey.partyincombat: " + PartyInCombat());
 
     }
 
@@ -384,18 +412,44 @@ public sealed partial class GoapAgent : IDisposable
             (B(chatReader.AssistIsFollowing || chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturnorisfollowing) |
             (B(restHandler.IsEating()) << (int)GoapKey.eating) |
             (B(restHandler.IsDrinking()) << (int)GoapKey.drinking) |
-            (B(((playerCombat || bits.FocusTarget_Combat()) && dmgTaken) 
-                || ((playerCombat || bits.FocusTarget_Combat()) && hasTarget && (hasTarget && !b.Target_Dead())
-                     && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
-                     && playerReader.WithInCombatRange())) << (int)GoapKey.partymembercombat) |
-            (B((playerCombat && hasTarget && !b.Target_Dead() 
-            && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
-            && playerReader.WithInCombatRange()) || (b.FocusTarget() && bits.FocusTarget_Combat())) << (int)GoapKey.partyleadercombat)
+            (B(PartyMemberInCombat()) << (int)GoapKey.partymembercombat) |
+            (B(PartyLeaderInCombat()) << (int)GoapKey.partyleadercombat) |
+            (B(PartyInCombat()) << (int)GoapKey.partyincombat)
             ;
 
         WorldState = new(data);
 
         static int B(bool b) => b ? 1 : 0;
+    }
+
+    public bool PartyInCombat()
+    {
+        return bits.Combat() || bits.Focus_Combat();
+    }
+
+    public bool PartyMemberInCombat()
+    {
+        AddonBits b = bits;
+
+        bool dmgTaken = combatLog.DamageTakenCount() > 0;
+        bool hasTarget = b.Target();
+        bool playerCombat = b.Combat();
+
+        return ((playerCombat || bits.FocusTarget_Combat()) && dmgTaken)
+                || ((playerCombat || bits.FocusTarget_Combat()) && hasTarget && (hasTarget && !b.Target_Dead())
+                     && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
+                     && playerReader.WithInCombatRange());
+    }
+
+    public bool PartyLeaderInCombat()
+    {
+        AddonBits b = bits;
+        bool hasTarget = b.Target();
+        bool playerCombat = b.Combat();
+
+        return (playerCombat && hasTarget && !b.Target_Dead()
+            && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
+            && playerReader.WithInCombatRange()) || (b.FocusTarget() && bits.FocusTarget_Combat());
     }
 
     private void HandleGoapEvent(GoapEventArgs e)
@@ -515,6 +569,27 @@ public sealed partial class GoapAgent : IDisposable
     public void AssistNotRequestReturn()
     {
         BroadcastGoapEvent(GoapKey.assistrequestreturn, false);
+    }
+
+
+    public void SendInCombat()
+    {
+        BroadcastGoapEvent(GoapKey.incombat, true);
+    }
+
+    public void SendNotInCombat()
+    {
+        BroadcastGoapEvent(GoapKey.incombat, false);
+    }
+
+    public void SendPartyInCombat()
+    {
+        BroadcastGoapEvent(GoapKey.partyincombat, true);
+    }
+
+    public void SendPartyNotInCombat()
+    {
+        BroadcastGoapEvent(GoapKey.partyincombat, false);
     }
 
     #region Logging

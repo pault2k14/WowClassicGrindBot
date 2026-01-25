@@ -270,6 +270,32 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
 
     public void OnGoapEvent(GoapEventArgs e)
     {
+        if (e is GoapStateEvent g)
+        {
+            switch (g.Key)
+            {
+                case GoapKey.incombat:
+                    if ((classConfig.Mode != Mode.PartyLeader && classConfig.Mode != Mode.AssistFocus) 
+                        && bits.Combat())
+                    {
+                        logger.LogInformation("LootGoal: OnGoapEvent - Entered Combat while looting, trying to exit!");
+                        return;
+                    }
+
+                    break;
+
+                case GoapKey.partyincombat:
+                    if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
+                        && (bits.Combat() || bits.Focus_Combat()))
+                    {
+                        logger.LogInformation("LootGoal: OnGoapEvent - Party entered Combat while looting, trying to exit!");
+                        return;
+                    }
+
+                    break;
+            }
+        }
+
         if (e is CorpseEvent corpseEvent)
         {
             corpseLocations.Add(corpseEvent);
