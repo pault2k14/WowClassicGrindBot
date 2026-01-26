@@ -1,0 +1,16 @@
+F3
+Following Macro
+/p i'm following
+
+F4
+I'm not following Macro
+/p i'm not following
+
+F5
+Map Pos Macro
+/run local c=C_Map.GetBestMapForUnit("player") local p=C_Map.GetPlayerMapPosition(c,"player") SendChatMessage(format("i tried following but you are too far away my position:%0.1f,%0.1f",p.x*100,p.y*100),"PARTY")
+
+Added Z
+/run local c=C_Map.GetBestMapForUnit("player") local p=C_Map.GetPlayerMapPosition(c,"player") SendChatMessage(format("i tried following but you are too far away my position:%0.1f,%0.1f,%0.1f",p.x*100,p.y*100,p.z*100),"PARTY")
+
+ - Would need to update chat reader and go to waypoint
