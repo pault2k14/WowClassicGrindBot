@@ -261,7 +261,51 @@ public sealed class ReactCastError
                 }
                 break;
             case UI_ERROR.SPELL_FAILED_LINE_OF_SIGHT:
-                if (!bits.Combat())
+                logger.LogInformation($"React to {value.ToStringF()}");
+
+                // We are in combat with a different mob
+                // We should search for it
+                if ((!bits.TargetTarget_PlayerOrPet() && bits.Combat()) || bits.Focus_Combat())
+                {
+                    bool found = false;
+                    logger.LogInformation("Either we or the focus is in combat but our current target isn't targeting any of us");
+                    logger.LogInformation("Let's search for a target that is targeting one of us.");
+
+                    input.PressClearTarget();
+
+                    for(int i = 0; i < 20; i++)
+                    {
+                        input.PressNearestTarget();
+                        wait.Update();
+
+                        if(bits.TargetTarget_PlayerOrPet())
+                        {
+                            found = true;
+                            logger.LogInformation("Found a target that is targeting one of us");
+                            break;
+                        }
+
+                        // If we still haven't found it after 5 attempts, turn in a random direction.
+                        if(i % 5 == 0)
+                        {
+                            input.TurnRandomDir(250 + Random.Shared.Next(250));
+                            wait.Update();
+                        }
+                    }
+
+                    wait.Update();
+                    
+                    if (found)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        goto default;
+                    }
+                }
+                // We aren't in combat at all let's try to search for other targets or just move on.
+                else if (!bits.Combat())
                 {
                     logger.LogInformation($"React to {value.ToStringF()} -- Stop attack and clear target!");
                     input.PressStopAttack();
@@ -270,7 +314,12 @@ public sealed class ReactCastError
                 }
                 else
                 {
-                    goto default;
+                    // This might also be more appropriate in catch all cases as well.
+                    logger.LogInformation($"React to {value.ToStringF()} -- Stop attack and clear target!");
+                    input.PressStopAttack();
+                    input.PressClearTarget();
+                    wait.Update();
+                    //goto default;
                 }
                 break;
             default:

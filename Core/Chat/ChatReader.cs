@@ -36,6 +36,7 @@ public sealed class ChatReader : IReader
     public bool AssistRequestReturn;
     public float AssistXPos;
     public float AssistYPos;
+    public float AssistZPos;
 
     private static string DecodeChatPart(int number, int take)
     {
@@ -207,7 +208,7 @@ public sealed class ChatReader : IReader
             AssistIsFollowing = false;
         }
 
-        // "i tried following but you are too far away my position:x,y"
+        // "i tried following but you are too far away my position:x,y,z"
         
         if (type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
         {
@@ -227,9 +228,9 @@ public sealed class ChatReader : IReader
                 logger.LogInformation("coordinate substring: " + msgSubstrings[1]);
                 var coordinateSubstrings = msgSubstrings[1].Split(",");
 
-                if(coordinateSubstrings.Length != 2)
+                if(coordinateSubstrings.Length != 3)
                 {
-                    logger.LogInformation("coordinateSubstrings length is not 2, it is " + coordinateSubstrings.Length);
+                    logger.LogInformation("coordinateSubstrings length is not 3, it is " + coordinateSubstrings.Length);
                 }
                 else
                 {
@@ -242,6 +243,7 @@ public sealed class ChatReader : IReader
                     AssistRequestReturn = true;
                     AssistXPos = float.Parse(coordinateSubstrings[0]);
                     AssistYPos = float.Parse(coordinateSubstrings[1]);
+                    AssistZPos = float.Parse(coordinateSubstrings[2]);
                 }
             }
         }
