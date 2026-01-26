@@ -288,6 +288,26 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     }
 
                     break;
+
+                case GoapKey.incombat:
+                    if ((classConfig.Mode != Mode.PartyLeader && classConfig.Mode != Mode.AssistFocus)
+                        && bits.Combat())
+                    {
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - Entered Combat while following route, trying to exit!");
+                        Abort();
+                    }
+
+                    break;
+
+                case GoapKey.partyincombat:
+                    if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
+                        && (bits.Combat() || bits.Focus_Combat()))
+                    {
+                        logger.LogInformation("LootGoal: OnGoapEvent - Party entered Combat while trying to follow route, trying to exit!");
+                        Abort();
+                    }
+
+                    break;
             }
         }
 
