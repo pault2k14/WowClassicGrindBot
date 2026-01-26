@@ -218,7 +218,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // let's use their location as a waypoint and go to them.
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
-            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, chatReader.AssistZPos);
+            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
             sideActivityCts.Cancel();
             sideActivityManualReset.Reset();
             logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
@@ -263,11 +263,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - AssistRequestReturn to X: "
                             + chatReader.AssistXPos
                             + " Y: "
-                            + chatReader.AssistYPos
-                            + " Z: "
-                            + chatReader.AssistZPos);
+                            + chatReader.AssistYPos);
 
-                        Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, chatReader.AssistZPos);
+                        Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
                         sideActivityCts.Cancel();
                         sideActivityManualReset.Reset();
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - Calling GoToOneWaypoint of " + assistWaypoint);
@@ -465,7 +463,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             LogDebug("Navigation_OnDestinationReached");
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
-            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, chatReader.AssistZPos);
+            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
             sideActivityCts.Cancel();
             sideActivityManualReset.Reset();
             logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
