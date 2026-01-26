@@ -334,10 +334,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
+        // TODO Could this be moved further down?
         // If we are a partyleader or assistfocus we don't want to try to loot/soft interact if our focus 
         // is still in combat
-        if (((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus) && !bits.Focus_Combat()) 
-            || (classConfig.Mode != Mode.PartyLeader || classConfig.Mode != Mode.AssistFocus)
+        if (!bits.Combat() && !bits.Focus_Combat() && !playerReader.PetTarget() 
             && classConfig.Loot && bits.SoftInteract_Enabled())
         {
             logger.LogInformation("Deal with soft interact");
