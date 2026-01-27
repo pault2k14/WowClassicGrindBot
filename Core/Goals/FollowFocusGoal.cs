@@ -46,11 +46,15 @@ public sealed class FollowFocusGoal : GoapGoal
             AddPrecondition(GoapKey.hasfocus, true);
         }
 
+        /* TODO checking loot state currently not supported
+         * as it will require multiple additional states to differentiate
+         * what to do when assistreturnrequest is true, currently causes NO PLAN
         if (classConfig.Loot)
         {
             AddPrecondition(GoapKey.producedcorpse, false);
             AddPrecondition(GoapKey.consumecorpse, false);
         }
+        */
 
         AddPrecondition(GoapKey.assistshouldfollow, true);
         // TODO Trying to fix NO GOAL issue, Drinking seems to temporarily become true?
