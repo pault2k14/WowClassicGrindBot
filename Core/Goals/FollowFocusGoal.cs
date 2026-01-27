@@ -52,7 +52,7 @@ public sealed class FollowFocusGoal : GoapGoal
             AddPrecondition(GoapKey.consumecorpse, false);
         }
 
-        AddPrecondition(GoapKey.assistshouldfollow, false);
+        AddPrecondition(GoapKey.assistshouldfollow, true);
         // TODO Trying to fix NO GOAL issue, Drinking seems to temporarily become true?
         //AddPrecondition(GoapKey.eating, false);
         //AddPrecondition(GoapKey.drinking, false);
