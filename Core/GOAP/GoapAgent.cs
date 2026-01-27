@@ -345,6 +345,8 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.assistisfollowing: " + chatReader.AssistIsFollowing);
         logger.LogInformation("GoapKey.assistrequestreturn: " + chatReader.AssistRequestReturn);
         logger.LogInformation("GoapKey.assistrequestreturnorisfollowing: " + (chatReader.AssistIsFollowing || chatReader.AssistRequestReturn));
+        logger.LogInformation("GoapKey.assistshouldfollow: " + (chatReader.AssistRequestReturn || (!chatReader.ForcedFollow
+            && !(playerCombat && dmgTaken) && !dmgDone && !dmgTaken)));
         logger.LogInformation("GoapKey.drinking: " + restHandler.IsDrinking());
         logger.LogInformation("GoapKey.eating: " + restHandler.IsDrinking());
         logger.LogInformation("GoapKey.partymembercombat: " + PartyMemberInCombat());
@@ -410,6 +412,8 @@ public sealed partial class GoapAgent : IDisposable
             (B(chatReader.AssistIsFollowing) << (int)GoapKey.assistisfollowing) |
             (B(chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturn) |
             (B(chatReader.AssistIsFollowing || chatReader.AssistRequestReturn) << (int)GoapKey.assistrequestreturnorisfollowing) |
+            (B(chatReader.AssistRequestReturn || (!chatReader.ForcedFollow 
+            && !(playerCombat && dmgTaken) && !dmgDone && !dmgTaken)) << (int)GoapKey.assistshouldfollow) |
             (B(restHandler.IsEating()) << (int)GoapKey.eating) |
             (B(restHandler.IsDrinking()) << (int)GoapKey.drinking) |
             (B(PartyMemberInCombat()) << (int)GoapKey.partymembercombat) |

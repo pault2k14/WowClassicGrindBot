@@ -34,6 +34,7 @@ public enum GoapKey
     assistisfollowing,
     assistrequestreturn,
     assistrequestreturnorisfollowing,
+    assistshouldfollow,
     partymembercombat, // Complex check of precondition like values
     partyleadercombat, // Complex check of precondition like values
     partyincombat, // Very simple check of if the player is in combat or focus is in combat
@@ -78,6 +79,7 @@ public static class GoapKey_Extension
         GoapKey.assistisfollowing => "assist is following",
         GoapKey.assistrequestreturn => "assist request return",
         GoapKey.assistrequestreturnorisfollowing => "assist request return or is following",
+        GoapKey.assistshouldfollow => "assist should follow",
         GoapKey.partymembercombat => "party member in combat",
         GoapKey.partyleadercombat => "party leader in combat",
         GoapKey.partyincombat => "party in combat",
@@ -117,6 +119,7 @@ public static class GoapKey_Extension
         GoapKey.assistisfollowing => "!assist is following",
         GoapKey.assistrequestreturn => "!assist request return",
         GoapKey.assistrequestreturnorisfollowing => "!assist request return or is following",
+        GoapKey.assistshouldfollow => "!assist should follow",
         GoapKey.partymembercombat => "!party member in combat",
         GoapKey.partyleadercombat => "!party leader in combat",
         GoapKey.partyincombat => "!party in combat",
