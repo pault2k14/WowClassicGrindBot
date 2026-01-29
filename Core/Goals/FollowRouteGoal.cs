@@ -50,6 +50,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private readonly PathSettings pathSettings;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
+    private volatile bool _disposing;
 
     private Vector3[] mapRoute
     {
@@ -163,7 +164,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else
         {
-            sideActivityThread = new(Thread_LookingForTarget);
+            sideActivityCts = new CancellationTokenSource();
+            var localCts = sideActivityCts;
+
+            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
+            logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
             sideActivityThread.Start();
         }
 
@@ -172,10 +177,35 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public void Dispose()
     {
-        navigation.Dispose();
+        if (_disposing) return;
+        _disposing = true;
 
-        sideActivityCts.Cancel();
-        sideActivityManualReset.Set();
+        try
+        {
+            // Stop side thread first
+            sideActivityCts.Cancel();
+            sideActivityManualReset.Set();
+
+            // Join thread so it cannot call into dependencies after disposal
+            if (sideActivityThread is { IsAlive: true })
+            {
+                if (!sideActivityThread.Join(millisecondsTimeout: 2000))
+                {
+                    logger.LogWarning("FollowRouteGoal: sideActivityThread did not stop within timeout.");
+                    // You generally should not call Thread.Abort (not supported in .NET Core)
+                }
+            }
+
+            sideActivityCts.Dispose();
+
+            // Now it’s safe to dispose other objects (or let DI do it)
+            navigation.Dispose();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "FollowRouteGoal.Dispose failed");
+        }
+
     }
 
     private void Abort()
@@ -201,9 +231,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (!chatReader.AssistRequestReturn && !sideActivityThread.IsAlive)
         {
             logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
-            sideActivityThread = new(Thread_LookingForTarget);
+            var localCts = sideActivityCts;
+
+            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
+            logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
             sideActivityThread.Start();
-            logger.LogInformation("FollowRouteGoal: Restarted sideActivityThread Thread_LookingForTarget");
         }
 
         onEnterTime = DateTime.UtcNow;
@@ -278,9 +310,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         if(!sideActivityThread.IsAlive)
                         {
                             logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
-                            sideActivityThread = new(Thread_LookingForTarget);
+                            var localCts = sideActivityCts;
+
+                            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
+                            logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
                             sideActivityThread.Start();
-                            logger.LogInformation("FollowRouteGoal: Restarted sideActivityThread Thread_LookingForTarget");
                         }
 
                         sideActivityCts = new();
@@ -303,7 +337,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
                         && (bits.Combat() || bits.Focus_Combat()))
                     {
-                        logger.LogInformation("LootGoal: OnGoapEvent - Party entered Combat while trying to follow route, trying to exit!");
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - Party entered Combat while trying to follow route, trying to exit!");
                         Abort();
                     }
 
@@ -348,8 +382,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (!chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn && classConfig.Mode == Mode.PartyLeader) 
         {
             logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
-            Dispose(); 
-            return; 
+            Abort();
+
+            sideActivityCts.Cancel();
+            sideActivityManualReset.Set();
+            return;
         }
 
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
@@ -373,14 +410,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         wait.Update();
     }
 
-    private void Thread_LookingForTarget()
+    private void Thread_LookingForTarget(CancellationTokenSource cts)
     {
+        var token = cts.Token;
         sideActivityManualReset.Wait();
 
-        while (!sideActivityCts.IsCancellationRequested)
+        while (!token.IsCancellationRequested)
         {
             if (pathSettings.CanRunSideActivity() &&
-                targetFinder.Search(NpcNameToFind, bits.Target_NotDead, sideActivityCts.Token))
+                targetFinder.Search(NpcNameToFind, bits.Target_NotDead, token))
             {
                 if (bits.Target() && targetBlacklist.Is())
                 {
@@ -391,7 +429,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 else
                 {
                     Log("Found target!");
-                    sideActivityCts.Cancel();
+                    cts.Cancel();
                     sideActivityManualReset.Reset();
                 }
             }

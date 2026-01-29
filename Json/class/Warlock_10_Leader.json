@@ -1,12 +1,13 @@
 {
   "ClassName": "Warlock",
-  "Mode": "Grind",
+  "Mode": "PartyLeader",
   "Loot": true,
   "NPCMaxLevels_Below": 5,
-  "PathFilename": "_pack/1-20/Troll.Orc/07-10_Durotar.json",
+  "NPCMaxLevels_Above": 2,
+  "PathFilename": "_pack/1-20/Troll.Orc/08-09_Durotar_Razormane Q-Encroachment (cl 11-12).json",
   "PathThereAndBack": false,
-  "PathReduceSteps": true,
-  "AutoPetAttack": true,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
   "IntVariables": {
     "DOT_MIN_HEALTH%": 35,
     "HEALTHSTONE_HP%": 40,
@@ -22,7 +23,7 @@
         "BeforeCastStop": true,
         "BeforeCastDelay": 1000,
         "Requirements": [
-          "MaxRange < 25"
+          "MaxRange < 20"
         ]
       }
     ]
@@ -147,17 +148,6 @@
   "Adhoc": {
     "Sequence": [
       {
-        "Name": "Health Funnel",
-        "Key": "F8",
-        "HasCastBar": true,
-        "Requirements": [
-          "PetHealth% < 35",
-          "Health% > 50",
-          "Has Pet"
-        ],
-        "AfterCastWaitCastbar": true
-      },
-      {
         "Name": "Demon Skin",
         "Key": "9",
         "Requirement": "!Demon Skin"
@@ -167,6 +157,7 @@
         "Key": "0",
         "HasCastBar": true,
         "AfterCastDelay": 2000,
+        "Cooldown": 12000,
         "Requirements": [
           "!Has Pet"
         ],

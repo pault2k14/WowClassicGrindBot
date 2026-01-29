@@ -5,9 +5,10 @@ using System.Threading;
 
 namespace Core.Goals;
 
-public sealed class TargetFinder
+public sealed class TargetFinder : IDisposable
 {
     private const int waitMs = 200;
+    private bool _disposed;
 
     private readonly ConfigurableInput input;
     private readonly AddonBits bits;
@@ -15,6 +16,13 @@ public sealed class TargetFinder
     private readonly Wait wait;
 
     private DateTime lastActive;
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        npcNameTargeting.Dispose();
+    }
 
     public int ElapsedMs =>
         (int)(DateTime.UtcNow - lastActive).TotalMilliseconds;

@@ -35,9 +35,9 @@ public enum GoapKey
     assistrequestreturn,
     assistrequestreturnorisfollowing,
     assistshouldfollow,
-    partymembercombat, // Complex check of precondition like values
-    partyleadercombat, // Complex check of precondition like values
-    partyincombat, // Very simple check of if the player is in combat or focus is in combat
+    partymembercombat,
+    partyleadercombat,
+    partyincombat,
     drinking,
     eating,
     LENGTH

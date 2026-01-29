@@ -27,10 +27,10 @@ public static class GoapPlanner
 
     public static Stack<GoapGoal> Plan(
         GoapGoal[] available,
-        BitVector32 worldState,
+        DynamicBitVector worldState,
         bool[] goal)
     {
-        Node root = new(null, 0, worldState, null);
+        Node root = new(null, 0, new DynamicBitVector(worldState), null);
 
         // check what actions can run using their checkProceduralPrecondition
         usable.Clear();
@@ -85,7 +85,7 @@ public static class GoapPlanner
             if (InState(action.Preconditions, parent.state))
             {
                 // apply the action's effects to the parent state
-                BitVector32 effectedState = PopulateState(parent.state, action.Effects);
+                DynamicBitVector effectedState = PopulateState(parent.state, action.Effects);
                 Node node = new(parent, parent.runningCost + action.Cost, effectedState, action);
 
                 if (InState(goal, effectedState))
@@ -112,11 +112,11 @@ public static class GoapPlanner
 	* then this returns false.
 	*/
 
-    private static bool InState(Dictionary<GoapKey, bool> test, BitVector32 state)
+    private static bool InState(Dictionary<GoapKey, bool> test, DynamicBitVector state)
     {
         foreach ((GoapKey key, bool value) in test)
         {
-            if (state[1 << (int)key] != value)
+            if (state[(int)key] != value)
             {
                 return false;
             }
@@ -125,11 +125,11 @@ public static class GoapPlanner
         return true;
     }
 
-    private static bool InState(bool[] test, BitVector32 state)
+    private static bool InState(bool[] test, DynamicBitVector state)
     {
         for (int i = 0; i < test.Length; i++)
         {
-            if (!test[i].Equals(state[1 << i]))
+            if (state[i] != test[i])
             {
                 return false;
             }
@@ -141,12 +141,12 @@ public static class GoapPlanner
 	* Apply the stateChange to the currentState
 	*/
 
-    private static BitVector32 PopulateState(BitVector32 state, Dictionary<GoapKey, bool> effects)
+    private static DynamicBitVector PopulateState(DynamicBitVector state, Dictionary<GoapKey, bool> effects)
     {
-        BitVector32 future = new(state);
+        DynamicBitVector future = new(state);
         foreach ((GoapKey key, bool value) in effects)
         {
-            future[1 << (int)key] = value;
+            future[(int)key] = value;
         }
         return future;
     }
@@ -159,10 +159,10 @@ public static class GoapPlanner
     {
         public readonly Node? parent;
         public readonly float runningCost;
-        public readonly BitVector32 state;
+        public readonly DynamicBitVector state;
         public readonly GoapGoal? action;
 
-        public Node(Node? parent, float runningCost, BitVector32 state, GoapGoal? action)
+        public Node(Node? parent, float runningCost, DynamicBitVector state, GoapGoal? action)
         {
             this.parent = parent;
             this.runningCost = runningCost;

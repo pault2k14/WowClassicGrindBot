@@ -1,10 +1,13 @@
 {
   "ClassName": "Warlock",
-  "Mode": "PartyLeader",
+  "Mode": "AssistFocus",
+  "UnitToFollow": "party1",
+  "AssistPull": false,
+  "AssistApproach": false,
   "Loot": true,
   "NPCMaxLevels_Below": 5,
   "NPCMaxLevels_Above": 2,
-  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/08-09_Durotar_Razormane Q-Encroachment (cl 11-12).json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
@@ -23,7 +26,7 @@
         "BeforeCastStop": true,
         "BeforeCastDelay": 1000,
         "Requirements": [
-          "SpellInRange:1"
+          "MaxRange < 25"
         ]
       }
     ]
@@ -52,9 +55,9 @@
         "AfterCastWaitBag": true,
         "BeforeCastDelay": 500,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 25",
           "TargetHealth% < 25",
-          "!BagItem:Item_Soul_Shard",
+          "!BagItem:Item_Soul_Shard:1",
           "TargetYieldXP"
         ]
       },
@@ -65,7 +68,7 @@
         "BeforeCastDelay": 500,
         "Cooldown": 2000,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 25",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "!Curse of Agony"
         ]
@@ -78,7 +81,7 @@
         "Cooldown": 2000,
         "HasCastBar": true,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 25",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "!Corruption"
         ]
@@ -91,7 +94,7 @@
         "BeforeCastDelay": 500,
         "Cooldown": 2000,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 25",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "TargetsPet"
         ]
@@ -104,7 +107,7 @@
         "BeforeCastDelay": 500,
         "Cooldown": 2000,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 25",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "!Immolate"
         ]
@@ -148,17 +151,6 @@
   "Adhoc": {
     "Sequence": [
       {
-        "Name": "Health Funnel",
-        "Key": "F8",
-        "HasCastBar": true,
-        "Requirements": [
-          "PetHealth% < 35",
-          "Health% > 50",
-          "Has Pet"
-        ],
-        "AfterCastWaitCastbar": true
-      },
-      {
         "Name": "Demon Skin",
         "Key": "9",
         "Requirement": "!Demon Skin"
@@ -168,6 +160,7 @@
         "Key": "0",
         "HasCastBar": true,
         "AfterCastDelay": 2000,
+        "Cooldown": 12000,
         "Requirements": [
           "!Has Pet"
         ],

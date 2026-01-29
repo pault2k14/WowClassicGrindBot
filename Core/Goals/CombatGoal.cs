@@ -69,6 +69,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             AddPrecondition(GoapKey.partyleadercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
+            //AddPrecondition(GoapKey.incombat, true);
+            //AddPrecondition(GoapKey.hastarget, true);
+            //AddPrecondition(GoapKey.targetisalive, true);
+            //AddPrecondition(GoapKey.targethostile, true);
+            //AddPrecondition(GoapKey.incombatrange, true);
 
         }
         else
@@ -337,6 +342,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // TODO Could this be moved further down?
         // If we are a partyleader or assistfocus we don't want to try to loot/soft interact if our focus 
         // is still in combat
+
+
         if (!bits.Combat() && !bits.Focus_Combat() && !playerReader.PetTarget() 
             && classConfig.Loot && bits.SoftInteract_Enabled())
         {

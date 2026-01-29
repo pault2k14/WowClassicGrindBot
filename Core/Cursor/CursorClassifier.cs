@@ -14,6 +14,8 @@ namespace Core;
 
 public sealed class CursorClassifier : IDisposable
 {
+    private readonly object _lock = new();
+    private bool _disposed;
     private const bool saveImage = false;
 
     // index matches CursorType order
@@ -53,52 +55,72 @@ public sealed class CursorClassifier : IDisposable
 
     public void Dispose()
     {
-        graphics.Dispose();
-        bitmap.Dispose();
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
 
-        scaledGraphics.Dispose();
-        scaledBitmap.Dispose();
+            graphics.Dispose();
+            bitmap.Dispose();
+            scaledGraphics.Dispose();
+            scaledBitmap.Dispose();
+        }
+        GC.SuppressFinalize(this);
     }
 
 
     public void Classify(out CursorType classification, out double similarity)
     {
-        CURSORINFO cursorInfo = new();
-        cursorInfo.cbSize = Marshal.SizeOf(cursorInfo);
-        if (GetCursorInfo(ref cursorInfo) &&
-            cursorInfo.flags == CURSOR_SHOWING)
+        lock (_lock)
         {
-            graphics.Clear(Color.Transparent);
-            DrawIcon(graphics.GetHdc(), 0, 0, cursorInfo.hCursor);
-            graphics.ReleaseHdc();
-        }
+            if (_disposed) { classification = CursorType.None; similarity = 0; return; }
 
-        ulong cursorHash = ImageHashing.AverageHash(bitmap, scaledBitmap, scaledGraphics);
-        if (saveImage)
-        {
-            string path = Path.Join("..", "..", "..", "..", "Cursors", $"{cursorHash}.bmp");
-            if (!File.Exists(path))
+            CURSORINFO cursorInfo = new();
+            cursorInfo.cbSize = Marshal.SizeOf(cursorInfo);
+            if (GetCursorInfo(ref cursorInfo) &&
+                cursorInfo.flags == CURSOR_SHOWING)
             {
-                bitmap.Save(path);
-            }
-        }
+                graphics.Clear(Color.Transparent);
 
-        int index = 0;
-        similarity = 0;
-        for (int i = 0; i < imageHashes.Length; i++)
-        {
-            for (int j = 0; j < imageHashes[i].Length; j++)
-            {
-                double sim = ImageHashing.Similarity(cursorHash, imageHashes[i][j]);
-                if (sim > 80 && sim > similarity)
+                IntPtr hdc = graphics.GetHdc();
+                try
                 {
-                    index = i;
-                    similarity = sim;
+                    DrawIcon(hdc, 0, 0, cursorInfo.hCursor);
+                }
+                finally
+                {
+                    graphics.ReleaseHdc(hdc);
                 }
             }
+
+            ulong cursorHash = ImageHashing.AverageHash(bitmap, scaledBitmap, scaledGraphics);
+            if (saveImage)
+            {
+                string path = Path.Join("..", "..", "..", "..", "Cursors", $"{cursorHash}.bmp");
+                if (!File.Exists(path))
+                {
+                    bitmap.Save(path);
+                }
+            }
+
+            int index = 0;
+            similarity = 0;
+            for (int i = 0; i < imageHashes.Length; i++)
+            {
+                for (int j = 0; j < imageHashes[i].Length; j++)
+                {
+                    double sim = ImageHashing.Similarity(cursorHash, imageHashes[i][j]);
+                    if (sim > 80 && sim > similarity)
+                    {
+                        index = i;
+                        similarity = sim;
+                    }
+                }
+            }
+
+            classification = (CursorType)index;
+            Debug.WriteLine($"[CursorClassifier.Classify] {cursorHash} - {classification.ToStringF()} - {similarity}");
         }
 
-        classification = (CursorType)index;
-        Debug.WriteLine($"[CursorClassifier.Classify] {cursorHash} - {classification.ToStringF()} - {similarity}");
     }
 }
