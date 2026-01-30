@@ -184,8 +184,11 @@ public sealed class ReactCastError
                 {
                     wait.Update(1000);
 
-                    if (bits.Target != bits.FocusTarget)
+                    if (bits.FocusTarget() && bits.FocusTarget_Combat() 
+                        && (bits.Target() != bits.FocusTarget()))
                     {
+                        logger.LogInformation("ERR_BADATTACKFACING Focus has Target and Focus Target in Combat" 
+                            + " and Target not equal to focus target");
                         logger.LogInformation("ERR_BADATTACKFACING AssistFocus targeting focus target");
                         input.PressTargetFocus();
                         input.PressTargetOfTarget();
@@ -194,12 +197,13 @@ public sealed class ReactCastError
 
                     logger.LogInformation("ERR_BADATTACKFACING AssistFocus fast interacting with target");
                     input.PressVeryFastInteract();
-
+                    wait.Update();
                 }
                 else if(bits.Target_Combat())
                 {
                     logger.LogInformation("ERR_BADATTACKFACING PressFastInteract");
                     input.PressFastInteract();
+                    wait.Update();
                 }
 
                 const int updateCount = 2;

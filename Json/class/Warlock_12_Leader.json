@@ -2,8 +2,8 @@
   "ClassName": "Warlock",
   "Mode": "PartyLeader",
   "Loot": true,
+  "Skin":  true,
   "NPCMaxLevels_Below": 5,
-  "NPCMaxLevels_Above": 2,
   "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
@@ -23,7 +23,7 @@
         "BeforeCastStop": true,
         "BeforeCastDelay": 1000,
         "Requirements": [
-          "SpellInRange:1"
+          "MaxRange < 27"
         ]
       }
     ]
@@ -42,7 +42,7 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
-        "Requirement": "Health% < 15"
+        "Requirement": "Health% < 25"
       },
       {
         "Name": "Drain Soul",
@@ -52,7 +52,7 @@
         "AfterCastWaitBag": true,
         "BeforeCastDelay": 500,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 27",
           "TargetHealth% < 25",
           "!BagItem:Item_Soul_Shard",
           "TargetYieldXP"
@@ -65,7 +65,7 @@
         "BeforeCastDelay": 500,
         "Cooldown": 2000,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 27",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "!Curse of Agony"
         ]
@@ -78,7 +78,7 @@
         "Cooldown": 2000,
         "HasCastBar": true,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 27",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "!Corruption"
         ]
@@ -91,7 +91,7 @@
         "BeforeCastDelay": 500,
         "Cooldown": 2000,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 27",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "TargetsPet"
         ]
@@ -104,7 +104,7 @@
         "BeforeCastDelay": 500,
         "Cooldown": 2000,
         "Requirements": [
-          "SpellInRange:1",
+          "MaxRange < 27",
           "TargetHealth% > DOT_MIN_HEALTH%",
           "!Immolate"
         ]
@@ -118,7 +118,7 @@
         "Requirements": [
           //"HasRangedWeapon",
           "!Shooting",
-          "SpellInRange:1"
+          "MaxRange < 27"
         ]
       }
       /*

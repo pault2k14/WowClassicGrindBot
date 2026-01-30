@@ -82,6 +82,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         AddPrecondition(GoapKey.shouldgather, true);
         AddEffect(GoapKey.shouldgather, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
+        AddPrecondition(GoapKey.focuscombat, false);
         this.restHandler = restHandler;
     }
 

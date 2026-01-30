@@ -387,6 +387,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             sideActivityCts.Cancel();
             sideActivityManualReset.Set();
             return;
+        } else if (chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn 
+            && classConfig.Mode != Mode.AttendedGather && !sideActivityThread.IsAlive)
+        {
+            // Sometimes we find a target but decide not to pull it (usuall a ApproachTargetGoal  Seems stuck! Clear Target.
+            // then we clear the target and return to the FollowRouteGoal where after entering the side thread is cancelled.
+            logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
+            var localCts = sideActivityCts;
+
+            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
+            logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
+            sideActivityThread.Start();
         }
 
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
