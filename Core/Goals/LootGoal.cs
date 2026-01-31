@@ -293,6 +293,23 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
                     }
 
                     break;
+
+                case GoapKey.assistrequestreturn:
+                    if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+                    {
+                        logger.LogInformation("LootGoal: OnGoapEvent - AssistRequestReturn to X: "
+                            + chatReader.AssistXPos
+                            + " Y: "
+                            + chatReader.AssistYPos);
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
+                    }
+
+                    break;
             }
         }
 

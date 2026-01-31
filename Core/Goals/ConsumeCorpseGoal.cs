@@ -1,10 +1,12 @@
 ﻿using Core.GOAP;
 
 using Microsoft.Extensions.Logging;
+using System.Numerics;
+using System.Threading;
 
 namespace Core.Goals;
 
-public sealed partial class ConsumeCorpseGoal : GoapGoal
+public sealed partial class ConsumeCorpseGoal : GoapGoal, IGoapEventListener
 {
     public override float Cost => 4.1f;
 
@@ -12,16 +14,18 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal
     private readonly ClassConfiguration classConfig;
     private readonly GoapAgentState state;
     private readonly ChatReader chatReader;
+    private readonly AddonBits bits;
 
     public ConsumeCorpseGoal(ILogger<ConsumeCorpseGoal> logger,
         ClassConfiguration classConfig, GoapAgentState state,
-        ChatReader chatReader)
+        ChatReader chatReader, AddonBits bits)
         : base(nameof(ConsumeCorpseGoal))
     {
         this.logger = logger;
         this.classConfig = classConfig;
         this.state = state;
         this.chatReader = chatReader;
+        this.bits = bits;
 
         if (classConfig.KeyboardOnly)
         {
@@ -66,6 +70,41 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal
         if (classConfig.Loot)
         {
             state.LootableCorpseCount++;
+        }
+    }
+
+    public void OnGoapEvent(GoapEventArgs e)
+    {
+        if (e is GoapStateEvent g)
+        {
+            switch (g.Key)
+            {
+                case GoapKey.assistrequestreturn:
+                    if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+                    {
+                        logger.LogInformation("ConsumeCorpseGoal: OnGoapEvent - AssistRequestReturn to X: "
+                            + chatReader.AssistXPos
+                            + " Y: "
+                            + chatReader.AssistYPos);
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
+                    }
+
+                    break;
+
+                case GoapKey.partyincombat:
+                    if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
+                        && (bits.Combat() || bits.Focus_Combat()))
+                    {
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - Party entered Combat while trying to follow route, trying to exit!");
+                    }
+
+                    break;
+            }
         }
     }
 

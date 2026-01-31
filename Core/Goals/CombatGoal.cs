@@ -575,6 +575,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        if (playerReader.TargetGuid == playerReader.PetGuid 
+            || playerReader.TargetGuid == playerReader.FocusGuid
+            || playerReader.TargetGuid == playerReader.PartyMember1Guid
+            || playerReader.TargetGuid == playerReader.PartyMember2Guid
+            || playerReader.TargetGuid == playerReader.PartyMember3Guid
+            || playerReader.TargetGuid == playerReader.PartyMember4Guid)
+        {
+            logger.LogInformation("We are targeting our pet or a party member, clear target and return");
+            input.PressClearTarget();
+            wait.Update();
+            return;
+        }
+
         ConsoleKey key = Random.Shared.Next(2) == 0
             ? input.TurnLeftKey
             : input.TurnRightKey;

@@ -6,7 +6,7 @@ using System;
 
 namespace Core.Goals;
 
-public sealed partial class CorpseConsumedGoal : GoapGoal
+public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
 {
     public override float Cost => 4.7f;
 
@@ -15,18 +15,22 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
     private readonly Wait wait;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
+    private readonly ClassConfiguration classConfig;
+    private readonly AddonBits bits;
 
     private readonly bool lootEnabled;
 
     public CorpseConsumedGoal(ILogger<CorpseConsumedGoal> logger,
         ClassConfiguration classConfig, GoapAgentState goapAgentState, 
-        Wait wait, RestHandler restHandler, ChatReader chatReader)
+        Wait wait, RestHandler restHandler, ChatReader chatReader, AddonBits bits)
         : base(nameof(CorpseConsumedGoal))
     {
         this.logger = logger;
         this.goapAgentState = goapAgentState;
         this.wait = wait;
         this.chatReader = chatReader;
+        this.classConfig = classConfig;
+        this.bits = bits;
 
         this.lootEnabled = classConfig.Loot;
 
@@ -84,6 +88,33 @@ public sealed partial class CorpseConsumedGoal : GoapGoal
             wait.Fixed(Loot.LOOTFRAME_AUTOLOOT_DELAY_MS / 2);
         }
     }
+
+    public void OnGoapEvent(GoapEventArgs e)
+    {
+        if (e is GoapStateEvent g)
+        {
+            switch (g.Key)
+            {
+                case GoapKey.assistrequestreturn:
+                    if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+                    {
+                        logger.LogInformation("CorpseConsumedGoal: OnGoapEvent - AssistRequestReturn to X: "
+                            + chatReader.AssistXPos
+                            + " Y: "
+                            + chatReader.AssistYPos);
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
+                    }
+
+                    break;
+            }
+        }
+    }
+
 
     [LoggerMessage(
         EventId = 0120,

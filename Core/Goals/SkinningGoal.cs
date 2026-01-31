@@ -96,6 +96,30 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
     public void OnGoapEvent(GoapEventArgs e)
     {
+        if (e is GoapStateEvent g)
+        {
+            switch (g.Key)
+            {
+
+                case GoapKey.assistrequestreturn:
+                    if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+                    {
+                        logger.LogInformation("SkinningGoal: OnGoapEvent - AssistRequestReturn to X: "
+                            + chatReader.AssistXPos
+                            + " Y: "
+                            + chatReader.AssistYPos);
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
+                    }
+
+                    break;
+            }
+        }
+
         if (e is SkinCorpseEvent corpseEvent)
         {
             corpses.Add(corpseEvent);

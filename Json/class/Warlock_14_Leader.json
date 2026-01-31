@@ -2,8 +2,9 @@
   "ClassName": "Warlock",
   "Mode": "PartyLeader",
   "Loot": true,
+  "Skin": true,
   "NPCMaxLevels_Below": 5,
-  "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
@@ -135,11 +136,13 @@
       {
         "Name": "Food",
         "Key": "F12",
+        "Cooldown":  15000,
         "Requirement": "Health% < 50"
       },
       {
         "Name": "Drink",
         "Key": "F11",
+        "Cooldown": 15000,
         "Requirement": "Mana% < 40"
       }
     ]

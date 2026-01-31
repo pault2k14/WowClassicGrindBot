@@ -576,6 +576,12 @@ public sealed partial class GoapAgent : IDisposable
 
     public void AssistRequestReturn()
     {
+        // Set state to escape ConsumeCorpseGoal/CorpseConsumedGoal/LootGoal/SkinningGoal
+        State.LastCombatKillCount = 0;
+        State.ShouldConsumeCorpse = false;
+        State.LootableCorpseCount = 0;
+        State.GatherableCorpseCount = 0;
+        State.ConsumableCorpseCount = 0;
         BroadcastGoapEvent(GoapKey.assistrequestreturn, true);
     }
 
@@ -587,6 +593,12 @@ public sealed partial class GoapAgent : IDisposable
 
     public void SendInCombat()
     {
+        // Set state to escape ConsumeCorpseGoal/CorpseConsumedGoal/LootGoal/SkinningGoal
+        State.LastCombatKillCount = 0;
+        State.ShouldConsumeCorpse = false;
+        State.LootableCorpseCount = 0;
+        State.GatherableCorpseCount = 0;
+        State.ConsumableCorpseCount = 0;
         BroadcastGoapEvent(GoapKey.incombat, true);
     }
 
@@ -597,6 +609,12 @@ public sealed partial class GoapAgent : IDisposable
 
     public void SendPartyInCombat()
     {
+        // Set state to escape ConsumeCorpseGoal/CorpseConsumedGoal/LootGoal/SkinningGoal
+        State.LastCombatKillCount = 0;
+        State.ShouldConsumeCorpse = false;
+        State.LootableCorpseCount = 0;
+        State.GatherableCorpseCount = 0;
+        State.ConsumableCorpseCount = 0;
         BroadcastGoapEvent(GoapKey.partyincombat, true);
     }
 
