@@ -472,7 +472,11 @@ public sealed partial class GoapAgent : IDisposable
             switch (g.Key)
             {
                 case GoapKey.consumecorpse:
-                    State.ShouldConsumeCorpse = g.Value;
+                    if(!chatReader.AssistRequestReturn)
+                    {
+                        State.ShouldConsumeCorpse = g.Value;
+                    }
+                    
                     break;
                 case GoapKey.gathering:
                     State.Gathering = g.Value;
@@ -499,7 +503,7 @@ public sealed partial class GoapAgent : IDisposable
 
     private void OnKillCredit()
     {
-        if (Active)
+        if (Active && !chatReader.AssistRequestReturn)
         {
             SessionStat.Kills++;
 

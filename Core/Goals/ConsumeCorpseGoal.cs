@@ -95,15 +95,6 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal, IGoapEventListener
                     }
 
                     break;
-
-                case GoapKey.partyincombat:
-                    if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
-                        && (bits.Combat() || bits.Focus_Combat()))
-                    {
-                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - Party entered Combat while trying to follow route, trying to exit!");
-                    }
-
-                    break;
             }
         }
     }

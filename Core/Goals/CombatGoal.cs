@@ -160,6 +160,16 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+
+        if (classConfig.Loot && !chatReader.AssistRequestReturn)
+        {
+            AddEffect(GoapKey.producedcorpse, true);
+        }
+        else
+        {
+            AddEffect(GoapKey.producedcorpse, false);
+        }
+
         if (MathF.Abs(lastDirection - playerReader.Direction) > MathF.PI / 2)
         {
             logger.LogInformation("Turning too fast!");
