@@ -223,6 +223,24 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
             }
 
+            // Sometimes a mob will attack our assist while the party leader
+            // is pulling a different mob.
+            if(classConfig.Mode == Mode.AssistFocus
+                && playerReader.OutOfCombatRange()
+                && !playerReader.TargetsMe()
+                && combatLog.DamageTakenCount() > 0
+                && playerReader.TargetGuid == playerReader.FocusTargetGuid)
+            {
+                // We are taking damage, we are out of combat range,
+                // and our target is the same as the focus, we probably
+                // were attacked while the focus was pulling / approaching
+                // and will not be able to get into combat range with the focus's target
+                // let's find and attack the mob that is attacking us.
+                logger.LogInformation("Update: AssistFocus Taking damage but not within combat range of focus target, checking who is targeting me.");
+                CheckTargetsTargetingMe();
+                return;
+            }
+
             int originalTargetGuid = playerReader.TargetGuid;
             currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
                 .IndexOf(playerReader.TargetRaidIcon()) != -1;
@@ -487,6 +505,52 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         logger.LogWarning($"Waiting for target to exists or lose combat. Possible threats {combatLog.DamageTakenCount()}!");
         wait.Till(CastingHandler.GCD * 2,
             () => bits.Target_Alive() || !bits.Combat());
+    }
+
+    public bool CheckTargetsTargetingMe()
+    {
+        int originalTargetGuid = playerReader.TargetGuid;
+        Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
+
+        // Add current target
+        unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
+
+        /* Tab through all nearby hostile units recording their GUID
+         * if we find a mob targeting me keep it targeted  
+         */
+
+        wait.Update();
+
+        for (int x = 0; x < 6; x++)
+        {
+            wait.Update();
+            input.PressNearestTarget();
+            wait.Update();
+
+            if (playerReader.TargetsMe() && playerReader.WithInCombatRange() 
+                && bits.Target_Hostile() && bits.Target_Alive())
+            {
+                logger.LogInformation("CheckTargetsTargetingMe targets me, target within combat range, target hostile, and target alive!");
+                input.PressFastInteract();
+                wait.Update();
+                return true;
+            }
+
+            if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
+            {
+                break;
+            }
+
+            unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
+        }
+
+        if (playerReader.TargetGuid != originalTargetGuid)
+        {
+            logger.LogInformation("CheckTargetsTargetingMe exiting function, couldn't find a target that is targeting me");
+            wait.Update();
+        }
+
+        return false;
     }
 
     public bool CheckCrowdControl(KeyAction item)
