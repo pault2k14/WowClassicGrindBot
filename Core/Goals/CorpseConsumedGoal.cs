@@ -34,6 +34,15 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
 
         this.lootEnabled = classConfig.Loot;
 
+        if (classConfig.Mode == Mode.AssistFocus)
+        {
+            AddPrecondition(GoapKey.partymembercombat, false);
+        }
+        else if (classConfig.Mode == Mode.PartyLeader)
+        {
+            AddPrecondition(GoapKey.partyleadercombat, false);
+        }
+
         if (classConfig.KeyboardOnly)
         {
             AddPrecondition(GoapKey.consumablecorpsenearby, true);
@@ -43,7 +52,7 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.dangercombat, false);
         AddPrecondition(GoapKey.incombat, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
-        AddPrecondition(GoapKey.focuscombat, false);
+        //AddPrecondition(GoapKey.focuscombat, false);
         AddPrecondition(GoapKey.pethastarget, false);
 
         AddPrecondition(GoapKey.consumecorpse, true);
@@ -57,6 +66,17 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
+            return;
+        }
+
+        if (classConfig.Mode == Mode.PartyLeader && (bits.Combat() || bits.Focus_Combat()))
+        {
+            logger.LogInformation("CorpseConsumedGoal: In Combat aborting skinning!");
+            AddEffect(GoapKey.producedcorpse, false);
+            AddEffect(GoapKey.consumecorpse, false);
+            AddEffect(GoapKey.shouldloot, false);
+            AddEffect(GoapKey.shouldgather, false);
+            AddEffect(GoapKey.consumablecorpsenearby, false);
             return;
         }
 
