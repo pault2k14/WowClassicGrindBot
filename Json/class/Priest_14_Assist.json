@@ -280,7 +280,7 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
-        "Requirement": "Health% < 15"
+        "Requirement": "20 > Health%"
       },
       {
         "Name": "Heal",
@@ -416,7 +416,10 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
-        "Requirement": "Health% < 15"
+        "Requirements": [
+          "20 > Health%",
+          "InCombat"
+        ]
       },
       {
         "Name": "Renew",
@@ -459,8 +462,8 @@
         "Key": "F10",
         "UseWithForcedFollow": true,
         "Requirements": [
-          "Health% < 15",
-          "!InCombat"
+          "20 > Health%",
+          "InCombat"
         ]
       },
       {
