@@ -27,15 +27,6 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal, IGoapEventListener
         this.chatReader = chatReader;
         this.bits = bits;
 
-        if (classConfig.Mode == Mode.AssistFocus)
-        {
-            AddPrecondition(GoapKey.partymembercombat, false);
-        }
-        else if (classConfig.Mode == Mode.PartyLeader)
-        {
-            AddPrecondition(GoapKey.partyleadercombat, false);
-        }
-
         if (classConfig.KeyboardOnly)
         {
             AddPrecondition(GoapKey.consumablecorpsenearby, true);
@@ -47,7 +38,7 @@ public sealed partial class ConsumeCorpseGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.producedcorpse, true);
         AddPrecondition(GoapKey.consumecorpse, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
-        //AddPrecondition(GoapKey.focuscombat, false);
+        AddPrecondition(GoapKey.focuscombat, false);
         AddPrecondition(GoapKey.pethastarget, false);
 
 

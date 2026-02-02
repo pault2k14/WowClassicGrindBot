@@ -77,20 +77,12 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         equipmentReader.OnEquipmentChanged += EquipmentReader_OnEquipmentChanged;
 
         //AddPrecondition(GoapKey.dangercombat, false);
-        if (classConfig.Mode == Mode.AssistFocus)
-        {
-            AddPrecondition(GoapKey.partymembercombat, false);
-        }
-        else if (classConfig.Mode == Mode.PartyLeader)
-        {
-            AddPrecondition(GoapKey.partyleadercombat, false);
-        }
 
         AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.shouldgather, true);
         AddEffect(GoapKey.shouldgather, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
-        //AddPrecondition(GoapKey.focuscombat, false);
+        AddPrecondition(GoapKey.focuscombat, false);
         this.restHandler = restHandler;
     }
 

@@ -146,6 +146,8 @@ public sealed partial class RequirementFactory
             { "TargetsPet", playerReader.TargetsPet },
             { "TargetsNone", playerReader.TargetsNone },
             { "TargetElite", playerReader.TargetIsElite },
+            { "TargetCombat", bits.Target_Combat },
+            { "TargetTargetsPlayerOrPet", bits.TargetTarget_PlayerOrPet },
 
             // Soft Target
             { "SoftTarget", bits.SoftInteract },

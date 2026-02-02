@@ -62,7 +62,9 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
-        "Requirements": "20 > Health%"
+        "Requirements": [
+          "Health% < 20"
+        ]
       },
       {
         "Name": "Fire Blast",
@@ -81,17 +83,12 @@
         "BeforeCastStop": true,
         "AfterCastWaitCastbar": true,
         "BeforeCastDelay": 500,
-        "BeforeCastFaceTarget": true,
+        "BeforeCastFaceTarget": false,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
           "TargetHealth% > 15",
           "MaxRange < 30",
-          // Fix for entering combat in the middle of trying to pull
-          // We would have a mob behind us hitting us as the mob we were trying to shoot kept walking away
-          // BeforeCastFaceTarget doesn't work well if you aren't already in combat with that other target
-          // due to them moving around alot
-          "TargetCombat", // We only want to face if the target is in combat
-          "TargetTargetsPlayerOrPet" // and if the target is targeting one of us
+          "MinRange > 6"
         ],
         "Interrupt": "CanRun:Fire Blast",
         "CancelOnInterrupt": true
@@ -103,17 +100,12 @@
         "BeforeCastStop": true,
         "AfterCastWaitCastbar": true,
         "BeforeCastDelay": 500,
-        "BeforeCastFaceTarget": false,
+        "BeforeCastFaceTarget": true,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
           "TargetHealth% > 15",
-          "MaxRange < 30",
-          // Fix for entering combat in the middle of trying to pull
-          // We would have a mob behind us hitting us as the mob we were trying to shoot kept walking away
-          // BeforeCastFaceTarget doesn't work well if you aren't already in combat with that other target
-          // due to them moving around alot
-          "!TargetCombat", // We do not want to face target if we are not in combat already
-          "!TargetTargetsPlayerOrPet" // We don't want to face target if they aren't target us,
+          "MaxRange < 6",
+          "TargetTargetsPlayerOrPet"
         ],
         "Interrupt": "CanRun:Fire Blast",
         "CancelOnInterrupt": true
@@ -151,7 +143,7 @@
         "Name": "HP Potion",
         "Key": "F10",
         "Requirements": [
-          "20 > Health%",
+          "Health% < 20",
           "InCombat"
         ]
       },

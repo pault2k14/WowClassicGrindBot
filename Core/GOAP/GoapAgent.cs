@@ -460,9 +460,13 @@ public sealed partial class GoapAgent : IDisposable
                   && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
                   && (playerReader.WithInCombatRange()) // AddPrecondition(GoapKey.incombatrange, true)
                  )
-                   || (b.FocusTarget() // AddPrecondition(GoapKey.focushastarget,true)
+                 || (b.FocusTarget() // AddPrecondition(GoapKey.focushastarget,true)
                     && bits.FocusTarget_Combat() // AddPrecondition(GoapKey.focuscombat, true)
-                ));
+                 )
+                 // Added to check if just anyone in the party is in combat.
+                 // Attempt to fix movement to Consume Corpse/Loot/SKin while in combat.
+                 || (playerCombat || bits.FocusTarget_Combat())
+                );
     }
 
     private void HandleGoapEvent(GoapEventArgs e)

@@ -74,21 +74,12 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
 
         this.token = cts.Token;
 
-        if (classConfig.Mode == Mode.AssistFocus)
-        {
-            AddPrecondition(GoapKey.partymembercombat, true);
-        }
-        else if (classConfig.Mode == Mode.PartyLeader)
-        {
-            AddPrecondition(GoapKey.partyleadercombat, true);
-        }
-
         AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.pulled, false);
         AddPrecondition(GoapKey.dangercombat, false);
         AddPrecondition(GoapKey.shouldloot, true);
         AddPrecondition(GoapKey.assistrequestreturn, false);
-        //AddPrecondition(GoapKey.focuscombat, false);
+        AddPrecondition(GoapKey.focuscombat, false);
         AddPrecondition(GoapKey.pethastarget, false);
 
         AddEffect(GoapKey.shouldloot, false);
