@@ -14,6 +14,7 @@ public sealed class TargetFinder : IDisposable
     private readonly AddonBits bits;
     private readonly NpcNameTargeting npcNameTargeting;
     private readonly Wait wait;
+    private readonly ChatReader chatReader;
 
     private DateTime lastActive;
 
@@ -28,14 +29,17 @@ public sealed class TargetFinder : IDisposable
         (int)(DateTime.UtcNow - lastActive).TotalMilliseconds;
 
     public TargetFinder(ConfigurableInput input,
-        AddonBits bits, NpcNameTargeting npcNameTargeting, Wait wait)
+        AddonBits bits, NpcNameTargeting npcNameTargeting, 
+        Wait wait, ChatReader chatReader)
     {
         this.input = input;
         this.bits = bits;
         this.npcNameTargeting = npcNameTargeting;
         this.wait = wait;
+        this.chatReader = chatReader;
 
         lastActive = DateTime.UtcNow;
+        this.chatReader = chatReader;
     }
 
     public void Reset()
@@ -47,7 +51,17 @@ public sealed class TargetFinder : IDisposable
     public bool Search(
         NpcNames target, Func<bool> validTarget, CancellationToken token)
     {
-        return LookForTarget(target, token) && validTarget();
+        // If Assist has requested return we shouldn't be actively looking for
+        // a target, but rather than kill the looking for target thread, we
+        // simply return false.
+        if(chatReader.AssistRequestReturn)
+        {
+            return false;
+        }
+        else
+        {
+            return LookForTarget(target, token) && validTarget();
+        }
     }
 
     private bool LookForTarget(

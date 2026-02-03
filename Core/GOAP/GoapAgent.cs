@@ -452,6 +452,7 @@ public sealed partial class GoapAgent : IDisposable
         AddonBits b = bits;
         bool hasTarget = b.Target();
         bool playerCombat = b.Combat();
+        bool dmgTaken = combatLog.DamageTakenCount() > 0;
 
         return ((playerCombat // AddPrecondition(GoapKey.incombat, true)
                   && hasTarget // AddPrecondition(GoapKey.hastarget, true);
@@ -465,7 +466,7 @@ public sealed partial class GoapAgent : IDisposable
                  )
                  // Added to check if just anyone in the party is in combat.
                  // Attempt to fix movement to Consume Corpse/Loot/SKin while in combat.
-                 || (playerCombat || bits.FocusTarget_Combat())
+                 || (playerCombat || bits.FocusTarget_Combat() && dmgTaken)
                 );
     }
 

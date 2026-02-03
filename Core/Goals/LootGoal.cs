@@ -94,17 +94,6 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (classConfig.Mode == Mode.PartyLeader && (bits.Combat() || bits.Focus_Combat()))
-        {
-            logger.LogInformation("LootGoal: In Combat aborting skinning!");
-            AddEffect(GoapKey.producedcorpse, false);
-            AddEffect(GoapKey.consumecorpse, false);
-            AddEffect(GoapKey.shouldloot, false);
-            AddEffect(GoapKey.shouldgather, false);
-            AddEffect(GoapKey.consumablecorpsenearby, false);
-            return;
-        }
-
         while (restHandler.IsResting())
         {
             wait.Update(1000);

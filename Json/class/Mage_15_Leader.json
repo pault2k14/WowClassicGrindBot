@@ -3,7 +3,7 @@
   "Mode": "PartyLeader",
   "Loot": true,
   "Skin": true,
-  "NPCMaxLevels_Below": 5,
+  "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,

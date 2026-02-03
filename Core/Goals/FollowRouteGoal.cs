@@ -164,10 +164,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else
         {
-            sideActivityCts = new CancellationTokenSource();
-            var localCts = sideActivityCts;
+            //sideActivityCts = new CancellationTokenSource();
+            //var localCts = sideActivityCts;
 
-            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
+            //sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
+            sideActivityThread = new(Thread_LookingForTarget);
             logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
             sideActivityThread.Start();
         }
@@ -197,7 +198,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
 
             sideActivityCts.Dispose();
-
+            
             // Now it’s safe to dispose other objects (or let DI do it)
             navigation.Dispose();
         }
@@ -226,18 +227,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             wait.Update(1000);
         }
 
-        // Added this due to cancel sideActivityCtx searching for 
-        // a target thread can get killed
-        if (!chatReader.AssistRequestReturn && !sideActivityThread.IsAlive)
-        {
-            logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
-            var localCts = sideActivityCts;
-
-            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
-            logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
-            sideActivityThread.Start();
-        }
-
         onEnterTime = DateTime.UtcNow;
 
         if (sideActivityCts.IsCancellationRequested)
@@ -251,8 +240,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
             Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
-            sideActivityCts.Cancel();
-            sideActivityManualReset.Reset();
             logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
             GoToOneWaypoint(assistWaypoint);
         }
@@ -298,27 +285,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                             + chatReader.AssistYPos);
 
                         Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
-                        sideActivityCts.Cancel();
-                        sideActivityManualReset.Reset();
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - Calling GoToOneWaypoint of " + assistWaypoint);
                         GoToOneWaypoint(assistWaypoint);
-                    }
-                    else
-                    {
-                        // Added this due to cancel sideActivityCtx searching for 
-                        // a target thread can get killed
-                        if(!sideActivityThread.IsAlive)
-                        {
-                            logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
-                            var localCts = sideActivityCts;
-
-                            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
-                            logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
-                            sideActivityThread.Start();
-                        }
-
-                        sideActivityCts = new();
-                        sideActivityManualReset.Set();
                     }
 
                     break;
@@ -383,21 +351,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
             Abort();
-
-            sideActivityCts.Cancel();
-            sideActivityManualReset.Set();
             return;
-        } else if (chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn 
-            && classConfig.Mode != Mode.AttendedGather && !sideActivityThread.IsAlive)
-        {
-            // Sometimes we find a target but decide not to pull it (usuall a ApproachTargetGoal  Seems stuck! Clear Target.
-            // then we clear the target and return to the FollowRouteGoal where after entering the side thread is cancelled.
-            logger.LogInformation("FollowRouteGoal: Trying to restart sideActivityThread Thread_LookingForTarget");
-            var localCts = sideActivityCts;
-
-            sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
-            logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
-            sideActivityThread.Start();
         }
 
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
@@ -421,15 +375,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         wait.Update();
     }
 
-    private void Thread_LookingForTarget(CancellationTokenSource cts)
+    // private void Thread_LookingForTarget(CancellationTokenSource cts)
+    private void Thread_LookingForTarget()
     {
-        var token = cts.Token;
+        //var token = cts.Token;
         sideActivityManualReset.Wait();
 
-        while (!token.IsCancellationRequested)
+        while (!sideActivityCts.IsCancellationRequested)
         {
             if (pathSettings.CanRunSideActivity() &&
-                targetFinder.Search(NpcNameToFind, bits.Target_NotDead, token))
+                // targetFinder.Search(NpcNameToFind, bits.Target_NotDead, token))
+                targetFinder.Search(NpcNameToFind, bits.Target_NotDead, sideActivityCts.Token))
             {
                 if (bits.Target() && targetBlacklist.Is())
                 {
@@ -440,9 +396,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 else
                 {
                     Log("Found target!");
-                    cts.Cancel();
+                    //cts.Cancel();
+                    sideActivityCts.Cancel();
                     sideActivityManualReset.Reset();
-                }
+                } 
             }
 
             wait.Update();
@@ -513,8 +470,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
             Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
-            sideActivityCts.Cancel();
-            sideActivityManualReset.Reset();
             logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
             GoToOneWaypoint(assistWaypoint);
         } else
