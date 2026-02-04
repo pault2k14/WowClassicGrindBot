@@ -1,6 +1,6 @@
 ﻿using SharedLib;
 using SharedLib.Extensions;
-
+using Core.Goals;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -39,6 +39,8 @@ public sealed class PathSettings
 
     public bool PathFinished() => Finished();
     public Func<bool> Finished = () => true;
+
+    public BlacklistRect[] MapBlacklistRects { get; set; } = Array.Empty<BlacklistRect>();
 
     public void Init(RecordInt globalTime, PlayerReader playerReader, int id)
     {

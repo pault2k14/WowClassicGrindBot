@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using SharedLib;
 
 using System;
+using System.Linq;
 using System.Numerics;
 using System.Threading;
 
@@ -350,14 +351,44 @@ public static class GoalFactory
 
     private static PathSettings GetPathSettings(PathSettings setting, DataConfig dataConfig)
     {
-        setting.PathFilename =
-            RelativeFilePath(dataConfig, setting.PathFilename);
+        setting.PathFilename = RelativeFilePath(dataConfig, setting.PathFilename);
 
-        setting.Path = DeserializeObject<Vector3[]>(
-            ReadAllText(setting.PathFilename))!;
+        string json = ReadAllText(setting.PathFilename);
 
-        // TODO: there could be saved user routes where
-        //       the Z component not 0
+        Vector3[] waypoints;
+        BlacklistRect[] mapRects;
+
+        // 1) Try new format
+        // 2) Fallback to old format
+        try
+        {
+            var route = DeserializeObject<RouteFile>(json);
+            if (route?.Waypoints is { Length: > 0 })
+            {
+                waypoints = route.Waypoints;
+
+                mapRects = (route.Blacklists ?? Array.Empty<BlacklistRectDto>())
+                    .Select(r => new BlacklistRect(r.MinX, r.MinY, r.MaxX, r.MaxY).Normalized())
+                    .ToArray();
+            }
+            else
+            {
+                waypoints = DeserializeObject<Vector3[]>(json)!;
+                mapRects = Array.Empty<BlacklistRect>();
+            }
+        }
+        catch
+        {
+            waypoints = DeserializeObject<Vector3[]>(json)!;
+            mapRects = Array.Empty<BlacklistRect>();
+        }
+
+        setting.Path = waypoints ?? Array.Empty<Vector3>();
+        setting.MapBlacklistRects = mapRects ?? Array.Empty<BlacklistRect>();
+
+        Console.WriteLine($"Loaded path: {setting.Path.Length} points, blacklists: {setting.MapBlacklistRects.Length} rects, file: {setting.PathFilename}");
+
+        // Your existing Z normalization behavior
         for (int i = 0; i < setting.Path.Length; i++)
         {
             if (setting.Path[i].Z != 0)
@@ -379,7 +410,6 @@ public static class GoalFactory
         }
 
         setting.Path = path;
-
         return setting;
     }
 
@@ -389,5 +419,19 @@ public static class GoalFactory
             ? Array.Empty<Vector3>()
             : DeserializeObject<Vector3[]>(
             ReadAllText(RelativeFilePath(dataConfig, keyAction.PathFilename)))!;
+    }
+
+    private sealed class RouteFile
+    {
+        public Vector3[]? Waypoints { get; set; }
+        public BlacklistRectDto[]? Blacklists { get; set; }
+    }
+
+    private sealed class BlacklistRectDto
+    {
+        public float MinX { get; set; }
+        public float MinY { get; set; }
+        public float MaxX { get; set; }
+        public float MaxY { get; set; }
     }
 }

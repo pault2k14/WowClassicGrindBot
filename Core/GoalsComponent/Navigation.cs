@@ -73,6 +73,34 @@ public sealed partial class Navigation : IDisposable
     private int failedAttempt;
     private Vector3 lastFailedDestination;
 
+    public IAreaBlacklist? AreaBlacklist { get; set; }
+
+    /// <summary>How far outside a forbidden rect detour points are placed (WORLD units).</summary>
+    public float DetourMargin { get; set; } = 12f;
+
+    /// <summary>Max detours attempted for the same target waypoint.</summary>
+    public int MaxDetourAttemptsPerTarget { get; set; } = 6;
+
+    private Vector3 lastDetourTarget;
+    private int detourAttemptsForTarget;
+    private volatile bool waitingForPathResult;
+    private int pathRequestPending;        // 0 = none, 1 = in-flight
+
+    // Monotonic request id so we can ignore stale results
+    private long nextPathRequestId;
+    private long activePathRequestId;
+
+    // Optional: keep the last request params for debugging
+    private Vector3 lastRequestStart;
+    private Vector3 lastRequestEnd;
+
+
+    private long lastRefillLogTick;
+    private static readonly long RefillLogCooldownTicks = TimeSpan.FromMilliseconds(250).Ticks;
+
+    private Vector3 lastEscapePoint;
+    private int escapeInsertCooldownTicks;
+
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
         PlayerDirection playerDirection,
@@ -123,6 +151,17 @@ public sealed partial class Navigation : IDisposable
     {
         active = true;
 
+        if (escapeInsertCooldownTicks > 0)
+            escapeInsertCooldownTicks--;
+
+        if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
+        {
+            OnDestinationReached?.Invoke();
+            return;
+        }
+
+        // Drop any waypoints that are inside forbidden regions
+        SkipBlacklistedWaypoints();
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
             OnDestinationReached?.Invoke();
@@ -134,10 +173,8 @@ public sealed partial class Navigation : IDisposable
             result.Callback(result);
         }
 
-        if (token.IsCancellationRequested || pathRequests.Count > 0)
-        {
+        if (token.IsCancellationRequested || waitingForPathResult)
             return;
-        }
 
         if (routeToNextWaypoint.Count == 0)
         {
@@ -151,6 +188,20 @@ public sealed partial class Navigation : IDisposable
         // main loop
         Vector3 playerW = playerReader.WorldPos;
         playerWorldPos = playerW;
+
+        // If inside blacklist, do not progress along route points that are also blacklisted.
+        // We want to escape first.
+        if (AreaBlacklist != null && AreaBlacklist.TryGetContainingRect(playerReader.WorldPos, out _))
+        {
+            // If current next-step is inside blacklist, clear route so refill chooses escape.
+            if (routeToNextWaypoint.Count > 0 && IsBlacklistedPoint(routeToNextWaypoint.Peek()))
+            {
+                routeToNextWaypoint.Clear();
+                UpdateTotalRoute();
+                return;
+            }
+        }
+
         Vector3 targetW = routeToNextWaypoint.Peek();
         float worldDistance = playerW.WorldDistanceXYTo(targetW);
 
@@ -324,49 +375,216 @@ public sealed partial class Navigation : IDisposable
         stuckDetector.Reset();
     }
 
+    private void LogRefill(string msg)
+    {
+        long now = DateTime.UtcNow.Ticks;
+        if (now - lastRefillLogTick > RefillLogCooldownTicks)
+        {
+            lastRefillLogTick = now;
+            logger.LogInformation(msg);
+        }
+    }
+
     private void RefillRouteToNextWaypoint(CancellationToken token)
     {
+        // Don’t log "called" every frame; only log occasionally.
+        LogRefill("[NAV] RefillRouteToNextWaypoint tick");
+
+        if (routeToNextWaypoint.Count > 0)
+        {
+            LogRefill($"[NAV] Refill: exit (routeToNextWaypoint.Count={routeToNextWaypoint.Count})");
+            return;
+        }
+
+        int pending = Volatile.Read(ref pathRequestPending);
+        if (waitingForPathResult || pending == 1)
+        {
+            LogRefill($"[NAV] Refill: exit (waitingForPathResult={waitingForPathResult}, pathRequestPending={pending})");
+            return;
+        }
+
+        if (wayPoints.Count == 0)
+        {
+            LogRefill("[NAV] Refill: exit (no waypoints)");
+            UpdateTotalRoute();
+            OnDestinationReached?.Invoke();
+            return;
+        }
+
+        logger.LogInformation("[NAV] RefillRouteToNextWaypoint called");
+
+        if (routeToNextWaypoint.Count > 0)
+            return;
+
+        // Strong gating: if a request is in flight, do NOT try again
+        if (waitingForPathResult || Volatile.Read(ref pathRequestPending) == 1)
+            return;
+
         routeToNextWaypoint.Clear();
 
-        Vector3 playerW = playerReader.WorldPos;
-        Vector3 targetW = wayPoints.Peek();
-        float distance = playerW.WorldDistanceXYTo(targetW);
+        Vector3 startW = playerReader.WorldPos;
 
-        if (distance > MaxDistance || distance > AvgDistance * 2)
+        // If we are currently inside a forbidden rect, escape FIRST.
+        // Escape-first: if inside any blacklist, generate an escape step NOW.
+        if (TryComputeEscapeOutOfBlacklist(startW, out var escapeW))
         {
-            if (debug)
-                LogDebug($"Distance: {distance} vs Avg:({AvgDistance * 2},{AvgDistance}) - TAVG: {DIFF_THRESHOLD * AvgDistance} ");
+            // --- RATE-LIMIT GUARD (PLACE IT HERE) ---
+            if (lastEscapePoint.WorldDistanceXYTo(escapeW) < 0.1f &&
+                escapeInsertCooldownTicks > 0)
+            {
+                return; // same escape recently inserted; do nothing this tick
+            }
 
-            stopMoving.Stop();
-            PathRequest(new PathRequest(playerReader.UIMapId.Value, playerW, targetW, distance, PathCalculatedCallback));
-        }
-        else
-        {
-            if (debug)
-                LogDebug($"non pathfinder - {distance} - {playerW} -> {targetW}");
+            // Update rate-limit state
+            lastEscapePoint = escapeW;
+            escapeInsertCooldownTicks = 10; // ~10 frames (tune as needed)
 
-            routeToNextWaypoint.Push(targetW);
+            // If escape point is basically where we are, avoid thrashing
+            if (startW.WorldDistanceXYTo(escapeW) < ReachedDistance(OutDoorMinDistance))
+            {
+                logger.LogWarning($"[BL] Escape computed but too close; start={startW} escape={escapeW}");
+                // You could increase margin here, or just return to avoid spam.
+                return;
+            }
 
-            Vector3 playerM = WorldMapAreaDB.ToMap_FlipXY(playerW, playerReader.WorldMapArea);
-            Vector3 targetM = WorldMapAreaDB.ToMap_FlipXY(targetW, playerReader.WorldMapArea);
-            float heading = DirectionCalculator.CalculateMapHeading(playerM, targetM);
-            AdjustHeading(heading, token);
+            // Ensure it becomes the immediate movement target this frame
+            routeToNextWaypoint.Clear();
+            routeToNextWaypoint.Push(escapeW);
+            stuckDetector.SetTargetLocation(escapeW);
 
-            stuckDetector.SetTargetLocation(targetW);
+            // Optional: keep it in waypoints too so "waypoint reached" logic remains consistent
+            if (wayPoints.Count == 0 || wayPoints.Peek().WorldDistanceXYTo(escapeW) > 0.1f)
+                wayPoints.Push(escapeW);
+
             UpdateTotalRoute();
+            logger.LogInformation($"[BL] Escape-first ROUTE set: {startW} -> {escapeW}");
+            return;
         }
+
+        if (!SkipBlacklistedWaypoints())
+        {
+            logger.LogInformation("[NAV] Refill: SkipBlacklistedWaypoints returned false -> destination reached");
+            UpdateTotalRoute();
+            OnDestinationReached?.Invoke();
+            return;
+        }
+
+        Vector3 targetW = wayPoints.Peek();
+        float distance = startW.WorldDistanceXYTo(targetW);
+
+        // If you removed “directBlocked forcing pather”, then you may never enqueue.
+        // Decide your policy:
+        bool usePather = distance > MaxDistance || distance > AvgDistance * 2;
+
+        // Or if you still have blacklist rectangles, you probably want this too:
+        BlacklistRect r = default;
+        bool directBlocked = AreaBlacklist != null &&
+                             TryGetBlockingRectEscapeAware(startW, targetW, out r);
+
+        if (directBlocked)
+        {
+            // Try a cheap local detour first.
+            if (TryInsertDetour(startW, targetW, r))
+            {
+                logger.LogInformation($"[NAV] Refill: detour inserted for blocked segment start={startW} end={targetW}");
+                return; // next Update tick will refill using the new top-of-stack detour
+            }
+
+            // If detour failed, fall back to the pather.
+            logger.LogInformation($"[NAV] Refill: detour failed -> forcing pather start={startW} end={targetW}");
+            usePather = true;
+        }
+
+        if (usePather)
+        {
+            stopMoving.Stop();
+            EnqueuePathRequest(playerReader.UIMapId.Value, startW, targetW, distance);
+            return;
+        }
+
+        // else direct:
+        routeToNextWaypoint.Push(targetW);
+        stuckDetector.SetTargetLocation(targetW);
+        UpdateTotalRoute();
+
+    }
+
+    private void EnqueuePathRequest(int mapId, Vector3 startW, Vector3 endW, float distance)
+    {
+        if (!TryBeginPathRequest(startW, endW, out long requestId))
+        {
+            logger.LogInformation($"[NAV] EnqueuePathRequest: blocked (pending). start={startW} end={endW}");
+            return;
+        }
+
+        waitingForPathResult = true;
+
+        logger.LogInformation($"[NAV] EnqueuePathRequest: QUEUED reqId={requestId} start={startW} end={endW} dist={distance}");
+
+        var req = new PathRequest(
+            mapId,
+            startW,
+            endW,
+            distance,
+            result => PathCalculatedCallback(requestId, result)
+        );
+
+        PathRequest(req);
     }
 
     private void PathRequest(PathRequest pathRequest)
     {
+        waitingForPathResult = true;
+        logger.LogInformation($"[BL] PathRequest queued: {pathRequest.StartW} -> {pathRequest.EndW} dist={pathRequest.Distance}");
         pathRequests.Enqueue(pathRequest);
         manualReset.Set();
     }
 
-    private void PathCalculatedCallback(PathResult result)
+    private bool TryBeginPathRequest(Vector3 startW, Vector3 endW, out long requestId)
     {
+        requestId = 0;
+
+        // Only one request at a time. If another thread already set it, we won't enqueue.
+        if (Interlocked.CompareExchange(ref pathRequestPending, 1, 0) != 0)
+            return false;
+
+        requestId = Interlocked.Increment(ref nextPathRequestId);
+        Volatile.Write(ref activePathRequestId, requestId);
+
+        lastRequestStart = startW;
+        lastRequestEnd = endW;
+
+        return true;
+    }
+
+    private void EndPathRequest(long requestId)
+    {
+        // Only clear if this is the currently-active request.
+        // This avoids a stale callback clearing the gate for a newer request.
+        if (Volatile.Read(ref activePathRequestId) == requestId)
+        {
+            Interlocked.Exchange(ref pathRequestPending, 0);
+        }
+    }
+
+    private void PathCalculatedCallback(long requestId, PathResult result)
+    {
+        // Always end the request FIRST (or at least before any early return)
+        EndPathRequest(requestId);
+
+        waitingForPathResult = false;
+
+        logger.LogInformation($"[NAV] PathCalculatedCallback reqId={requestId} pathLen={result.Path.Length} start={result.StartW} end={result.EndW}");
+
         if (!active)
             return;
+
+        // Ignore stale results: if another request has superseded this one
+        if (Volatile.Read(ref activePathRequestId) != requestId)
+        {
+            logger.LogInformation($"[NAV] Ignoring stale path result reqId={requestId} activeReqId={Volatile.Read(ref activePathRequestId)}");
+            return;
+        }
 
         if (result.Path.Length == 0)
         {
@@ -387,23 +605,33 @@ public sealed partial class Navigation : IDisposable
         }
 
         failedAttempt = 0;
+
+        // (Keep your blacklist validation here if needed)
+        // ...
+
         LogPathfinderSuccess(logger, result.Distance, result.StartW, result.EndW, result.ElapsedMs);
+
+        const float MIN_FIRST_STEP_DIST = 1.0f;
+
+        routeToNextWaypoint.Clear();
 
         for (int i = result.Path.Length - 1; i >= 0; i--)
         {
-            routeToNextWaypoint.Push(result.Path[i]);
+            Vector3 p = result.Path[i];
+            if (p.WorldDistanceXYTo(result.StartW) < MIN_FIRST_STEP_DIST)
+                continue;
+
+            routeToNextWaypoint.Push(p);
         }
+
+        if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
+            routeToNextWaypoint.Push(wayPoints.Peek());
 
         if (SimplifyRouteToWaypoint)
             SimplyfyRouteToWaypoint();
 
-        if (routeToNextWaypoint.Count == 0)
-        {
+        if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
             routeToNextWaypoint.Push(wayPoints.Peek());
-
-            if (debug)
-                LogDebug($"RefillRouteToNextWaypoint -- WayPoint reached! {wayPoints.Count}");
-        }
 
         stuckDetector.SetTargetLocation(routeToNextWaypoint.Peek());
         UpdateTotalRoute();
@@ -418,6 +646,8 @@ public sealed partial class Navigation : IDisposable
             manualReset.Reset();
             if (pathRequests.TryPeek(out PathRequest pathRequest))
             {
+                logger.LogInformation($"[BL] PathFinderThread processing: {pathRequest.StartW} -> {pathRequest.EndW}");
+
                 Vector3[] path = pather.FindWorldRoute(pathRequest.MapId, pathRequest.StartW, pathRequest.EndW);
                 if (active)
                 {
@@ -539,11 +769,217 @@ public sealed partial class Navigation : IDisposable
         wayPoints.CopyTo(TotalRoute, routeToNextWaypoint.Count);
     }
 
+    private bool IsBlacklistedPoint(Vector3 worldPoint)
+    => AreaBlacklist != null && AreaBlacklist.ContainsWorld(worldPoint);
+
+    /// <summary>
+    /// Returns true if the segment should be blocked by blacklists,
+    /// with "allow leaving only" behavior:
+    /// - if start is inside a rect and end is outside that same rect, crossing that rect boundary is allowed
+    /// - but intersections with OTHER rects are still blocked.
+    /// </summary>
+    private bool TryGetBlockingRectEscapeAware(Vector3 startW, Vector3 endW, out BlacklistRect blockingRect)
+    {
+        blockingRect = default;
+        if (AreaBlacklist == null) return false;
+
+        // If we're inside a rect and moving to a point outside that rect, allow leaving that rect.
+        if (AreaBlacklist.TryGetContainingRect(startW, out var containingRect))
+        {
+            var endInsideSame = containingRect.Contains(new Vector2(endW.X, endW.Y));
+            if (!endInsideSame)
+            {
+                // Ignore the containing rect; still block if we intersect any other rect.
+                return AreaBlacklist.TryGetBlockingRectExcluding(startW, endW, containingRect, out blockingRect);
+            }
+        }
+
+        // Normal rule
+        return AreaBlacklist.TryGetBlockingRect(startW, endW, out blockingRect);
+    }
+
+    private bool SegmentBlockedEscapeAware(Vector3 startW, Vector3 endW)
+        => TryGetBlockingRectEscapeAware(startW, endW, out _);
+
+    private bool SkipBlacklistedWaypoints()
+    {
+        if (AreaBlacklist == null) return wayPoints.Count > 0;
+
+        // Escape-first handles "inside" behavior
+        if (AreaBlacklist.TryGetContainingRect(playerReader.WorldPos, out _))
+            return wayPoints.Count > 0;
+
+        int removed = 0;
+        while (wayPoints.Count > 0 && IsBlacklistedPoint(wayPoints.Peek()))
+        {
+            wayPoints.Pop();
+            removed++;
+        }
+
+        if (removed > 0)
+            UpdateTotalRoute();
+
+        return wayPoints.Count > 0;
+    }
+
+    private static IEnumerable<Vector3> BuildDetourCandidates(BlacklistRect r, float m, float z)
+    {
+        // 3 samples per side (25%, 50%, 75%)
+        float[] t = { 0.25f, 0.5f, 0.75f };
+
+        foreach (var u in t)
+        {
+            float x = Lerp(r.MinX, r.MaxX, u);
+            float y = Lerp(r.MinY, r.MaxY, u);
+
+            yield return new Vector3(r.MinX - m, y, z); // left
+            yield return new Vector3(r.MaxX + m, y, z); // right
+            yield return new Vector3(x, r.MinY - m, z); // bottom
+            yield return new Vector3(x, r.MaxY + m, z); // top
+        }
+
+        // plus corners (still useful)
+        yield return new Vector3(r.MinX - m, r.MinY - m, z);
+        yield return new Vector3(r.MaxX + m, r.MinY - m, z);
+        yield return new Vector3(r.MaxX + m, r.MaxY + m, z);
+        yield return new Vector3(r.MinX - m, r.MaxY + m, z);
+    }
+
+    private bool TryInsertDetour(Vector3 startW, Vector3 targetW, BlacklistRect blockingRect)
+    {
+        // Loop protection per-target
+        if (lastDetourTarget != targetW)
+        {
+            lastDetourTarget = targetW;
+            detourAttemptsForTarget = 0;
+        }
+        detourAttemptsForTarget++;
+        if (detourAttemptsForTarget > MaxDetourAttemptsPerTarget)
+        {
+            logger.LogWarning($"[BL] detour failed start={startW} target={targetW} rect=({blockingRect.MinX},{blockingRect.MinY})-({blockingRect.MaxX},{blockingRect.MaxY})");
+            return false;
+        }
+
+        float m = DetourMargin;
+        float z = playerReader.WorldPosZ;
+
+        // Slightly inflate the rect to give extra clearance when generating points
+        var inflated = blockingRect.Inflate(m * 0.5f); // smaller than m
+
+        Vector3 best = default;
+        float bestScore = float.MaxValue;
+        bool found = false;
+
+        foreach (var d in BuildDetourCandidates(inflated, m, z))
+        {
+            if (IsBlacklistedPoint(d)) continue;
+            if (SegmentBlockedEscapeAware(startW, d)) continue;
+            if (SegmentBlockedEscapeAware(d, targetW)) continue;
+
+            float score = startW.WorldDistanceXYTo(d) + d.WorldDistanceXYTo(targetW);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = d;
+                found = true;
+            }
+        }
+
+        if (!found)
+        {
+            logger.LogWarning(
+                $"[BL] detour failed (no candidate): start={startW} target={targetW} rect=({blockingRect.MinX},{blockingRect.MinY})-({blockingRect.MaxX},{blockingRect.MaxY})");
+            return false;
+        }
+
+        static bool SamePoint(Vector3 a, Vector3 b) 
+            => a.WorldDistanceXYTo(b) < 0.01f; // or whatever tolerance you like
+
+        // Inject detour before target (stack top)
+        if (wayPoints.Count == 0 || !SamePoint(wayPoints.Peek(), targetW))
+        {
+            logger.LogInformation($"[BL] detour aborted (target changed): start={startW} target={targetW}");
+            return false;
+        }
+
+        wayPoints.Pop();          // remove target
+        wayPoints.Push(targetW);  // restore target
+        wayPoints.Push(best);     // detour is next
+
+        routeToNextWaypoint.Clear(); // force recalculation immediately
+        UpdateTotalRoute();
+
+        logger.LogInformation($"[BL] detour inserted: {best} before target {targetW}");
+        return true;
+    }
+
+    private static float Clamp(float v, float min, float max)
+    => v < min ? min : (v > max ? max : v);
+
+    private bool TryComputeEscapeOutOfBlacklist(Vector3 startW, out Vector3 escapeW)
+    {
+        escapeW = startW;
+
+        if (AreaBlacklist == null)
+            return false;
+
+        // If not inside at all, nothing to do
+        if (!AreaBlacklist.TryGetContainingRect(escapeW, out var rect))
+            return false;
+
+        float m = DetourMargin;
+        float z = playerReader.WorldPosZ;
+
+        // Loop to handle overlapping rects: escape one, then re-check, escape again, etc.
+        // Usually 1-2 iterations; hard cap prevents infinite loops.
+        for (int i = 0; i < 8; i++)
+        {
+            if (!AreaBlacklist.TryGetContainingRect(escapeW, out rect))
+                return true; // escaped!
+
+            // Compute nearest point just outside this rect
+            escapeW = EscapePointFromRect(escapeW, rect, m, z);
+
+            // If that point is still blacklisted (overlap / other rect), loop continues
+            // If it never becomes non-blacklisted, we fail after 8 tries
+        }
+
+        // Final check
+        return AreaBlacklist.TryGetContainingRect(escapeW, out _) == false && !IsBlacklistedPoint(escapeW);
+    }
+
+    private static Vector3 EscapePointFromRect(Vector3 posW, BlacklistRect rect, float margin, float z)
+    {
+        float x = posW.X;
+        float y = posW.Y;
+
+        float dLeft = MathF.Abs(x - rect.MinX);
+        float dRight = MathF.Abs(rect.MaxX - x);
+        float dBottom = MathF.Abs(y - rect.MinY);
+        float dTop = MathF.Abs(rect.MaxY - y);
+
+        // choose nearest side
+        float minD = dLeft;
+        int side = 0; // 0=left,1=right,2=bottom,3=top
+        if (dRight < minD) { minD = dRight; side = 1; }
+        if (dBottom < minD) { minD = dBottom; side = 2; }
+        if (dTop < minD) { minD = dTop; side = 3; }
+
+        return side switch
+        {
+            0 => new Vector3(rect.MinX - margin, Clamp(y, rect.MinY, rect.MaxY), z),
+            1 => new Vector3(rect.MaxX + margin, Clamp(y, rect.MinY, rect.MaxY), z),
+            2 => new Vector3(Clamp(x, rect.MinX, rect.MaxX), rect.MinY - margin, z),
+            _ => new Vector3(Clamp(x, rect.MinX, rect.MaxX), rect.MaxY + margin, z),
+        };
+    }
+
     private bool HasBeenActiveRecently()
     {
         return (DateTime.UtcNow - LastActive).TotalSeconds < 2;
     }
 
+    private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 
     private void LogDebug(string text)
     {

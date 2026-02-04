@@ -222,6 +222,26 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Resume()
     {
+        // Apply per-route area blacklists (map rects -> world rects)
+        if (pathSettings.MapBlacklistRects is { Length: > 0 })
+        {
+            navigation.AreaBlacklist = BlacklistConversion.BuildWorldBlacklistFromMapRects(
+                pathSettings.MapBlacklistRects,
+                playerReader.WorldMapArea
+            );
+
+            // Tune these as desired
+            navigation.DetourMargin = 12f;
+            navigation.MaxDetourAttemptsPerTarget = 6;
+        }
+        else
+        {
+            navigation.AreaBlacklist = null;
+        }
+
+        logger.LogInformation($"Blacklist rect count (map): {pathSettings.MapBlacklistRects.Length}");
+        logger.LogInformation($"Player inside blacklist: {navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true}");
+
         while (restHandler.IsResting() && !chatReader.AssistRequestReturn)
         {
             wait.Update(1000);
