@@ -15,6 +15,7 @@ public sealed class TargetFinder : IDisposable
     private readonly NpcNameTargeting npcNameTargeting;
     private readonly Wait wait;
     private readonly ChatReader chatReader;
+    private readonly Navigation navigation;
 
     private DateTime lastActive;
 
@@ -30,13 +31,14 @@ public sealed class TargetFinder : IDisposable
 
     public TargetFinder(ConfigurableInput input,
         AddonBits bits, NpcNameTargeting npcNameTargeting, 
-        Wait wait, ChatReader chatReader)
+        Wait wait, ChatReader chatReader, Navigation navigation)
     {
         this.input = input;
         this.bits = bits;
         this.npcNameTargeting = npcNameTargeting;
         this.wait = wait;
         this.chatReader = chatReader;
+        this.navigation = navigation;
 
         lastActive = DateTime.UtcNow;
         this.chatReader = chatReader;
@@ -54,7 +56,7 @@ public sealed class TargetFinder : IDisposable
         // If Assist has requested return we shouldn't be actively looking for
         // a target, but rather than kill the looking for target thread, we
         // simply return false.
-        if(chatReader.AssistRequestReturn)
+        if(chatReader.AssistRequestReturn || navigation.IsInBlacklistArea())
         {
             return false;
         }

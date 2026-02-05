@@ -1,3 +1,4 @@
+using Core.AreaBlacklist;
 using Core.Database;
 using Core.Goals;
 using Core.GOAP;
@@ -91,9 +92,6 @@ public static class GoalFactory
         }
 
         services.AddScoped<TargetFinder>();
-
-        // each GoapGoal gets an individual instance
-        services.AddTransient<Navigation>();
 
         if (classConfig.Mode == Mode.CorpseRun)
         {
@@ -349,7 +347,7 @@ public static class GoalFactory
             : path;
     }
 
-    private static PathSettings GetPathSettings(PathSettings setting, DataConfig dataConfig)
+    public static PathSettings GetPathSettings(PathSettings setting, DataConfig dataConfig)
     {
         setting.PathFilename = RelativeFilePath(dataConfig, setting.PathFilename);
 

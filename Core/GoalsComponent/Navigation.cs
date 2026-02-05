@@ -1,3 +1,4 @@
+using Core.AreaBlacklist;
 using Core.GOAP;
 
 using Microsoft.Extensions.Logging;
@@ -9,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Threading;
+using System.Collections.Concurrent;
 
 using static System.MathF;
 
@@ -34,6 +36,8 @@ public sealed partial class Navigation : IDisposable
     private readonly StuckDetector stuckDetector;
     private readonly IPPather pather;
     private readonly IMountHandler mountHandler;
+    private readonly PathSettings pathSettings;
+    private readonly DataConfig dataConfig;
 
     private const float MinDistanceMount = 10;
     private readonly float MaxDistance = 200;
@@ -63,8 +67,8 @@ public sealed partial class Navigation : IDisposable
     private bool active;
     private Vector3 playerWorldPos;
 
-    private readonly Queue<PathRequest> pathRequests = new(1);
-    private readonly Queue<PathResult> pathResults = new(1);
+    private readonly ConcurrentQueue<PathRequest> pathRequests = new();
+    private readonly ConcurrentQueue<PathResult> pathResults = new();
 
     private readonly CancellationToken token;
     private readonly Thread pathfinderThread;
@@ -100,6 +104,7 @@ public sealed partial class Navigation : IDisposable
 
     private Vector3 lastEscapePoint;
     private int escapeInsertCooldownTicks;
+    private DateTime waitingSinceUtc;
 
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
@@ -108,7 +113,8 @@ public sealed partial class Navigation : IDisposable
         PlayerReader playerReader, AddonBits bits,
         StopMoving stopMoving,
         StuckDetector stuckDetector, IPPather pather, IMountHandler mountHandler,
-        ClassConfiguration classConfiguration)
+        ClassConfiguration classConfiguration, 
+        PathSettings pathSettings, DataConfig dataConfig)
     {
         this.logger = logger;
         this.playerDirection = playerDirection;
@@ -119,6 +125,8 @@ public sealed partial class Navigation : IDisposable
         this.stuckDetector = stuckDetector;
         this.pather = pather;
         this.mountHandler = mountHandler;
+        this.pathSettings = pathSettings;
+        this.dataConfig = dataConfig;
 
         patherName = pather.GetType().Name;
 
@@ -135,6 +143,29 @@ public sealed partial class Navigation : IDisposable
                 SimplifyRouteToWaypoint = false;
                 break;
         }
+
+        this.pathSettings = pathSettings;
+        this.dataConfig = dataConfig;
+
+        // Apply per-route area blacklists (map rects -> world rects)
+        if (pathSettings.MapBlacklistRects is { Length: > 0 })
+        {
+            logger.LogInformation("[NAV]: pathSettings.MapBlacklistRects.Length: " + pathSettings.MapBlacklistRects.Length);
+
+            AreaBlacklist = BlacklistConversion.BuildWorldBlacklistFromMapRects(
+                pathSettings.MapBlacklistRects,
+                playerReader.WorldMapArea
+            );
+
+            // Tune these as desired
+            DetourMargin = 12f;
+            MaxDetourAttemptsPerTarget = 6;
+        }
+        else
+        {
+            logger.LogInformation("[NAV]: pathSettings.MapBlacklistRects.Length: " + pathSettings.MapBlacklistRects.Length);
+            AreaBlacklist = null;
+        }
     }
 
     public void Dispose()
@@ -149,13 +180,38 @@ public sealed partial class Navigation : IDisposable
 
     public void Update(CancellationToken token)
     {
+        logger.LogInformation($"[NAV-SANITY] Update entered navHash={GetHashCode()} tokenCancelled={token.IsCancellationRequested}");
+
         active = true;
+
+        // Apply per-route area blacklists (map rects -> world rects)
+        if (AreaBlacklist == null && pathSettings.MapBlacklistRects is { Length: > 0 })
+        {
+            logger.LogInformation("[NAV]: Update - pathSettings.MapBlacklistRects.Length: " + pathSettings.MapBlacklistRects.Length);
+
+            AreaBlacklist = BlacklistConversion.BuildWorldBlacklistFromMapRects(
+                pathSettings.MapBlacklistRects,
+                playerReader.WorldMapArea
+            );
+
+            // Tune these as desired
+            DetourMargin = 12f;
+            MaxDetourAttemptsPerTarget = 6;
+        }
+        else if (pathSettings.MapBlacklistRects is { Length: 0 })
+        {
+            logger.LogInformation("[NAV]: Update - pathSettings.MapBlacklistRects.Length: " + pathSettings.MapBlacklistRects.Length);
+            AreaBlacklist = null;
+        }
 
         if (escapeInsertCooldownTicks > 0)
             escapeInsertCooldownTicks--;
 
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
+            logger.LogInformation(
+                $"[NAV-SANITY] EXIT noWork inside={AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true}");
+
             OnDestinationReached?.Invoke();
             return;
         }
@@ -173,11 +229,51 @@ public sealed partial class Navigation : IDisposable
             result.Callback(result);
         }
 
-        if (token.IsCancellationRequested || waitingForPathResult)
+        // Watchdog for path gates
+        if (waitingForPathResult && (DateTime.UtcNow - waitingSinceUtc).TotalSeconds > 3)
+        {
+            logger.LogWarning("[NAV] Path wait timeout; resetting pending/waiting gates.");
+            waitingForPathResult = false;
+            Interlocked.Exchange(ref pathRequestPending, 0);
+        }
+
+        logger.LogInformation(
+            $"[NAV-SANITY] afterResults route={routeToNextWaypoint.Count} waypoints={wayPoints.Count} " +
+            $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
+            $"reqQ={pathRequests.Count} resQ={pathResults.Count} threadTokenCancelled={token.IsCancellationRequested}");
+        int pending = Volatile.Read(ref pathRequestPending);
+
+        // If we're "waiting", but there is no pending request and nothing queued, the flag is stale.
+        if (waitingForPathResult && pending == 0 && pathRequests.Count == 0)
+        {
+            logger.LogWarning("[NAV] waitingForPathResult was TRUE but no request is pending/queued. Resetting.");
+            waitingForPathResult = false;
+        }
+
+        if (token.IsCancellationRequested)
             return;
+
+        // If we have a route already, KEEP MOVING even if a request is in flight.
+        if (routeToNextWaypoint.Count > 0)
+        {
+            // continue to movement section (do NOT return)
+        }
+        else
+        {
+            // No route to follow.
+            // If we’re waiting on a path, don’t refill again—just wait for callback.
+            if (waitingForPathResult)
+                return;
+
+            RefillRouteToNextWaypoint(token);
+            return;
+        }
 
         if (routeToNextWaypoint.Count == 0)
         {
+            logger.LogInformation(
+                $"[NAV-SANITY] routeEmpty waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} waypoints={wayPoints.Count}");
+
             RefillRouteToNextWaypoint(token);
             return;
         }
@@ -387,6 +483,11 @@ public sealed partial class Navigation : IDisposable
 
     private void RefillRouteToNextWaypoint(CancellationToken token)
     {
+        logger.LogInformation(
+            $"[NAV-SANITY] Refill entered. " +
+            $"insideBlacklist={AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true} " +
+            $"waypoints={wayPoints.Count} route={routeToNextWaypoint.Count}");
+
         // Don’t log "called" every frame; only log occasionally.
         LogRefill("[NAV] RefillRouteToNextWaypoint tick");
 
@@ -517,7 +618,9 @@ public sealed partial class Navigation : IDisposable
             return;
         }
 
+
         waitingForPathResult = true;
+        waitingSinceUtc = DateTime.UtcNow;
 
         logger.LogInformation($"[NAV] EnqueuePathRequest: QUEUED reqId={requestId} start={startW} end={endW} dist={distance}");
 
@@ -535,6 +638,7 @@ public sealed partial class Navigation : IDisposable
     private void PathRequest(PathRequest pathRequest)
     {
         waitingForPathResult = true;
+        waitingSinceUtc = DateTime.UtcNow; 
         logger.LogInformation($"[BL] PathRequest queued: {pathRequest.StartW} -> {pathRequest.EndW} dist={pathRequest.Distance}");
         pathRequests.Enqueue(pathRequest);
         manualReset.Set();
@@ -644,22 +748,28 @@ public sealed partial class Navigation : IDisposable
         while (!token.IsCancellationRequested)
         {
             manualReset.Reset();
-            if (pathRequests.TryPeek(out PathRequest pathRequest))
-            {
-                logger.LogInformation($"[BL] PathFinderThread processing: {pathRequest.StartW} -> {pathRequest.EndW}");
 
-                Vector3[] path = pather.FindWorldRoute(pathRequest.MapId, pathRequest.StartW, pathRequest.EndW);
-                if (active)
+            while (pathRequests.TryDequeue(out var pathRequest))
+            {
+                try
                 {
-                    pathResults.Enqueue(new PathResult(pathRequest, path, pathRequest.Callback));
+                    logger.LogInformation($"[BL] PathFinderThread processing: {pathRequest.StartW} -> {pathRequest.EndW}");
+
+                    Vector3[] path = pather.FindWorldRoute(pathRequest.MapId, pathRequest.StartW, pathRequest.EndW);
+
+                    if (active)
+                        pathResults.Enqueue(new PathResult(pathRequest, path, pathRequest.Callback));
                 }
-                pathRequests.Dequeue();
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "[NAV] PathFinderThread exception; returning empty path");
+                    if (active)
+                        pathResults.Enqueue(new PathResult(pathRequest, Array.Empty<Vector3>(), pathRequest.Callback));
+                }
             }
+
             manualReset.Wait();
         }
-
-        if (logger.IsEnabled(LogLevel.Debug))
-            logger.LogDebug("Thread stopped!");
     }
 
     private float ReachedDistance(float minDistance)
@@ -767,6 +877,21 @@ public sealed partial class Navigation : IDisposable
         TotalRoute = new Vector3[routeToNextWaypoint.Count + wayPoints.Count];
         routeToNextWaypoint.CopyTo(TotalRoute, 0);
         wayPoints.CopyTo(TotalRoute, routeToNextWaypoint.Count);
+    }
+
+    public bool IsInBlacklistArea()
+    {
+        //Console.WriteLine("IsInBlacklistArea AreaBlacklist: " + AreaBlacklist);
+        bool inside = AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true;
+
+        /*
+        logger.LogInformation(
+            $"[NAV] IsInBlacklistArea navHash={GetHashCode()} " +
+            $"blacklistNull={AreaBlacklist is null} " +
+            $"blacklistHash={(AreaBlacklist?.GetHashCode().ToString() ?? "null")} " +
+            $"pos={playerReader.WorldPos} inside={inside}");
+        */
+        return inside;
     }
 
     private bool IsBlacklistedPoint(Vector3 worldPoint)
@@ -918,6 +1043,9 @@ public sealed partial class Navigation : IDisposable
 
     private bool TryComputeEscapeOutOfBlacklist(Vector3 startW, out Vector3 escapeW)
     {
+        logger.LogInformation(
+            $"[NAV-SANITY] TryComputeEscape called. pos={playerReader.WorldPos}");
+
         escapeW = startW;
 
         if (AreaBlacklist == null)

@@ -1,6 +1,6 @@
 using Core.Goals;
 using Core.GOAP;
-
+using Core.Session;
 using Game;
 
 using Microsoft.Extensions.DependencyInjection;
@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Reflection;
 using System.Threading;
 
 using WinAPI;
@@ -353,6 +354,34 @@ public sealed partial class BotController : IBotController, IDisposable
         s.AddScoped<ClassConfiguration>(GetConfig);
         static ClassConfiguration GetConfig(IServiceProvider sp) =>
             sp.GetRequiredService<IBotController>().ResolveLoadedProfile();
+
+        for (int i = 0; i < config.Paths.Length; i++)
+        {
+            int index = i;
+
+            s.AddKeyedScoped<PathSettings>(i,
+                (IServiceProvider sp, object? key) =>
+                GoalFactory.GetPathSettings(
+                    sp.GetRequiredService<ClassConfiguration>().Paths[(int)key!],
+                    sp.GetRequiredService<DataConfig>()));
+
+            // each GoapGoal gets an individual instance
+            s.AddTransient<Navigation>(x => new(
+                x.GetRequiredService<ILogger<Navigation>>(),
+                x.GetRequiredService<CancellationTokenSource<GoapAgent>>(),
+                x.GetRequiredService<PlayerDirection>(),
+                x.GetRequiredService<ConfigurableInput>(),
+                x.GetRequiredService<PlayerReader>(),
+                x.GetRequiredService<AddonBits>(),
+                x.GetRequiredService<StopMoving>(),
+                x.GetRequiredService<StuckDetector>(),
+                x.GetRequiredService<IPPather>(),
+                x.GetRequiredService<IMountHandler>(),
+                x.GetRequiredService<ClassConfiguration>(),
+                x.GetRequiredKeyedService<PathSettings>(index),
+                x.GetRequiredService<DataConfig>()
+                ));
+        }
 
         GoalFactory.Create(s, serviceProvider, config);
 

@@ -1,9 +1,10 @@
-﻿using System;
+﻿using Microsoft.Extensions.Logging;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 
-namespace Core.Goals;
+namespace Core.AreaBlacklist;
 
 /// <summary>
 /// Blacklist is enforced in WORLD XY.
@@ -90,8 +91,8 @@ public readonly record struct BlacklistRect(float MinX, float MinY, float MaxX, 
         float d3 = Cross(q1, q2, p1);
         float d4 = Cross(q1, q2, p2);
 
-        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
-            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)))
+        if ((d1 > 0 && d2 < 0 || d1 < 0 && d2 > 0) &&
+            (d3 > 0 && d4 < 0 || d3 < 0 && d4 > 0))
             return true;
 
         const float eps = 1e-6f;
@@ -118,9 +119,12 @@ public sealed class RectBlacklist : IAreaBlacklist
 
     public bool TryGetContainingRect(Vector3 worldPos, out BlacklistRect rect)
     {
+        //Console.WriteLine("TryGetContainingRect: printing rects");
+
         var p = new Vector2(worldPos.X, worldPos.Y);
         foreach (var r in rects)
         {
+            //Console.WriteLine("r: " + r);
             if (r.Contains(p))
             {
                 rect = r;

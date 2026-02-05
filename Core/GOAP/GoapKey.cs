@@ -40,6 +40,7 @@ public enum GoapKey
     partyincombat,
     drinking,
     eating,
+    inblacklistarea,
     LENGTH
 }
 
@@ -85,6 +86,7 @@ public static class GoapKey_Extension
         GoapKey.partyincombat => "party in combat",
         GoapKey.eating => "eating",
         GoapKey.drinking => "drinking",
+        GoapKey.inblacklistarea => "in blacklist area",
         _ => unknown
     };
 
@@ -126,6 +128,7 @@ public static class GoapKey_Extension
         GoapKey.partyincombat => "!party in combat",
         GoapKey.eating => "!eating",
         GoapKey.drinking => "!drinking",
+        GoapKey.inblacklistarea => "!in blacklist area",
         _ => unknown
     };
 

@@ -3,7 +3,7 @@ using System.Linq;
 using System.Numerics;
 using SharedLib;
 
-namespace Core.Goals;
+namespace Core.AreaBlacklist;
 
 public static class BlacklistConversion
 {

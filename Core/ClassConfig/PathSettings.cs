@@ -1,9 +1,9 @@
 ﻿using SharedLib;
 using SharedLib.Extensions;
-using Core.Goals;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Core.AreaBlacklist;
 
 namespace Core;
 

@@ -77,6 +77,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.targetisalive, true);
         AddPrecondition(GoapKey.targethostile, true);
         AddPrecondition(GoapKey.incombatrange, false);
+        AddPrecondition(GoapKey.inblacklistarea, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
 
         AddEffect(GoapKey.incombatrange, true);

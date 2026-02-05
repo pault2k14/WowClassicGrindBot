@@ -1,4 +1,5 @@
-﻿using Core.Goals;
+﻿using Core.AreaBlacklist;
+using Core.Goals;
 using Core.Session;
 
 using Game;
@@ -11,6 +12,7 @@ using SharedLib.Extensions;
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Drawing.Printing;
 using System.Linq;
 using System.Numerics;
 using System.Threading;
@@ -44,6 +46,7 @@ public sealed partial class GoapAgent : IDisposable
 
     private readonly IScreenCapture screenCapture;
     private readonly IBagChangeTracker bagChangeTracker;
+    private readonly Navigation navigation;
 
     private bool active;
     public bool Active
@@ -123,7 +126,8 @@ public sealed partial class GoapAgent : IDisposable
         IGrindSessionHandler sessionHandler,
         IEnumerable<GoapGoal> availableGoals,
         ChatReader chatReader,
-        RestHandler restHandler
+        RestHandler restHandler,
+        Navigation navigation
         )
     {
         this.routeInfo = routeInfo;
@@ -157,6 +161,7 @@ public sealed partial class GoapAgent : IDisposable
         this.AvailableGoals = availableGoals.OrderBy(a => a.Cost).ToArray();
         this.chatReader = chatReader;
         this.restHandler = restHandler;
+        this.navigation = navigation;
 
         combatLog.KillCredit += OnKillCredit;
         combatLog.PlayerDeath += PlayerDied;
@@ -351,7 +356,7 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.partymembercombat: " + PartyMemberInCombat());
         logger.LogInformation("GoapKey.partyleadercombat: " + PartyLeaderInCombat());
         logger.LogInformation("GoapKey.partyincombat: " + PartyInCombat());
-
+        logger.LogInformation("GoapKey.inblacklistarea]: " + navigation.IsInBlacklistArea());
     }
 
     private GoapGoal? NextGoal()
@@ -426,6 +431,7 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.partyincombat] = PartyInCombat();
         WorldState[GoapKey.drinking] = restHandler.IsDrinking();
         WorldState[GoapKey.eating] = restHandler.IsEating();
+        WorldState[GoapKey.inblacklistarea] = navigation.IsInBlacklistArea();
     }
 
     public bool PartyInCombat()

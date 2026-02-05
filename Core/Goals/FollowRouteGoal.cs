@@ -1,3 +1,4 @@
+using Core.AreaBlacklist;
 using Core.GOAP;
 
 using Game;
@@ -51,6 +52,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
     private volatile bool _disposing;
+    private bool suppressNavigation;
+
 
     private Vector3[] mapRoute
     {
@@ -240,6 +243,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
         logger.LogInformation($"Blacklist rect count (map): {pathSettings.MapBlacklistRects.Length}");
+
+        logger.LogInformation(
+            $"[FRG] navHash={navigation.GetHashCode()} " +
+            $"blacklistNull={navigation.AreaBlacklist is null} " +
+            $"blacklistHash={(navigation.AreaBlacklist?.GetHashCode().ToString() ?? "null")} " +
+            $"pos={playerReader.WorldPos} " +
+            $"inside={(navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true)}");
+
+
         logger.LogInformation($"Player inside blacklist: {navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true}");
 
         while (restHandler.IsResting() && !chatReader.AssistRequestReturn)
@@ -376,18 +388,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
 
-        if (!sideActivityCts.IsCancellationRequested)
-        {
-            navigation.Update(sideActivityCts.Token);
-        }
+        if (bits.Target())
+            suppressNavigation = true;
         else
+            suppressNavigation = false;
+
+        if (!suppressNavigation)
         {
-            if (!bits.Target())
-            {
-                LogWarning($"{nameof(sideActivityCts)} is cancelled but needs to be restarted!");
-                sideActivityCts = new();
-                sideActivityManualReset.Set();
-            }
+            logger.LogInformation($"[FRG] Calling navigation.Update navHash={navigation.GetHashCode()}");
+            navigation.Update(CancellationToken.None);
         }
 
         RandomJump();
