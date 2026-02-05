@@ -153,7 +153,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if (!input.Approach.OnCooldown() && (!bits.SoftInteract() || HasValidSoftInteract()))
         {
             
-            if (classConfig.Mode == Mode.AssistFocus)
+            if (classConfig.Mode == Mode.AssistFocus && !targetInBlacklist)
             {
                 // HasMoonIcon 5
                 // HasSquareIcon 6
