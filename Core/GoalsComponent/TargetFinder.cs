@@ -1,4 +1,5 @@
-﻿using SharedLib.NpcFinder;
+﻿using Microsoft.Extensions.Logging;
+using SharedLib.NpcFinder;
 
 using System;
 using System.Threading;
@@ -16,9 +17,13 @@ public sealed class TargetFinder : IDisposable
     private readonly Wait wait;
     private readonly ChatReader chatReader;
     private readonly Navigation navigation;
+    private readonly IBlacklist targetBlacklist;
+    private DateTime targetFinderDisabledUntilUtc;
 
     private DateTime lastActive;
-
+    private static int DISABLE_DUE_TO_BLACKLIST_SECONDS = 3;
+    private TimeSpan DisableDueToBlacklistTimeSpan = new TimeSpan(0, 0, 0, DISABLE_DUE_TO_BLACKLIST_SECONDS);
+    
     public void Dispose()
     {
         if (_disposed) return;
@@ -31,7 +36,8 @@ public sealed class TargetFinder : IDisposable
 
     public TargetFinder(ConfigurableInput input,
         AddonBits bits, NpcNameTargeting npcNameTargeting, 
-        Wait wait, ChatReader chatReader, Navigation navigation)
+        Wait wait, ChatReader chatReader, Navigation navigation,
+        IBlacklist targetBlacklist)
     {
         this.input = input;
         this.bits = bits;
@@ -39,9 +45,21 @@ public sealed class TargetFinder : IDisposable
         this.wait = wait;
         this.chatReader = chatReader;
         this.navigation = navigation;
+        this.targetBlacklist = targetBlacklist;
 
         lastActive = DateTime.UtcNow;
         this.chatReader = chatReader;
+    }
+
+    private bool IsTargetFinderDisabled()
+    => DateTime.UtcNow < targetFinderDisabledUntilUtc;
+
+    private void DisableTargetFinderForBlacklist()
+    {
+        Console.WriteLine("DisablingTargetFinderForBlacklist");
+        var until = DateTime.UtcNow.Add(DisableDueToBlacklistTimeSpan);
+        if (until > targetFinderDisabledUntilUtc)
+            targetFinderDisabledUntilUtc = until; // extend, don’t shorten
     }
 
     public void Reset()
@@ -56,8 +74,12 @@ public sealed class TargetFinder : IDisposable
         // If Assist has requested return we shouldn't be actively looking for
         // a target, but rather than kill the looking for target thread, we
         // simply return false.
-        if(chatReader.AssistRequestReturn || navigation.IsInBlacklistArea())
+        if(chatReader.AssistRequestReturn || navigation.IsInBlacklistArea() || IsTargetFinderDisabled())
         {
+            Console.WriteLine("TargetFinder.Search: chatReader.AssistRequestReturn " + chatReader.AssistRequestReturn);
+            Console.WriteLine("TargetFinder.Search: navigation.IsInBlacklistArea() " + navigation.IsInBlacklistArea());
+            Console.WriteLine("TargetFinder.Search: IsTargetFinderDisabled() " + IsTargetFinderDisabled());
+            Console.WriteLine("TargetFinder: Aborting search for target");
             return false;
         }
         else
@@ -87,6 +109,13 @@ public sealed class TargetFinder : IDisposable
 
             if (token.IsCancellationRequested)
                 return false;
+
+            if (targetBlacklist.Is())
+            {
+                Console.WriteLine("TargetFinder: Target was Blacklisted");
+                DisableTargetFinderForBlacklist();
+                return false;
+            }
 
             if (npcNameTargeting.FoundAny() &&
                 !input.IsKeyDown(input.TurnLeftKey) &&

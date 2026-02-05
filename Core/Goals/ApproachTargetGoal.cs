@@ -31,6 +31,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly CombatLog combatLog;
     private readonly ClassConfiguration classConfig;
     private readonly ChatReader chatReader;
+    private readonly Navigation navigation;
     
     private long approachStart;
 
@@ -49,7 +50,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         IMountHandler mountHandler,
         CombatLog combatLog,
         ClassConfiguration classConfig,
-        ChatReader chatReader)
+        ChatReader chatReader,
+        Navigation navigation)
         : base(nameof(ApproachTargetGoal))
     {
         this.logger = logger;
@@ -66,6 +68,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.combatLog = combatLog;
         this.classConfig = classConfig;
         this.chatReader = chatReader;
+        this.navigation = navigation;
 
         if(classConfig.Mode == Mode.PartyLeader)
         {
@@ -112,10 +115,19 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
+        bool targetInBlacklist = targetBlacklist.Is();
+
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
             return;
+        }
+
+        if(!bits.Combat() && bits.Target() && bits.Target_Hostile() && !targetInBlacklist
+            && navigation.IsInBlacklistArea())
+        {
+            logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
+            playerReader.IgnoreTarget(playerReader.TargetGuid);
         }
 
         if(!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
@@ -202,13 +214,19 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             }
             else
             {
+                if (!bits.Combat() && targetInBlacklist)
+                {
+                    logger.LogWarning($"Losing the target due blacklist!");
+                    return;
+                }
+                
                 input.PressApproach();
                 wait.Update();
             }
 
         }
 
-        if (!bits.Combat())
+        if (!bits.Combat() && !targetInBlacklist)
         {
             NonCombatApproach();
             RandomJump();

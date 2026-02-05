@@ -81,6 +81,21 @@ public sealed partial class Blacklist<T> : IBlacklist where T : IBlacklistSource
             return true;
         }
 
+        if (playerReader.IsIgnored(source.UnitGuid))
+        {
+            if(lastGuid != source.UnitGuid)
+            {
+                LogAreaBlacklistMob(logger, typeof(T),
+                    source.UnitId,
+                    source.UnitGuid, source.UnitName,
+                    playerReader.TargetClassification.ToStringF());
+
+                lastGuid = source.UnitGuid;
+            }
+            
+            return true;
+        }
+
         if (combatLog.EvadeMobs.Contains(source.UnitGuid))
         {
             if (lastGuid != source.UnitGuid)
@@ -255,5 +270,11 @@ public sealed partial class Blacklist<T> : IBlacklist where T : IBlacklistSource
         Message = "{type} ({id},{guid},{name}) Pet Target!")]
     static partial void LogPetTarget(ILogger logger, Type type, int id, int guid, string name);
 
+    [LoggerMessage(
+       EventId = 0069,
+       Level = LogLevel.Warning,
+       Message = "{type} ({id},{guid},{name},{classification}) AreaBlacklistMob on attack!")]
+    static partial void LogAreaBlacklistMob(ILogger logger, Type type, int id, int guid, string name, string classification);
+    
     #endregion
 }

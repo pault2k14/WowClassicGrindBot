@@ -3,6 +3,7 @@
 using SharedLib;
 
 using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Numerics;
 
@@ -14,6 +15,7 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     private readonly WorldMapAreaDB worldMapAreaDB;
     private readonly AreaDB areaDb;
     private readonly AddonBits bits;
+
 
     public PlayerReader(
         IAddonDataProvider reader,
@@ -61,7 +63,7 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
             return PointEstimator.GetMapPos(WorldMapArea, WorldPos, Direction, targetDistance);
         }
     }
-
+    
     public float Direction => reader.GetFixed(3);
 
     public float _Direction() => Direction;
@@ -132,6 +134,28 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public UnitRace Race => (UnitRace)(reader.GetInt(46) / 10000);
     public UnitClass Class => (UnitClass)(reader.GetInt(46) / 100 % 100);
     public ClientVersion Version => (ClientVersion)(reader.GetInt(46) % 10);
+
+    public Dictionary<int, DateTime> BlacklistAreaMobs { get; } = new();
+
+    public static int BLACKLIST_IGNORE_SECONDS = 30;
+
+    public TimeSpan BlacklistIgnoreTimespan = new TimeSpan(0, 0, BLACKLIST_IGNORE_SECONDS);
+
+    public void IgnoreTarget(int id)
+    => BlacklistAreaMobs[id] = DateTime.UtcNow + BlacklistIgnoreTimespan;
+
+    public bool IsIgnored(int id)
+    {
+        if (BlacklistAreaMobs.TryGetValue(id, out var until))
+        {
+            if (DateTime.UtcNow < until)
+                return true;
+
+            // expired -> remove
+            BlacklistAreaMobs.Remove(id);
+        }
+        return false;
+    }
 
     public PlayerFaction Faction => Race switch {
         UnitRace.Human => PlayerFaction.Alliance,
