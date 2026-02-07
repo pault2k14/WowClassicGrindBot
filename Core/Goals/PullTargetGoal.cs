@@ -32,6 +32,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     private readonly CombatTracker combatTracker;
     private readonly IBlacklist targetBlacklist;
     private readonly ChatReader chatReader;
+    private readonly Navigation navigation;
 
     private readonly KeyAction? approachKey;
     private readonly Action approachAction;
@@ -49,7 +50,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         StopMoving stopMoving, CastingHandler castingHandler,
         IMountHandler mountHandler, NpcNameTargeting npcNameTargeting,
         StuckDetector stuckDetector, CombatTracker combatTracker,
-        ClassConfiguration classConfig, ChatReader chatReader)
+        ClassConfiguration classConfig, ChatReader chatReader,
+        Navigation navigation)
         : base(nameof(PullTargetGoal))
     {
         this.logger = logger;
@@ -67,6 +69,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         this.targetBlacklist = targetBlacklist;
         this.classConfig = classConfig;
         this.chatReader = chatReader;
+        this.navigation = navigation;
 
         Keys = classConfig.Pull.Sequence;
 
@@ -159,7 +162,21 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if(!bits.Combat() && !chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
+        if (bits.Target() && !bits.Combat() 
+            && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
+        {
+            Log("PullTargetGoal: Mob in blacklist area trying not to pull");
+            playerReader.IgnoreTarget(playerReader.TargetGuid);
+            input.PressStopAttack();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.StopForward();
+            wait.Update(playerReader.DoubleNetworkLatency);
+            wait.Update();
+            return;
+        }
+
+        if (!bits.Combat() && !chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
         {
             logger.LogInformation("PullTargetGoal: Not pulling due to assist not following");
             return;
@@ -210,9 +227,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
                 }
                 continue;
             }
-
-
-
 
             if (keyAction.Name.Equals(input.Approach.Name,
                 StringComparison.OrdinalIgnoreCase))

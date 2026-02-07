@@ -120,6 +120,8 @@ public sealed partial class Navigation : IDisposable
     private float escapeBestDist = float.MaxValue;
     private DateTime escapeNoProgressSinceUtc;
 
+   private enum RectSide { Left, Right, Bottom, Top }
+
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
         PlayerDirection playerDirection,
@@ -1238,31 +1240,148 @@ public sealed partial class Navigation : IDisposable
         out Vector3 best)
     {
         best = default;
-        bool found = false;
-        float bestScore = float.MaxValue;
 
         var inflated = rect.Inflate(margin * 0.5f);
 
-        foreach (var c in BuildDetourCandidates(inflated, margin, z))
+        // -------- 1) NEAREST-EDGE CANDIDATES (shortest-first) --------
+        var sides = GetSidesByDistance(fromW, rect);
+        int sidesToTry = Math.Min(2, sides.Length); // try closest 2 sides (good near corners)
+
+        var near = new List<Vector3>(32);
+        for (int i = 0; i < sidesToTry; i++)
+        {
+            near.AddRange(BuildEdgeEscapeCandidates(fromW, inflated, sides[i], margin, z));
+        }
+
+        DedupByXY(near, 0.05f);
+
+        near.Sort((a, b) => fromW.WorldDistanceXYTo(a).CompareTo(fromW.WorldDistanceXYTo(b)));
+
+        foreach (var c in near)
         {
             if (IsBlacklistedPoint(c)) continue;
-
-            // leaving the containing rect is allowed; still blocks other rects
             if (SegmentBlockedEscapeAware(fromW, c)) continue;
 
-            // score: get out quickly, and head generally toward goal
-            float score = fromW.WorldDistanceXYTo(c) + 0.5f * c.WorldDistanceXYTo(goalW);
+            best = c;
+            return true; // first viable (shortest) wins
+        }
 
-            if (score < bestScore)
+        // -------- 2) FALLBACK: BROADER CANDIDATES AROUND RECT (shortest-first) --------
+        var broad = new List<Vector3>(64);
+        foreach (var c in BuildDetourCandidates(inflated, margin, z))
+            broad.Add(c);
+
+        DedupByXY(broad, 0.05f);
+
+        //broad.Sort((a, b) => fromW.WorldDistanceXYTo(a).CompareTo(fromW.WorldDistanceXYTo(b)));
+        // Sort to prefer exits that point towards the route
+        broad.Sort((a, b) =>
+        {
+            float sa = fromW.WorldDistanceXYTo(a) + 0.15f * a.WorldDistanceXYTo(goalW);
+            float sb = fromW.WorldDistanceXYTo(b) + 0.15f * b.WorldDistanceXYTo(goalW);
+            return sa.CompareTo(sb);
+        });
+
+        foreach (var c in broad)
+        {
+            if (IsBlacklistedPoint(c)) continue;
+            if (SegmentBlockedEscapeAware(fromW, c)) continue;
+
+            best = c;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static RectSide[] GetSidesByDistance(Vector3 p, BlacklistRect r)
+    {
+        float dL = MathF.Abs(p.X - r.MinX);
+        float dR = MathF.Abs(r.MaxX - p.X);
+        float dB = MathF.Abs(p.Y - r.MinY);
+        float dT = MathF.Abs(r.MaxY - p.Y);
+
+        var sides = new (RectSide side, float d)[]
+        {
+        (RectSide.Left, dL),
+        (RectSide.Right, dR),
+        (RectSide.Bottom, dB),
+        (RectSide.Top, dT),
+        };
+
+        Array.Sort(sides, (a, b) => a.d.CompareTo(b.d));
+
+        return new[] { sides[0].side, sides[1].side, sides[2].side, sides[3].side };
+    }
+
+    private static IEnumerable<Vector3> BuildEdgeEscapeCandidates(
+        Vector3 fromW,
+        BlacklistRect r,
+        RectSide side,
+        float margin,
+        float z)
+    {
+        // Sample a few points along the nearest edge around the current coordinate.
+        // These are "short" exits that don't require crossing the rect.
+        const float band = 3.0f; // tune: 2–5
+        float[] offsets = { 0f, band, -band, 2 * band, -2 * band };
+
+        float x = fromW.X;
+        float y = fromW.Y;
+
+        foreach (var off in offsets)
+        {
+            switch (side)
             {
-                bestScore = score;
-                best = c;
-                found = true;
+                case RectSide.Left:
+                    yield return new Vector3(r.MinX - margin, Clamp(y + off, r.MinY, r.MaxY), z);
+                    break;
+
+                case RectSide.Right:
+                    yield return new Vector3(r.MaxX + margin, Clamp(y + off, r.MinY, r.MaxY), z);
+                    break;
+
+                case RectSide.Bottom:
+                    yield return new Vector3(Clamp(x + off, r.MinX, r.MaxX), r.MinY - margin, z);
+                    break;
+
+                default: // Top
+                    yield return new Vector3(Clamp(x + off, r.MinX, r.MaxX), r.MaxY + margin, z);
+                    break;
             }
         }
 
-        return found;
+        // Add corners on that side as last-resort near-edge options
+        yield return side switch
+        {
+            RectSide.Left => new Vector3(r.MinX - margin, r.MinY, z),
+            RectSide.Right => new Vector3(r.MaxX + margin, r.MinY, z),
+            RectSide.Bottom => new Vector3(r.MinX, r.MinY - margin, z),
+            _ => new Vector3(r.MinX, r.MaxY + margin, z),
+        };
+
+        yield return side switch
+        {
+            RectSide.Left => new Vector3(r.MinX - margin, r.MaxY, z),
+            RectSide.Right => new Vector3(r.MaxX + margin, r.MaxY, z),
+            RectSide.Bottom => new Vector3(r.MaxX, r.MinY - margin, z),
+            _ => new Vector3(r.MaxX, r.MaxY + margin, z),
+        };
     }
+
+    private static void DedupByXY(List<Vector3> pts, float eps)
+    {
+        for (int i = 0; i < pts.Count; i++)
+        {
+            for (int j = pts.Count - 1; j > i; j--)
+            {
+                if (pts[i].WorldDistanceXYTo(pts[j]) < eps)
+                    pts.RemoveAt(j);
+            }
+        }
+    }
+
+
 
     private static Vector3 EscapePointFromRect(Vector3 posW, BlacklistRect rect, float margin, float z)
     {

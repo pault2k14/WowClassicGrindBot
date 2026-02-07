@@ -416,7 +416,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 // targetFinder.Search(NpcNameToFind, bits.Target_NotDead, token))
                 targetFinder.Search(NpcNameToFind, bits.Target_NotDead, sideActivityCts.Token))
             {
-                if (bits.Target() && targetBlacklist.Is())
+                if(bits.Target() && bits.TargetTarget_PlayerOrPet() 
+                    && playerReader.IsIgnored(playerReader.TargetGuid) 
+                    && (bits.Combat() || bits.Focus_Combat()) )
+                {
+                    Log("Found target area blacklisted target, but they are targeting us and we are in combat!");
+                    sideActivityCts.Cancel();
+                    sideActivityManualReset.Reset();
+                }
+                else if (bits.Target() && targetBlacklist.Is())
                 {
                     Log("Blacklisted target found, clearing target");
                     input.PressClearTarget();
@@ -425,7 +433,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 else
                 {
                     Log("Found target!");
-                    //cts.Cancel();
                     sideActivityCts.Cancel();
                     sideActivityManualReset.Reset();
                 } 

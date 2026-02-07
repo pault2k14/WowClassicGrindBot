@@ -109,4 +109,10 @@ public sealed class AddonBits : IReader, IGameMenuWindowShown
     public bool ChatInputIsVisible() => v3[Mask._9];
 
     public bool SoftInteract_Enabled() => v3[Mask._10];
+
+    public bool Focus_Connected() => v3[Mask._11];
+    public bool Party1_Connected() => v3[Mask._12];
+    public bool Party2_Connected() => v3[Mask._13];
+    public bool Party3_Connected() => v3[Mask._14];
+    public bool Party4_Connected() => v3[Mask._15];
 }

@@ -357,6 +357,11 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.partyleadercombat: " + PartyLeaderInCombat());
         logger.LogInformation("GoapKey.partyincombat: " + PartyInCombat());
         logger.LogInformation("GoapKey.inblacklistarea]: " + navigation.IsInBlacklistArea());
+        logger.LogInformation("GoapKey.focusconnected]: " + bits.Focus_Connected());
+        logger.LogInformation("GoapKey.party1connected]: " + bits.Party1_Connected());
+        logger.LogInformation("GoapKey.party2connected]: " + bits.Party2_Connected());
+        logger.LogInformation("GoapKey.party3connected]: " + bits.Party3_Connected());
+        logger.LogInformation("GoapKey.party4connected]: " + bits.Party4_Connected());
     }
 
     private GoapGoal? NextGoal()
@@ -432,6 +437,11 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.drinking] = restHandler.IsDrinking();
         WorldState[GoapKey.eating] = restHandler.IsEating();
         WorldState[GoapKey.inblacklistarea] = navigation.IsInBlacklistArea();
+        WorldState[GoapKey.focusconnected] = bits.Focus_Connected();
+        WorldState[GoapKey.party1connected] = bits.Party1_Connected();
+        WorldState[GoapKey.party2connected] = bits.Party2_Connected();
+        WorldState[GoapKey.party3connected] = bits.Party3_Connected();
+        WorldState[GoapKey.party4connected] = bits.Party4_Connected();
     }
 
     public bool PartyInCombat()
@@ -447,8 +457,8 @@ public sealed partial class GoapAgent : IDisposable
         bool hasTarget = b.Target();
         bool playerCombat = b.Combat();
 
-        return ((playerCombat || bits.FocusTarget_Combat()) && dmgTaken)
-                || ((playerCombat || bits.FocusTarget_Combat()) && hasTarget && (hasTarget && !b.Target_Dead())
+        return ((playerCombat || bits.Focus_Combat()) && dmgTaken)
+                || ((playerCombat || bits.Focus_Combat()) && hasTarget && (hasTarget && !b.Target_Dead())
                      && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
                      && playerReader.WithInCombatRange());
     }
@@ -472,7 +482,7 @@ public sealed partial class GoapAgent : IDisposable
                  )
                  // Added to check if just anyone in the party is in combat.
                  // Attempt to fix movement to Consume Corpse/Loot/SKin while in combat.
-                 || (playerCombat || bits.FocusTarget_Combat() && dmgTaken)
+                 || (playerCombat || bits.Focus_Combat() && dmgTaken)
                 );
     }
 

@@ -76,10 +76,6 @@ public sealed class TargetFinder : IDisposable
         // simply return false.
         if(chatReader.AssistRequestReturn || navigation.IsInBlacklistArea() || IsTargetFinderDisabled())
         {
-            Console.WriteLine("TargetFinder.Search: chatReader.AssistRequestReturn " + chatReader.AssistRequestReturn);
-            Console.WriteLine("TargetFinder.Search: navigation.IsInBlacklistArea() " + navigation.IsInBlacklistArea());
-            Console.WriteLine("TargetFinder.Search: IsTargetFinderDisabled() " + IsTargetFinderDisabled());
-            Console.WriteLine("TargetFinder: Aborting search for target");
             return false;
         }
         else

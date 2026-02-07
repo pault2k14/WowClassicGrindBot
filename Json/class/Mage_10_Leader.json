@@ -1,0 +1,212 @@
+{
+  "ClassName": "Mage",
+  "Mode": "PartyLeader",
+  "Loot": true,
+  "Skin": true,
+  "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/1-20/Troll.Orc/08-09_Durotar_Razormane Q-Encroachment (cl 11-12) v2.json",
+  "PathThereAndBack": false,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
+  "Blacklist": [
+    "Captain Flat Tusk"
+  ],
+  "RaidIconsToSkipInCombat": [
+    5,
+    6,
+    7
+  ],
+  "IntVariables": {
+    //"Item_Conjure_Drink": 5350, // Conjured Water - No Level Requirement
+    "Item_Conjure_Drink": 2288, // Conjured Fresh Water - Requires Level 5
+    "Item_Conjure_Food": 5349, // Conjured Muffin - No Level Requiremenbt
+    //"Item_Conjure_Food": 1113, // Conjured Bread - Requires Level 5
+    "MIN_FOOD%": 40,
+    "MIN_WATER%": 40,
+    "MIN_MANA_SPELL%": 15
+  },
+  "PartyMember1": {
+    "Sequence": [
+      {
+        "Name": "Arcane Intellect",
+        "Key": "8",
+        "Requirements": [
+          "!P1_Arcane Intellect",
+          "!InCombat"
+        ],
+        "Log": false
+      }
+    ]
+  },
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Fireball",
+        "Key": "2",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "AfterCastWaitCastbar": true,
+        "Requirements": [
+          "Mana% > MIN_MANA_SPELL%",
+          "MaxRange < 30"
+        ]
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirements": [
+          "Health% < 20"
+        ]
+      },
+      {
+        "Name": "Fire Blast",
+        "Key": "3",
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "TargetAlive && TargetHealth% < 25",
+          "MaxRange < 20",
+          "MinRange > 6"
+        ]
+      },
+      {
+        "Name": "Close Fire Blast",
+        "Key": "3",
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "TargetAlive && TargetHealth% < 25",
+          "MaxRange < 6"
+        ]
+      },
+      {
+        "Name": "Fireball",
+        "Key": "2",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "AfterCastWaitCastbar": true,
+        "BeforeCastDelay": 500,
+        "BeforeCastFaceTarget": false,
+        "Requirements": [
+          "Mana% > MIN_MANA_SPELL%",
+          "TargetHealth% > 15",
+          "MaxRange < 30",
+          "MinRange > 6"
+        ],
+        "Interrupt": "CanRun:Fire Blast",
+        "CancelOnInterrupt": true
+      },
+      {
+        "Name": "Close Fireball",
+        "Key": "2",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "AfterCastWaitCastbar": true,
+        "BeforeCastDelay": 500,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "Mana% > MIN_MANA_SPELL%",
+          "TargetHealth% > 15",
+          "MaxRange < 6",
+          "TargetTargetsPlayerOrPet"
+        ],
+        "Interrupt": "CanRun:Fire Blast",
+        "CancelOnInterrupt": true
+      },
+      {
+        "Name": "Shoot",
+        "Key": "4",
+        "Item": true,
+        "Requirements": [
+          //"HasRangedWeapon",
+          "!Shooting",
+          "TargetAlive && TargetHealth% < 15 || Mana% < MIN_MANA_SPELL%",
+          "MaxRange < 30",
+          "MinRange > 6"
+        ]
+
+      },
+        {
+          "Name": "Close Shoot",
+          "Key": "4",
+          "Item": true,
+          "BeforeCastFaceTarget": true,
+          "Requirements": [
+            //"HasRangedWeapon",
+            "!Shooting",
+            "TargetAlive && TargetHealth% < 15 || Mana% < MIN_MANA_SPELL%",
+            "MaxRange < 6"
+          ]
+        }
+    ]
+  },
+  "Parallel": {
+    "Sequence": [
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health% < MIN_FOOD%"
+      },
+      {
+        "Name": "Drink",
+        "Key": "F11",
+        "Requirement": "Mana% < MIN_WATER%"
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirements": [
+          "Health% < 20",
+          "InCombat"
+        ]
+      },
+      {
+        "Name": "Frost Armor",
+        "Key": "7",
+        "Requirement": "!Frost Armor"
+      },
+      {
+        "Name": "Arcane Intellect",
+        "Key": "8",
+        "Requirement": "!Arcane Intellect",
+        "Log": false
+      },
+      {
+        "Name": "Conjure Drink",
+        "Key": "9",
+        "HasCastBar": true,
+        "Requirements": [
+          "!BagItem:Item_Conjure_Drink:4",
+          "Mana% > 50",
+          "!Drink",
+          "!Food"
+        ],
+        "AfterCastWaitCastbar": true,
+        "AfterCastWaitBag": true
+      },
+      {
+        "Name": "Conjure Food",
+        "Key": "0",
+        "HasCastBar": true,
+        "Requirements": [
+          "!BagItem:Item_Conjure_Food:4",
+          "Mana% > 50",
+          "!Drink",
+          "!Food"
+        ],
+        "AfterCastWaitCastbar": true,
+        "AfterCastWaitBag": true
+      }
+    ]
+  }
+}

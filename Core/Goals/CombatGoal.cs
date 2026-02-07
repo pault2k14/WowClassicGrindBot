@@ -212,11 +212,23 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
 
             // TODO Do we need Pet check to be put here? 
-            if (classConfig.Mode == Mode.AssistFocus && ((bits.Focus_Combat()
-                && bits.FocusTarget_Combat() && playerReader.TargetGuid != playerReader.FocusTargetGuid)
-                || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged())))
+            if ((classConfig.Mode == Mode.AssistFocus 
+                && ((bits.Focus_Combat() && bits.FocusTarget_Combat() 
+                     && playerReader.TargetGuid != playerReader.FocusTargetGuid)
+                     || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged())))
+                || (classConfig.Mode == Mode.PartyLeader) 
+                     && !bits.Target() && bits.Focus_Combat() && bits.FocusTarget_Combat()
+                   )
             {
-                logger.LogInformation("targetGuid not equal to FocusTargetGuid");
+                if (classConfig.Mode == Mode.AssistFocus)
+                {
+                    logger.LogInformation("targetGuid not equal to FocusTargetGuid");
+                }
+                else if(classConfig.Mode == Mode.PartyLeader)
+                {
+                    logger.LogInformation("no target, but focus has target in combat, changing to that target");
+                }
+
                 wait.Update();
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
@@ -495,7 +507,17 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 logger.LogWarning("Found new target!");
                 wait.Update();
                 return;
+            } else if(bits.Focus_Combat() && bits.FocusTarget_Combat())
+            {
+                logger.LogWarning("Found new target of focus!");
+                ResetCooldowns();
+                wait.Update();
+                input.PressTargetFocus();
+                input.PressTargetOfTarget();
+                wait.Update();
+                return;
             }
+
 
             logger.LogWarning("Dont pull non-hostile target!");
             input.PressClearTarget();

@@ -41,6 +41,11 @@ public enum GoapKey
     drinking,
     eating,
     inblacklistarea,
+    focusconnected,
+    party1connected,
+    party2connected,
+    party3connected,
+    party4connected,
     LENGTH
 }
 
@@ -87,6 +92,11 @@ public static class GoapKey_Extension
         GoapKey.eating => "eating",
         GoapKey.drinking => "drinking",
         GoapKey.inblacklistarea => "in blacklist area",
+        GoapKey.focusconnected => "focus connected",
+        GoapKey.party1connected => "party member 1 connected",
+        GoapKey.party2connected => "party member 2 connected",
+        GoapKey.party3connected => "party member 3 connected",
+        GoapKey.party4connected => "party member 4 connected",
         _ => unknown
     };
 
@@ -129,6 +139,11 @@ public static class GoapKey_Extension
         GoapKey.eating => "!eating",
         GoapKey.drinking => "!drinking",
         GoapKey.inblacklistarea => "!in blacklist area",
+        GoapKey.focusconnected => "!focus connected",
+        GoapKey.party1connected => "!party member 1 connected",
+        GoapKey.party2connected => "!party member 2 connected",
+        GoapKey.party3connected => "!party member 3 connected",
+        GoapKey.party4connected => "!party member 4 connected",
         _ => unknown
     };
 

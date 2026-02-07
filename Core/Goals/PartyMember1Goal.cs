@@ -49,6 +49,7 @@ public sealed class PartyMember1Goal : GoapGoal
         this.restHandler = restHandler;
         this.chatReader = chatReader;
 
+        AddPrecondition(GoapKey.party1connected, true);
         AddPrecondition(GoapKey.assistisfollowing, false);
     }
 

@@ -51,6 +51,8 @@ public sealed class AssistFocusGoal : GoapGoal
 
         AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hasfocus, true);
+        AddPrecondition(GoapKey.focusconnected, true);
+
     }
 
     public override float Cost => 3.9f;

@@ -123,11 +123,23 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if(!bits.Combat() && bits.Target() && bits.Target_Hostile() && !targetInBlacklist
-            && navigation.IsInBlacklistArea())
+        if(!bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
         {
+
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
-            playerReader.IgnoreTarget(playerReader.TargetGuid);
+
+            if (navigation.IsInBlacklistArea())
+            {
+                playerReader.IgnoreTarget(playerReader.TargetGuid);
+            }
+
+            input.PressStopAttack();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.StopForward();
+            wait.Update(playerReader.DoubleNetworkLatency);
+            wait.Update();
+            return;
         }
 
         if(!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
@@ -214,9 +226,20 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             }
             else
             {
-                if (!bits.Combat() && targetInBlacklist)
+                if (!bits.Combat() && (targetInBlacklist || navigation.IsInBlacklistArea()))
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
+                    if (navigation.IsInBlacklistArea())
+                    {
+                        playerReader.IgnoreTarget(playerReader.TargetGuid);
+                    }
+
+                    input.PressStopAttack();
+                    input.PressClearTarget();
+                    wait.Update();
+                    stopMoving.StopForward();
+                    wait.Update(playerReader.DoubleNetworkLatency);
+                    wait.Update();
                     return;
                 }
                 
@@ -304,9 +327,21 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
             if (bits.Target() && playerReader.TargetGuid != initialTargetGuid)
             {
-                if (targetBlacklist.Is())
+                if (targetBlacklist.Is() || navigation.IsInBlacklistArea())
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
+
+                    if (navigation.IsInBlacklistArea())
+                    {
+                        playerReader.IgnoreTarget(playerReader.TargetGuid);
+                    }
+
+                    input.PressStopAttack();
+                    input.PressClearTarget();
+                    wait.Update();
+                    stopMoving.StopForward();
+                    wait.Update(playerReader.DoubleNetworkLatency);
+                    wait.Update();
                     return;
                 }
 
