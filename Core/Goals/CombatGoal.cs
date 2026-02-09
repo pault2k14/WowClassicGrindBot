@@ -240,6 +240,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
                 wait.Update();
+                input.PressVeryFastInteract();
+                wait.Update();
                 return;
             }
 
@@ -483,6 +485,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetFocus();
             input.PressTargetOfTarget();
             wait.Update();
+            input.PressVeryFastInteract();
+            wait.Update();
 
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
             {
@@ -515,6 +519,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
                 logger.LogWarning("Found new target!");
                 wait.Update();
+                input.PressVeryFastInteract();
+                wait.Update();
                 return;
             } else if(bits.Focus_Combat() && bits.FocusTarget_Combat())
             {
@@ -523,6 +529,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
+                wait.Update();
+                input.PressVeryFastInteract();
                 wait.Update();
                 return;
             }
