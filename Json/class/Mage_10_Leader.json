@@ -113,8 +113,7 @@
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
           "TargetHealth% > 15",
-          "MaxRange < 6",
-          "TargetTargetsPlayerOrPet"
+          "MaxRange < 6"
         ],
         "Interrupt": "CanRun:Fire Blast",
         "CancelOnInterrupt": true

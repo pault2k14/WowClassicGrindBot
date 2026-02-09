@@ -4,15 +4,12 @@
   "Loot": true,
   "Skin": true,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big.json",
-  "PathThereAndBack": false,
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
+  "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    "Kolkar Wrangler",
-    "Kolkar Stormer",
-    "Kolkar Invader",
-    "Kolkar Stormseer"
+    
   ],
   "RaidIconsToSkipInCombat": [
     5,
@@ -20,9 +17,9 @@
     7
   ],
   "IntVariables": {
-    //"Item_Conjure_Drink": 5350,
+    //"Item_Conjure_Drink": 5350, // Conjured Water - No Level Requirement
     "Item_Conjure_Drink": 2288, // Conjured Fresh Water - Requires Level 5
-    //"Item_Conjure_Food": 5349,
+    //"Item_Conjure_Food": 5349, // Conjured Muffin - No Level Requiremenbt
     "Item_Conjure_Food": 1113, // Conjured Bread - Requires Level 5
     "MIN_FOOD%": 40,
     "MIN_WATER%": 40,
@@ -73,7 +70,19 @@
         "BeforeCastDelay": 500,
         "Requirements": [
           "TargetAlive && TargetHealth% < 25",
-          "MaxRange < 20"
+          "MaxRange < 20",
+          "MinRange > 6"
+        ]
+      },
+      {
+        "Name": "Close Fire Blast",
+        "Key": "3",
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "TargetAlive && TargetHealth% < 25",
+          "MaxRange < 6"
         ]
       },
       {
@@ -94,7 +103,7 @@
         "CancelOnInterrupt": true
       },
       {
-        "Name": "Fireball",
+        "Name": "Close Fireball",
         "Key": "2",
         "HasCastBar": true,
         "BeforeCastStop": true,
@@ -117,7 +126,21 @@
           //"HasRangedWeapon",
           "!Shooting",
           "TargetAlive && TargetHealth% < 15 || Mana% < MIN_MANA_SPELL%",
-          "MaxRange < 30"
+          "MaxRange < 30",
+          "MinRange > 6"
+        ]
+
+      },
+      {
+        "Name": "Close Shoot",
+        "Key": "4",
+        "Item": true,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          //"HasRangedWeapon",
+          "!Shooting",
+          "TargetAlive && TargetHealth% < 15 || Mana% < MIN_MANA_SPELL%",
+          "MaxRange < 6"
         ]
       }
     ]
