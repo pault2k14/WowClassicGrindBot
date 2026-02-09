@@ -223,6 +223,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 if (classConfig.Mode == Mode.AssistFocus)
                 {
                     logger.LogInformation("targetGuid not equal to FocusTargetGuid");
+                    logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
+                    logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
+                    logger.LogInformation("playerReader.TargetGuid: " + playerReader.TargetGuid);
+                    logger.LogInformation("playerReader.FocusTargetGuid: " + playerReader.FocusTargetGuid);
+                    logger.LogInformation("!bits.Target_Alive(): " + !bits.Target_Alive());
+                    logger.LogInformation("!bits.Target_Combat(): " + !bits.Target_Combat());
+                    logger.LogInformation("bits.Target_Tagged(): " + bits.Target_Tagged());
                 }
                 else if(classConfig.Mode == Mode.PartyLeader)
                 {
@@ -465,7 +472,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        if ((classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader) && bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
+        if ((classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader) 
+            && bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
         {
             logger.LogWarning($"Found new combat target of focus.");
             ResetCooldowns();
