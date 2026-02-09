@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Core.Goals;
+using Microsoft.Extensions.Logging;
 
 using SharedLib.Extensions;
 
@@ -43,7 +44,7 @@ public sealed partial class Blacklist<T> : IBlacklist where T : IBlacklistSource
 
         this.checkGivesExp = classConfig.CheckTargetGivesExp;
         this.targetMask = classConfig.TargetMask;
-
+        
         if (classConfig.Blacklist.Length > 0)
         {
             logger.LogInformation($"Name: {string.Join(", ", classConfig.Blacklist)}");

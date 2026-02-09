@@ -1,5 +1,5 @@
 ﻿using Core.Database;
-
+using Core.Goals;
 using SharedLib;
 
 using System;
@@ -15,7 +15,6 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     private readonly WorldMapAreaDB worldMapAreaDB;
     private readonly AreaDB areaDb;
     private readonly AddonBits bits;
-
 
     public PlayerReader(
         IAddonDataProvider reader,

@@ -115,6 +115,19 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
+        if (navigation.IsInBlacklistArea())
+        {
+            logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
+            playerReader.IgnoreTarget(playerReader.TargetGuid);
+            input.PressStopAttack();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.StopForward();
+            wait.Update(playerReader.DoubleNetworkLatency);
+            wait.Update();
+            return;
+        }
+
         bool targetInBlacklist = targetBlacklist.Is();
 
         if (chatReader.ForcedFollow)

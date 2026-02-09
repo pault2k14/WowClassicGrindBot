@@ -240,6 +240,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
                 wait.Update();
+                return;
             }
 
             // Sometimes a mob will attack our assist while the party leader

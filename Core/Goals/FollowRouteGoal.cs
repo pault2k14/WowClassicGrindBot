@@ -505,9 +505,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             LogDebug("Navigation_OnDestinationReached");
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
-            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
-            logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
-            GoToOneWaypoint(assistWaypoint);
+            //Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+            //logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
+            //GoToOneWaypoint(assistWaypoint);
+            
+            // Just wait for assist to say i'm following or
+            // for another request to return.
+            return;
         } else
         {
             RefillWaypoints(false);
