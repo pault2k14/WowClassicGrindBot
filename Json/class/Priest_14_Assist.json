@@ -1,7 +1,7 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": true,
+  "Loot": false,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
@@ -280,7 +280,7 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
-        "Requirement": "20 > Health%"
+        "Requirement": "Health% < 20"
       },
       {
         "Name": "Heal",
@@ -417,7 +417,7 @@
         "Name": "HP Potion",
         "Key": "F10",
         "Requirements": [
-          "20 > Health%",
+          "Health% < 20",
           "InCombat"
         ]
       },
@@ -462,7 +462,7 @@
         "Key": "F10",
         "UseWithForcedFollow": true,
         "Requirements": [
-          "20 > Health%",
+          "Health% < 20",
           "InCombat"
         ]
       },
