@@ -119,9 +119,10 @@ public sealed partial class Navigation : IDisposable
     private Vector3 escapeTargetW;
     private float escapeBestDist = float.MaxValue;
     private DateTime escapeNoProgressSinceUtc;
+    private DateTime noProgressRefillCooldownUntilUtc = DateTime.MinValue;
 
-   private enum RectSide { Left, Right, Bottom, Top }
-
+    private enum RectSide { Left, Right, Bottom, Top }
+   private Vector3 noProgressTargetW;
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
         PlayerDirection playerDirection,
@@ -276,19 +277,11 @@ public sealed partial class Navigation : IDisposable
         }
         else
         {
-            // No route to follow.
-            // If we’re waiting on a path, don’t refill again—just wait for callback.
             if (waitingForPathResult)
                 return;
 
-            RefillRouteToNextWaypoint(token);
-            return;
-        }
-
-        if (routeToNextWaypoint.Count == 0)
-        {
-            logger.LogInformation(
-                $"[NAV-SANITY] routeEmpty waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} waypoints={wayPoints.Count}");
+            if (DateTime.UtcNow < noProgressRefillCooldownUntilUtc)
+                return;
 
             RefillRouteToNextWaypoint(token);
             return;
@@ -315,7 +308,23 @@ public sealed partial class Navigation : IDisposable
         }
 
         Vector3 targetW = routeToNextWaypoint.Peek();
+
+        if (noProgressSinceUtc != DateTime.MinValue && noProgressTargetW.WorldDistanceXYTo(targetW) > 0.05f)
+        {
+            // target changed -> reset watchdog state
+            noProgressTargetW = targetW;
+            noProgressBestDist = float.MaxValue;
+            noProgressSinceUtc = DateTime.MinValue;
+        }
+        else if (noProgressSinceUtc == DateTime.MinValue)
+        {
+            // initialize target tracking the first time
+            noProgressTargetW = targetW;
+        }
+
+
         float worldDistance = playerW.WorldDistanceXYTo(targetW);
+        logger.LogInformation($"[NAV] chase target={targetW} dist={worldDistance:0.00} routeCount={routeToNextWaypoint.Count} wpCount={wayPoints.Count}");
 
         // ---- ESCAPE FALLBACK WATCHDOG
         if (escapeActive && routeToNextWaypoint.Count > 0)
@@ -375,6 +384,10 @@ public sealed partial class Navigation : IDisposable
                     noProgressBestDist = float.MaxValue;
                     noProgressSinceUtc = DateTime.MinValue;
 
+                    // set cooldown so the next few frames don’t thrash
+                    noProgressRefillCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
+
+                    // DO the refill now (one shot)
                     RefillRouteToNextWaypoint(token);
                     return;
                 }
@@ -395,7 +408,14 @@ public sealed partial class Navigation : IDisposable
             if (SimplifyRouteToWaypoint)
                 ReduceByDistance(playerW, OutDoorMinDistance);
             else
-                routeToNextWaypoint.Pop();
+            {
+                var popped = routeToNextWaypoint.Pop();
+
+                logger.LogInformation(
+                    $"[NAV] POP reached {popped} newTop={(routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek().ToString() : "<none>")}"
+                );
+            }
+                
 
             OnAnyPointReached?.Invoke();
 
@@ -702,21 +722,34 @@ public sealed partial class Navigation : IDisposable
         }
 
         // else direct:
-        // Update to give more than 1 waypoint for direct movement
-        // when distance greater than 8f - helps with fragile 1 waypoint movement
+        // Add a midpoint for long direct segments to reduce jitter on single-point movement.
+        Vector3 mid = default;
+        bool hasMid = false;
+
         if (distance > 8f)
         {
-            Vector3 mid = new(
+            mid = new Vector3(
                 (startW.X + targetW.X) * 0.5f,
                 (startW.Y + targetW.Y) * 0.5f,
-                playerReader.WorldPosZ);
+                playerReader.WorldPosZ
+            );
 
-            if (!IsBlacklistedPoint(mid) && !SegmentBlockedEscapeAware(startW, mid))
-                routeToNextWaypoint.Push(mid);
+            hasMid = !IsBlacklistedPoint(mid) && !SegmentBlockedEscapeAware(startW, mid);
         }
 
+        // Push final target first, then optional mid so mid is on top (next step).
         routeToNextWaypoint.Push(targetW);
-        stuckDetector.SetTargetLocation(targetW);
+
+        if (hasMid)
+            routeToNextWaypoint.Push(mid);
+
+        noProgressBestDist = float.MaxValue;
+        noProgressSinceUtc = DateTime.MinValue;
+        noProgressTargetW = routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek() : default;
+
+        if (routeToNextWaypoint.Count > 0)
+            stuckDetector.SetTargetLocation(routeToNextWaypoint.Peek());
+
         UpdateTotalRoute();
 
     }
@@ -849,8 +882,12 @@ public sealed partial class Navigation : IDisposable
             routeToNextWaypoint.Push(wayPoints.Peek());
 
         stuckDetector.SetTargetLocation(routeToNextWaypoint.Peek());
-        UpdateTotalRoute();
 
+        noProgressBestDist = float.MaxValue;
+        noProgressSinceUtc = DateTime.MinValue;
+        noProgressTargetW = routeToNextWaypoint.Peek();
+
+        UpdateTotalRoute();
         OnPathCalculated?.Invoke();
     }
 
@@ -894,11 +931,24 @@ public sealed partial class Navigation : IDisposable
 
     private void ReduceByDistance(Vector3 playerW, float minDistance)
     {
+        bool poppedAny = false;
+
         while (routeToNextWaypoint.Count > 0 &&
-            playerW.WorldDistanceXYTo(routeToNextWaypoint.Peek()) < ReachedDistance(minDistance))
+               playerW.WorldDistanceXYTo(routeToNextWaypoint.Peek()) < ReachedDistance(minDistance))
         {
             routeToNextWaypoint.Pop();
+            poppedAny = true;
         }
+
+        if (!poppedAny)
+            return;
+
+        noProgressBestDist = float.MaxValue;
+        noProgressSinceUtc = DateTime.MinValue;
+        noProgressTargetW = routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek() : default;
+
+        if (routeToNextWaypoint.Count == 0)
+            noProgressRefillCooldownUntilUtc = DateTime.MinValue;
     }
 
     private void AdjustHeading(float heading, CancellationToken token)

@@ -175,6 +175,8 @@ public sealed class FollowFocusGoal : GoapGoal
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
                     lastExecution = DateTime.Now;
+                    input.StepBackwards();
+                    wait.Update();
                     input.PressAssistCantFollow();
                 }
 
@@ -216,6 +218,8 @@ public sealed class FollowFocusGoal : GoapGoal
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
                     lastExecution = DateTime.Now;
+                    input.StepBackwards();
+                    wait.Update();
                     input.PressAssistCantFollow();
                 }
 
@@ -257,6 +261,8 @@ public sealed class FollowFocusGoal : GoapGoal
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
                     lastExecution = DateTime.Now;
+                    input.StepBackwards();
+                    wait.Update();
                     input.PressAssistCantFollow();
                 }
 
@@ -298,6 +304,8 @@ public sealed class FollowFocusGoal : GoapGoal
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
                     lastExecution = DateTime.Now;
+                    input.StepBackwards();
+                    wait.Update();
                     input.PressAssistCantFollow();
                 }
 
@@ -339,6 +347,8 @@ public sealed class FollowFocusGoal : GoapGoal
                 if (DateTime.Now - lastExecution > gateInterval)
                 {
                     lastExecution = DateTime.Now;
+                    input.StepBackwards();
+                    wait.Update();
                     input.PressAssistCantFollow();
                 }
 
