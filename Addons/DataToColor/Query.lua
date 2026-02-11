@@ -85,6 +85,7 @@ local IsAutoRepeatSpell = IsAutoRepeatSpell
 local IsCurrentSpell = IsCurrentSpell
 local UnitIsVisible = UnitIsVisible
 local GetPetHappiness = GetPetHappiness
+local UnitIsConnected = UnitIsConnected
 
 local ammoSlot = GetInventorySlotInfo("AmmoSlot")
 
@@ -175,7 +176,13 @@ function DataToColor:Bits3()
         (DataToColor.channeling and 2 or 0) ^ 7 +
         (LootFrame:IsShown() and 2 or 0) ^ 8 +
         (ChatFrame1EditBox:IsVisible() and 2 or 0) ^ 9 +
-        (DataToColor:SoftTargetInteractEnabled() and 2 or 0) ^ 10
+        (DataToColor:SoftTargetInteractEnabled() and 2 or 0) ^ 10 +
+        (UnitIsConnected(DataToColor.C.unitFocus) and 2 or 0) ^ 11 +
+        (UnitIsConnected(DataToColor.C.unitPartyMember1) and 1 or 0) ^ 12 +
+        (UnitIsConnected(DataToColor.C.unitPartyMember2) and 1 or 0) ^ 13 +
+        (UnitIsConnected(DataToColor.C.unitPartyMember3) and 1 or 0) ^ 14 +
+        (UnitIsConnected(DataToColor.C.unitPartyMember4) and 1 or 0) ^ 15
+		
 end
 
 function DataToColor:CustomTrigger(t)
