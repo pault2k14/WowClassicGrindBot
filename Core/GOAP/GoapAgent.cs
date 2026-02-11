@@ -356,12 +356,12 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.partymembercombat: " + PartyMemberInCombat());
         logger.LogInformation("GoapKey.partyleadercombat: " + PartyLeaderInCombat());
         logger.LogInformation("GoapKey.partyincombat: " + PartyInCombat());
-        logger.LogInformation("GoapKey.inblacklistarea]: " + navigation.IsInBlacklistArea());
-        logger.LogInformation("GoapKey.focusconnected]: " + bits.Focus_Connected());
-        logger.LogInformation("GoapKey.party1connected]: " + bits.Party1_Connected());
-        logger.LogInformation("GoapKey.party2connected]: " + bits.Party2_Connected());
-        logger.LogInformation("GoapKey.party3connected]: " + bits.Party3_Connected());
-        logger.LogInformation("GoapKey.party4connected]: " + bits.Party4_Connected());
+        logger.LogInformation("GoapKey.inblacklistarea: " + navigation.IsInBlacklistArea());
+        logger.LogInformation("GoapKey.focusconnected: " + bits.Focus_Connected());
+        logger.LogInformation("GoapKey.party1connected: " + bits.Party1_Connected());
+        logger.LogInformation("GoapKey.party2connected: " + bits.Party2_Connected());
+        logger.LogInformation("GoapKey.party3connected: " + bits.Party3_Connected());
+        logger.LogInformation("GoapKey.party4connected: " + bits.Party4_Connected());
     }
 
     private GoapGoal? NextGoal()

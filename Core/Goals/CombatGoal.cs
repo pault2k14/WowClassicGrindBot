@@ -392,15 +392,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // TODO Could this be moved further down?
         // If we are a partyleader or assistfocus we don't want to try to loot/soft interact if our focus 
         // is still in combat
-
-
-        if (!bits.Combat() && !bits.Focus_Combat() && !playerReader.PetTarget() 
+        if (!bits.Target_Hostile() && !bits.Target_Alive() && !bits.Combat() 
+            && !bits.Focus_Combat() && !playerReader.PetTarget() 
             && classConfig.Loot && bits.SoftInteract_Enabled())
         {
             logger.LogInformation("Deal with soft interact");
             DealWithSoftInteract();
         }
 
+
+        // TODO make sure before picking up ANY new target that
+        // 1 of Us, Focus, or Pet is in combat with a target
+        // trying to clean up picking up extra targets when they weren't
+        // actually in combat with us
         if (!bits.Target() || (bits.Target() && bits.Target_Dead()))
         {
             logger.LogInformation("Lost target!");
