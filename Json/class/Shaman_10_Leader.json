@@ -2,6 +2,7 @@
   "ClassName": "Shaman",
   "Mode": "PartyLeader",
   "Loot": true,
+  "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/1-20/Troll.Orc/08-09_Durotar_Razormane Q-Encroachment (cl 11-12) v2.json",
   "PathThereAndBack": true,
   "PathReduceSteps": false,
