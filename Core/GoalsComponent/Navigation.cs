@@ -120,6 +120,7 @@ public sealed partial class Navigation : IDisposable
     private float escapeBestDist = float.MaxValue;
     private DateTime escapeNoProgressSinceUtc;
     private DateTime noProgressRefillCooldownUntilUtc = DateTime.MinValue;
+    private const int StuckOwnerId = 1;
 
     private enum RectSide { Left, Right, Bottom, Top }
    private Vector3 noProgressTargetW;
@@ -187,6 +188,7 @@ public sealed partial class Navigation : IDisposable
 
     public void Dispose()
     {
+        stuckDetector.Release(StuckOwnerId);
         manualReset.Set();
     }
 
@@ -199,7 +201,13 @@ public sealed partial class Navigation : IDisposable
     {
         logger.LogInformation($"[NAV-SANITY] Update entered navHash={GetHashCode()} tokenCancelled={token.IsCancellationRequested}");
 
-        active = true;
+        if (!active)
+        {
+            //ResetStuckParameters();
+            // Don't clear pathRequestPending here: a request may still be in flight.
+            // We simply don't drive movement/stuck while inactive.
+            return;
+        }
 
         // Apply per-route area blacklists (map rects -> world rects)
         if (AreaBlacklist == null && pathSettings.MapBlacklistRects is { Length: > 0 })
@@ -259,6 +267,19 @@ public sealed partial class Navigation : IDisposable
             $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
             $"reqQ={pathRequests.Count} resQ={pathResults.Count} threadTokenCancelled={token.IsCancellationRequested}");
         int pending = Volatile.Read(ref pathRequestPending);
+
+        // If pending is set, but we're not waiting and there is nothing queued,
+        // the gate is stuck. Clear it so we can refill again.
+        if (pending == 1 &&
+            !waitingForPathResult &&
+            pathRequests.Count == 0 &&
+            pathResults.Count == 0)
+        {
+            logger.LogWarning("[NAV] pathRequestPending=1 but no queued/in-flight work. Clearing pending gate.");
+            Interlocked.Exchange(ref pathRequestPending, 0);
+            Volatile.Write(ref activePathRequestId, 0);
+        }
+
 
         // If we're "waiting", but there is no pending request and nothing queued, the flag is stale.
         if (waitingForPathResult && pending == 0 && pathRequests.Count == 0)
@@ -438,7 +459,7 @@ public sealed partial class Navigation : IDisposable
             else
             {
                 targetW = routeToNextWaypoint.Peek();
-                stuckDetector.SetTargetLocation(targetW);
+                stuckDetector.SetTargetLocation(StuckOwnerId, targetW);
 
                 playerM = WorldMapAreaDB.ToMap_FlipXY(playerW, playerReader.WorldMapArea);
                 targetM = WorldMapAreaDB.ToMap_FlipXY(targetW, playerReader.WorldMapArea);
@@ -452,6 +473,8 @@ public sealed partial class Navigation : IDisposable
 
         if (routeToNextWaypoint.Count == 0)
         {
+            ResetStuckParameters();
+
             if (!waitingForPathResult)
                 RefillRouteToNextWaypoint(token);
             return;
@@ -463,7 +486,7 @@ public sealed partial class Navigation : IDisposable
 
         if (routeToNextWaypoint.Count > 0)
         {
-            if (stuckDetector.IsGettingCloser())
+            if (stuckDetector.IsGettingCloser(StuckOwnerId))
             {
                 AdjustHeading(heading, token);
             }
@@ -475,14 +498,14 @@ public sealed partial class Navigation : IDisposable
                         mountHandler.Dismount();
 
                     LogClearRouteToWaypointStuck(logger, stuckDetector.ActionDurationMs);
-                    stuckDetector.Reset();
+                    stuckDetector.Reset(StuckOwnerId);
                     routeToNextWaypoint.Clear();
                     return;
                 }
 
                 if (HasBeenActiveRecently())
                 {
-                    stuckDetector.Update(token);
+                    stuckDetector.Update(StuckOwnerId,token);
                     worldDistance = playerW.WorldDistanceXYTo(routeToNextWaypoint.Peek());
                 }
             }
@@ -493,6 +516,8 @@ public sealed partial class Navigation : IDisposable
 
     public void Resume()
     {
+        active = true;
+        stuckDetector.Acquire(StuckOwnerId);
         ResetStuckParameters();
 
         if (pather.GetType() != typeof(RemotePathingAPIV3) && routeToNextWaypoint.Count > 0)
@@ -511,9 +536,27 @@ public sealed partial class Navigation : IDisposable
         }
     }
 
+    public void PausePathing()
+    {
+        active = false;
+
+        // Don’t stomp request gates; a request may be in flight.
+        // waitingForPathResult can stay true/false; it won’t matter while inactive.
+
+        // Freeze stuck behavior cleanly
+        stuckDetector.Release(StuckOwnerId);
+
+        // Keep route/waypoints so Resume() can continue exactly where it left off.
+    }
+
     public void Stop()
     {
         active = false;
+        stuckDetector.Release(StuckOwnerId);
+
+        // Invalidate any in-flight path results
+        Volatile.Write(ref activePathRequestId, Interlocked.Increment(ref nextPathRequestId));
+        waitingForPathResult = false;
 
         if (pather.GetType() == typeof(RemotePathingAPIV3))
             routeToNextWaypoint.Clear();
@@ -543,6 +586,7 @@ public sealed partial class Navigation : IDisposable
 
     public void  SetWayPoints(Span<Vector3> points)
     {
+        active = true;
         wayPoints.Clear();
         routeToNextWaypoint.Clear();
 
@@ -579,7 +623,7 @@ public sealed partial class Navigation : IDisposable
 
     public void ResetStuckParameters()
     {
-        stuckDetector.Reset();
+        stuckDetector.Reset(StuckOwnerId);
     }
 
     private void LogRefill(string msg)
@@ -660,7 +704,7 @@ public sealed partial class Navigation : IDisposable
             // Ensure it becomes the immediate movement target this frame
             routeToNextWaypoint.Clear();
             routeToNextWaypoint.Push(escapeW);
-            stuckDetector.SetTargetLocation(escapeW);
+            stuckDetector.SetTargetLocation(StuckOwnerId, escapeW);
 
             // Optional: keep it in waypoints too so "waypoint reached" logic remains consistent
             if (wayPoints.Count == 0 || wayPoints.Peek().WorldDistanceXYTo(escapeW) > 0.1f)
@@ -748,7 +792,7 @@ public sealed partial class Navigation : IDisposable
         noProgressTargetW = routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek() : default;
 
         if (routeToNextWaypoint.Count > 0)
-            stuckDetector.SetTargetLocation(routeToNextWaypoint.Peek());
+            stuckDetector.SetTargetLocation(StuckOwnerId, routeToNextWaypoint.Peek());
 
         UpdateTotalRoute();
 
@@ -846,8 +890,8 @@ public sealed partial class Navigation : IDisposable
             if (failedAttempt > 2)
             {
                 failedAttempt = 0;
-                stuckDetector.SetTargetLocation(result.EndW);
-                stuckDetector.Update();
+                stuckDetector.SetTargetLocation(StuckOwnerId, result.EndW);
+                stuckDetector.Update(StuckOwnerId);
             }
             return;
         }
@@ -881,7 +925,7 @@ public sealed partial class Navigation : IDisposable
         if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
             routeToNextWaypoint.Push(wayPoints.Peek());
 
-        stuckDetector.SetTargetLocation(routeToNextWaypoint.Peek());
+        stuckDetector.SetTargetLocation(StuckOwnerId, routeToNextWaypoint.Peek());
 
         noProgressBestDist = float.MaxValue;
         noProgressSinceUtc = DateTime.MinValue;

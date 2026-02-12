@@ -53,7 +53,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private readonly ChatReader chatReader;
     private volatile bool _disposing;
     private bool suppressNavigation;
-
+    private bool navStoppedForTarget;
 
     private Vector3[] mapRoute
     {
@@ -215,9 +215,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private void Abort()
     {
         if (!targetBlacklist.Is())
-            navigation.StopMovement();
+            //navigation.StopMovement();
 
-        navigation.Stop();
+        navigation.PausePathing();
+        //navigation.StopMovement(); // optional, if combat wants to manage movement itself
 
         sideActivityManualReset.Reset();
         targetFinder.Reset();
@@ -393,10 +394,32 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         else
             suppressNavigation = false;
 
+        bool hasTarget = bits.Target() && bits.Target_Hostile() 
+            && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()
+            && playerReader.WithInPullRange();
+        suppressNavigation = hasTarget;
+
+        if (hasTarget)
+        {
+            if (!navStoppedForTarget)
+            {
+                logger.LogInformation("[FRG] Target acquired -> stopping navigation");
+                navigation.PausePathing();          // sets active=false and resets stuck (per your nav changes)
+                //navigation.StopMovement(); // optional, if combat wants to manage movement itself
+                navStoppedForTarget = true;
+            }
+        }
+        else
+        {
+            // target cleared -> allow navigation again
+            navStoppedForTarget = false;
+        }
+
         if (!suppressNavigation)
         {
             logger.LogInformation($"[FRG] Calling navigation.Update navHash={navigation.GetHashCode()}");
             navigation.Update(CancellationToken.None);
+            //navigation.Update(sideActivityCts.Token);
         }
 
         RandomJump();
@@ -407,13 +430,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // private void Thread_LookingForTarget(CancellationTokenSource cts)
     private void Thread_LookingForTarget()
     {
-        //var token = cts.Token;
-        sideActivityManualReset.Wait();
+
+        //sideActivityManualReset.Wait();
 
         while (!sideActivityCts.IsCancellationRequested)
         {
+            sideActivityManualReset.Wait();
+
             if (pathSettings.CanRunSideActivity() &&
-                // targetFinder.Search(NpcNameToFind, bits.Target_NotDead, token))
                 targetFinder.Search(NpcNameToFind, bits.Target_NotDead, sideActivityCts.Token))
             {
                 if(bits.Target() && bits.TargetTarget_PlayerOrPet() 
@@ -421,8 +445,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     && (bits.Combat() || bits.Focus_Combat()) )
                 {
                     Log("Found target area blacklisted target, but they are targeting us and we are in combat!");
-                    sideActivityCts.Cancel();
-                    sideActivityManualReset.Reset();
+                    sideActivityManualReset.Reset();   // pause searching
+                    targetFinder.Reset();              // optional
+                    //sideActivityCts.Cancel();
+                    //sideActivityManualReset.Reset();
+                    navigation.PausePathing();
+                    //navigation.StopMovement(); // optional, if combat wants to manage movement itself
                 }
                 else if (bits.Target() && targetBlacklist.Is())
                 {
@@ -433,13 +461,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 else
                 {
                     Log("Found target!");
-                    sideActivityCts.Cancel();
-                    sideActivityManualReset.Reset();
+                    sideActivityManualReset.Reset();   // pause searching
+                    targetFinder.Reset();              // optional
+                    //sideActivityCts.Cancel();
+                    //sideActivityManualReset.Reset();
+                    navigation.PausePathing();
+                    //navigation.StopMovement(); // optional, if combat wants to manage movement itself
                 } 
             }
 
             wait.Update();
-            sideActivityManualReset.Wait();
+            //sideActivityManualReset.Wait();
         }
 
         if (logger.IsEnabled(LogLevel.Debug))

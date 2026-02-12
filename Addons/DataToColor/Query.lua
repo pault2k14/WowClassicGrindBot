@@ -178,10 +178,10 @@ function DataToColor:Bits3()
         (ChatFrame1EditBox:IsVisible() and 2 or 0) ^ 9 +
         (DataToColor:SoftTargetInteractEnabled() and 2 or 0) ^ 10 +
         (UnitIsConnected(DataToColor.C.unitFocus) and 2 or 0) ^ 11 +
-        (UnitIsConnected(DataToColor.C.unitPartyMember1) and 1 or 0) ^ 12 +
-        (UnitIsConnected(DataToColor.C.unitPartyMember2) and 1 or 0) ^ 13 +
-        (UnitIsConnected(DataToColor.C.unitPartyMember3) and 1 or 0) ^ 14 +
-        (UnitIsConnected(DataToColor.C.unitPartyMember4) and 1 or 0) ^ 15
+        (UnitIsConnected(DataToColor.C.unitPartyMember1) and 2 or 0) ^ 12 +
+        (UnitIsConnected(DataToColor.C.unitPartyMember2) and 2 or 0) ^ 13 +
+        (UnitIsConnected(DataToColor.C.unitPartyMember3) and 2 or 0) ^ 14 +
+        (UnitIsConnected(DataToColor.C.unitPartyMember4) and 2 or 0) ^ 15
 		
 end
 

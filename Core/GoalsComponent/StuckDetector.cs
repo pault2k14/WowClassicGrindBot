@@ -39,6 +39,14 @@ public sealed class StuckDetector
     private long startTime;
     private long attemptTime;
 
+    
+    // --- Ownership / enable gate ---
+    // If a goal doesn't own the detector, it can't update/reset/retarget it.
+    // This prevents "foreign" Update() calls from timing out a stale target set by Navigation.
+    private int ownerId; // 0 = legacy/unowned
+    public bool Enabled { get; private set; }
+    public int OwnerId => ownerId;
+
     public double ActionDurationMs => GetElapsedTime(startTime).TotalMilliseconds;
     private double UnstuckMs => GetElapsedTime(attemptTime).TotalMilliseconds;
 
@@ -54,28 +62,89 @@ public sealed class StuckDetector
         this.playerDirection = playerDirection;
         this.stopMoving = stopMoving;
 
-        Reset();
+        // Default: legacy/unowned and enabled.
+        // Navigation should call Acquire(navOwnerId) when it wants exclusive control.
+        ownerId = 0;
+        Enabled = true;
+        ResetInternal();
     }
 
-    public void SetTargetLocation(Vector3 worldTarget)
+    /// <summary>
+    /// Acquire exclusive control for a specific owner (e.g., Navigation).
+    /// Once acquired, calls from other owners are ignored.
+    /// </summary>
+    public void Acquire(int ownerId)
     {
+        this.ownerId = ownerId;
+        Enabled = true;
+        ResetInternal();
+    }
+
+    /// <summary>
+    /// Release control for the specified owner. After release the detector is disabled
+    /// (so it won't accumulate stuck time while "paused").
+    /// </summary>
+    public void Release(int ownerId)
+    {
+        if (!Enabled || this.ownerId != ownerId)
+            return;
+
+        this.ownerId = 0;
+        Enabled = true;   // allow legacy use again
+        ResetInternal();
+    }
+
+    private bool IsOwner(int callerOwnerId)
+    {
+        if (!Enabled) return false;
+
+        // Unowned: allow legacy (0) only
+        if (ownerId == 0)
+            return callerOwnerId == 0;
+
+        // Owned: only the owner may act
+        return ownerId == callerOwnerId;
+    }
+
+    // Legacy API (ownerId=0)
+    public void SetTargetLocation(Vector3 worldTarget) => SetTargetLocation(0, worldTarget);
+    public void SetTargetLocation(int callerOwnerId, Vector3 worldTarget)
+    {
+        if (!IsOwner(callerOwnerId))
+            return;
+
         if (this.worldTarget != worldTarget)
         {
             this.worldTarget = worldTarget;
-            Reset();
+            ResetInternal();
         }
     }
 
-    public void Reset()
+    // Legacy API (ownerId=0)
+    public void Reset() => Reset(0);
+
+    public void Reset(int callerOwnerId)
+    {
+        if (!IsOwner(callerOwnerId))
+            return;
+
+        ResetInternal();
+    }
+
+    private void ResetInternal()
     {
         attemptTime = GetTimestamp();
         startTime = GetTimestamp();
-
         prevDistance = MAX_RANGE;
     }
 
-    public void Update(CancellationToken token = default)
+    // Legacy API (ownerId=0)
+    public void Update(CancellationToken token = default) => Update(0, token);
+    public void Update(int callerOwnerId, CancellationToken token = default)
     {
+        if (!IsOwner(callerOwnerId))
+            return;
+        
         if (bits.Falling())
             return;
 
@@ -112,12 +181,20 @@ public sealed class StuckDetector
         }
     }
 
-    public bool IsGettingCloser()
+    // Legacy API (ownerId=0)
+    public bool IsGettingCloser() => IsGettingCloser(0);
+
+    public bool IsGettingCloser(int callerOwnerId)
     {
+        // If the caller doesn't own the detector, treat as "not stuck".
+        // This prevents other goals from tripping stuck logic on a stale Navigation target.
+        if (!IsOwner(callerOwnerId))
+            return true;
+
         float distance = playerReader.WorldPos.WorldDistanceXYTo(worldTarget);
         if (distance <= prevDistance - MIN_RANGE_DIFF)
         {
-            Reset();
+            ResetInternal();
             prevDistance = distance;
             return true;
         }
@@ -125,12 +202,18 @@ public sealed class StuckDetector
         return ActionDurationMs < ACTION_STUCK_TIME;
     }
 
-    public bool IsMoving()
+    // Legacy API (ownerId=0)
+    public bool IsMoving() => IsMoving(0);
+
+    public bool IsMoving(int callerOwnerId)
     {
+        if (!IsOwner(callerOwnerId))
+            return true;
+
         float distance = playerReader.WorldPos.WorldDistanceXYTo(worldTarget);
         if (MathF.Abs(distance - prevDistance) > MIN_DISTANCE)
         {
-            Reset();
+            ResetInternal();
             prevDistance = distance;
             return true;
         }

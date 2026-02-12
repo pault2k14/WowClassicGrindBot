@@ -108,6 +108,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
+        // Temporarily disable due to navigation supression updates
         input.StopForward(false);
     }
 
@@ -177,7 +178,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (!input.Approach.OnCooldown() && (!bits.SoftInteract() || HasValidSoftInteract()))
         {
-            
+            logger.LogInformation("!input.Approach.OnCooldown(): " + !input.Approach.OnCooldown());
+            logger.LogInformation("!bits.SoftInteract(): " + !bits.SoftInteract());
+            logger.LogInformation("HasValidSoftInteract(): " + HasValidSoftInteract());
+
             if (classConfig.Mode == Mode.AssistFocus && !targetInBlacklist)
             {
                 // HasMoonIcon 5

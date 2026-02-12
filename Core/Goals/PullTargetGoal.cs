@@ -123,6 +123,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             Log("Stop auto interact!");
             input.PressStopAttack();
             wait.Update();
+            // Temporarily disable due to navigation supression updates
             stopMoving.StopForward();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
@@ -288,6 +289,12 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             input.PressApproach();
             wait.Update();
         }
+        else
+        {
+            logger.LogInformation("Can't input.PressApproach()");
+            logger.LogInformation("!bits.SoftInteract(): " + !bits.SoftInteract());
+            logger.LogInformation("EligibleEnemySoftTargetExists(): " + EligibleEnemySoftTargetExists());
+        }
 
         if (!stuckDetector.IsMoving())
             stuckDetector.Update();
@@ -298,6 +305,11 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (approachKey == null ||
             (!approachKey.CanRun() && !approachKey.OnCooldown()))
         {
+            logger.LogInformation("ConditionalApproach: stopMoving.Stop()");
+            logger.LogInformation("approachKey: " + approachKey);
+            logger.LogInformation("!approachKey.CanRun(): " + !approachKey.CanRun());
+            logger.LogInformation("!approachKey.OnCooldown(): " + !approachKey.OnCooldown());
+
             stopMoving.Stop();
             return;
         }
