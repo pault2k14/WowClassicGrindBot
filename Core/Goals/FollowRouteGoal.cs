@@ -54,7 +54,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private volatile bool _disposing;
     private bool suppressNavigation;
     private bool navStoppedForTarget;
-
+    private int _pauseNavRequested;   // set by worker thread
+    private int _resumeNavRequested;  // set by main thread when it wants nav back
+    private bool _pausedByLocalLogic; // tracks if we paused nav due to target/local movement
     private Vector3[] mapRoute
     {
         get => pathSettings.Path;
@@ -362,6 +364,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public override void Update()
     {
+        // 1) Consume pause requests (from side thread)
+        if (Interlocked.Exchange(ref _pauseNavRequested, 0) == 1)
+        {
+            navigation.PausePathing();
+            _pausedByLocalLogic = true;
+        }
+
         if (bits.Target() && bits.Target_Dead())
         {
             Log("Has target but its dead.");
@@ -389,37 +398,41 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
 
-        if (bits.Target())
-            suppressNavigation = true;
-        else
-            suppressNavigation = false;
-
-        bool hasTarget = bits.Target() && bits.Target_Hostile() 
+        // 2) Determine whether we WANT navigation paused this tick
+        bool wantNavPaused = bits.Target() && bits.Target_Hostile() 
             && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()
             && playerReader.WithInPullRange();
-        suppressNavigation = hasTarget;
-
-        if (hasTarget)
+        
+        // 3) If policy says pause, do it (main thread)
+        if (wantNavPaused && !_pausedByLocalLogic)
         {
-            if (!navStoppedForTarget)
-            {
-                logger.LogInformation("[FRG] Target acquired -> stopping navigation");
-                navigation.PausePathing();          // sets active=false and resets stuck (per your nav changes)
-                //navigation.StopMovement(); // optional, if combat wants to manage movement itself
-                navStoppedForTarget = true;
-            }
-        }
-        else
-        {
-            // target cleared -> allow navigation again
-            navStoppedForTarget = false;
+            logger.LogInformation("[FRG] Target acquired -> stopping navigation");
+            navigation.PausePathing();
+            _pausedByLocalLogic = true;
         }
 
-        if (!suppressNavigation)
+        if (!wantNavPaused && bits.Target() && !bits.Target_Dead())
+        {
+            Log("Target did not meet requirements.");
+            input.PressClearTarget();
+            wait.Update();
+        }
+
+        // 4) If policy says resume, request it and consume it (main thread)
+        if (!wantNavPaused && _pausedByLocalLogic)
+        {
+            // You can either call Resume() directly...
+            navigation.Resume();
+            _pausedByLocalLogic = false;
+
+            // ...or if you prefer to keep it “request based”:
+            // Interlocked.Exchange(ref _resumeNavRequested, 1);
+        }
+
+        if (!wantNavPaused && !suppressNavigation)
         {
             logger.LogInformation($"[FRG] Calling navigation.Update navHash={navigation.GetHashCode()}");
             navigation.Update(CancellationToken.None);
-            //navigation.Update(sideActivityCts.Token);
         }
 
         RandomJump();
@@ -427,7 +440,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         wait.Update();
     }
 
-    // private void Thread_LookingForTarget(CancellationTokenSource cts)
     private void Thread_LookingForTarget()
     {
 
@@ -447,9 +459,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     Log("Found target area blacklisted target, but they are targeting us and we are in combat!");
                     sideActivityManualReset.Reset();   // pause searching
                     targetFinder.Reset();              // optional
+                    Interlocked.Exchange(ref _pauseNavRequested, 1);
                     //sideActivityCts.Cancel();
                     //sideActivityManualReset.Reset();
-                    navigation.PausePathing();
+                    //navigation.PausePathing();
                     //navigation.StopMovement(); // optional, if combat wants to manage movement itself
                 }
                 else if (bits.Target() && targetBlacklist.Is())
@@ -462,10 +475,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 {
                     Log("Found target!");
                     sideActivityManualReset.Reset();   // pause searching
-                    targetFinder.Reset();              // optional
+                    targetFinder.Reset();
+                    Interlocked.Exchange(ref _pauseNavRequested, 1);// optional
                     //sideActivityCts.Cancel();
                     //sideActivityManualReset.Reset();
-                    navigation.PausePathing();
+                    //navigation.PausePathing();
                     //navigation.StopMovement(); // optional, if combat wants to manage movement itself
                 } 
             }
