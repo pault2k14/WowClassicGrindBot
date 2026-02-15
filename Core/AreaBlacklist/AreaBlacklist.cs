@@ -16,6 +16,8 @@ public interface IAreaBlacklist
     /// <summary>Returns true if pos is inside any rect; outputs that rect.</summary>
     bool TryGetContainingRect(Vector3 worldPos, out BlacklistRect rect);
 
+    bool TryGetContainingRectInflated(Vector3 worldPos, float inflateBy, out BlacklistRect rect);
+
     /// <summary>Returns true if segment intersects any rect (standard rule).</summary>
     bool TryGetBlockingRect(Vector3 aWorld, Vector3 bWorld, out BlacklistRect blockingRect);
 
@@ -119,18 +121,36 @@ public sealed class RectBlacklist : IAreaBlacklist
 
     public bool TryGetContainingRect(Vector3 worldPos, out BlacklistRect rect)
     {
-        //Console.WriteLine("TryGetContainingRect: printing rects");
-
         var p = new Vector2(worldPos.X, worldPos.Y);
         foreach (var r in rects)
         {
-            //Console.WriteLine("r: " + r);
             if (r.Contains(p))
             {
                 rect = r;
                 return true;
             }
         }
+        rect = default;
+        return false;
+    }
+
+    public bool TryGetContainingRectInflated(Vector3 worldPos, float inflateBy, out BlacklistRect rect)
+    {
+        // Defensive: treat negative inflate as 0
+        if (inflateBy < 0) inflateBy = 0;
+
+        var p = new Vector2(worldPos.X, worldPos.Y);
+
+        foreach (var r in rects)
+        {
+            var inflated = r.Inflate(inflateBy);
+            if (inflated.Contains(p))
+            {
+                rect = r; // return ORIGINAL rect (usually what you want)
+                return true;
+            }
+        }
+
         rect = default;
         return false;
     }
@@ -145,8 +165,6 @@ public sealed class RectBlacklist : IAreaBlacklist
 
         foreach (var r in rects)
         {
-            // IgnoreRect is only meaningful when the caller passes a real rect.
-            // If ignoreRect is default (0,0,0,0) it still works; intersection is harmless.
             if (r.Equals(ignoreRect))
                 continue;
 

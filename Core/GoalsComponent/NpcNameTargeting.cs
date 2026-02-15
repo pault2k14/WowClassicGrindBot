@@ -43,6 +43,7 @@ public sealed partial class NpcNameTargeting : IDisposable
 
     private Point[] Targeting => locations.Targeting;
     private Point[] locFindBy => locations.FindBy;
+    public bool lastTargetWasBlacklisted;
 
     public NpcNameTargeting(ILogger<NpcNameTargeting> logger,
         CancellationTokenSource cts, IWowScreen screen,
@@ -130,10 +131,15 @@ public sealed partial class NpcNameTargeting : IDisposable
         {
             if (mouseOverBlacklist.Is())
             {
+                lastTargetWasBlacklisted = true;
                 LogBlacklistAdded(logger, index,
                     mouseOverReader.MouseOverId, npc.Rect);
                 index++;
                 return false;
+            }
+            else
+            {
+                lastTargetWasBlacklisted = false;
             }
 
             input.InteractMouseOver(token);

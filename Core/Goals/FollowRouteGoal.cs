@@ -169,10 +169,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else
         {
-            //sideActivityCts = new CancellationTokenSource();
-            //var localCts = sideActivityCts;
-
-            //sideActivityThread = new Thread(() => Thread_LookingForTarget(localCts));
             sideActivityThread = new(Thread_LookingForTarget);
             logger.LogInformation("FollowRouteGoal: Started sideActivityThread Thread_LookingForTarget");
             sideActivityThread.Start();
@@ -220,7 +216,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             //navigation.StopMovement();
 
         navigation.PausePathing();
-        //navigation.StopMovement(); // optional, if combat wants to manage movement itself
 
         sideActivityManualReset.Reset();
         targetFinder.Reset();
@@ -396,12 +391,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
         }
 
-        if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
-
         // 2) Determine whether we WANT navigation paused this tick
         bool wantNavPaused = bits.Target() && bits.Target_Hostile() 
             && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()
-            && playerReader.WithInPullRange();
+            && playerReader.WithInPullRange() && !targetBlacklist.Is();
         
         // 3) If policy says pause, do it (main thread)
         if (wantNavPaused && !_pausedByLocalLogic)
@@ -424,16 +417,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             // You can either call Resume() directly...
             navigation.Resume();
             _pausedByLocalLogic = false;
-
-            // ...or if you prefer to keep it “request based”:
-            // Interlocked.Exchange(ref _resumeNavRequested, 1);
         }
 
-        if (!wantNavPaused && !suppressNavigation)
+        // Drive navigation only when not paused
+        if (!wantNavPaused)
         {
             logger.LogInformation($"[FRG] Calling navigation.Update navHash={navigation.GetHashCode()}");
             navigation.Update(CancellationToken.None);
         }
+
+        // TODO moved from assistrequestreturn check and past the navigation resume checks
+        // test that this still works
+        if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
 
         RandomJump();
 
@@ -442,8 +437,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Thread_LookingForTarget()
     {
-
-        //sideActivityManualReset.Wait();
 
         while (!sideActivityCts.IsCancellationRequested)
         {
@@ -460,10 +453,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     sideActivityManualReset.Reset();   // pause searching
                     targetFinder.Reset();              // optional
                     Interlocked.Exchange(ref _pauseNavRequested, 1);
-                    //sideActivityCts.Cancel();
-                    //sideActivityManualReset.Reset();
-                    //navigation.PausePathing();
-                    //navigation.StopMovement(); // optional, if combat wants to manage movement itself
                 }
                 else if (bits.Target() && targetBlacklist.Is())
                 {
@@ -477,15 +466,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     sideActivityManualReset.Reset();   // pause searching
                     targetFinder.Reset();
                     Interlocked.Exchange(ref _pauseNavRequested, 1);// optional
-                    //sideActivityCts.Cancel();
-                    //sideActivityManualReset.Reset();
-                    //navigation.PausePathing();
-                    //navigation.StopMovement(); // optional, if combat wants to manage movement itself
                 } 
             }
 
             wait.Update();
-            //sideActivityManualReset.Wait();
         }
 
         if (logger.IsEnabled(LogLevel.Debug))

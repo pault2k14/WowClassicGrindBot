@@ -353,7 +353,12 @@ public sealed partial class Navigation : IDisposable
             // Stop escape mode once we are outside
             if (AreaBlacklist?.ContainsWorld(playerReader.WorldPos) != true)
             {
-                escapeActive = false;
+                // Still treat as escaping if we are near the boundary
+                float edgeBuffer = DetourMargin + 6f; // tune: 6–15
+                if (!IsNearBlacklistEdge(playerReader.WorldPos, edgeBuffer))
+                {
+                    escapeActive = false;
+                }
             }
             else
             {
@@ -636,6 +641,14 @@ public sealed partial class Navigation : IDisposable
         }
     }
 
+    private bool IsNearBlacklistEdge(Vector3 posW, float extra)
+    {
+        if (AreaBlacklist == null) return false;
+
+        // If you're near any rect (inside inflated by extra), treat as still "edge zone"
+        return AreaBlacklist.TryGetContainingRectInflated(posW, extra, out _);
+    }
+
     private void RefillRouteToNextWaypoint(CancellationToken token)
     {
         logger.LogInformation(
@@ -673,6 +686,37 @@ public sealed partial class Navigation : IDisposable
 
         Vector3 startW = playerReader.WorldPos;
 
+        // Escape-mode guard — do not plan normal routing while escapeActive
+        if (escapeActive)
+        {
+            // If we are already safely outside + away from edge, allow escape mode to end.
+            // (Optional, but recommended once you add TryGetContainingRectInflated)
+            if (AreaBlacklist?.ContainsWorld(startW) != true)
+            {
+                float edgeBuffer = DetourMargin + 6f;
+                bool nearEdge = AreaBlacklist != null &&
+                                AreaBlacklist.TryGetContainingRectInflated(startW, edgeBuffer, out _);
+
+                if (!nearEdge)
+                {
+                    escapeActive = false;
+                }
+            }
+
+            // If still escaping, ensure we have an escape step to chase and stop.
+            if (escapeActive)
+            {
+                if (routeToNextWaypoint.Count == 0)
+                {
+                    routeToNextWaypoint.Push(escapeTargetW);
+                    stuckDetector.SetTargetLocation(StuckOwnerId, escapeTargetW);
+                    UpdateTotalRoute();
+                }
+                return;
+            }
+        }
+
+
         // If we are currently inside a forbidden rect, escape FIRST.
         // Escape-first: if inside any blacklist, generate an escape step NOW.
         if (TryComputeEscapeOutOfBlacklist(startW, out var escapeW))
@@ -706,9 +750,10 @@ public sealed partial class Navigation : IDisposable
             routeToNextWaypoint.Push(escapeW);
             stuckDetector.SetTargetLocation(StuckOwnerId, escapeW);
 
+            // Was causing ping ponging from where we were to edge of blacklist area
             // Optional: keep it in waypoints too so "waypoint reached" logic remains consistent
-            if (wayPoints.Count == 0 || wayPoints.Peek().WorldDistanceXYTo(escapeW) > 0.1f)
-                wayPoints.Push(escapeW);
+            //if (wayPoints.Count == 0 || wayPoints.Peek().WorldDistanceXYTo(escapeW) > 0.1f)
+            //    wayPoints.Push(escapeW);
 
             UpdateTotalRoute();
             logger.LogInformation($"[BL] Escape-first ROUTE set: {startW} -> {escapeW}");
@@ -924,6 +969,66 @@ public sealed partial class Navigation : IDisposable
 
         if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
             routeToNextWaypoint.Push(wayPoints.Peek());
+
+
+        // ----------------------------------------
+        // Validate pather route against blacklist
+        // ----------------------------------------
+        if (AreaBlacklist != null)
+        {
+            bool startedInside = AreaBlacklist.ContainsWorld(result.StartW);
+
+            // Only enforce when starting OUTSIDE
+            if (!startedInside)
+            {
+                // Optional: avoid rejecting while near the edge (prevents oscillation)
+                bool nearEdge = AreaBlacklist.TryGetContainingRectInflated(
+                    result.StartW,
+                    DetourMargin + 6f,
+                    out _
+                );
+
+                // If near edge, allow path (escape logic handles it)
+                if (!nearEdge)
+                {
+                    var steps = routeToNextWaypoint.ToArray();
+                    Array.Reverse(steps); // travel order
+
+                    Vector3 prev = result.StartW;
+
+                    for (int i = 0; i < steps.Length; i++)
+                    {
+                        Vector3 cur = steps[i];
+
+                        // 1. Point check (cheap)
+                        if (AreaBlacklist.ContainsWorld(cur))
+                        {
+                            logger.LogWarning(
+                                $"[BL] Path node inside blacklist; rejecting. " +
+                                $"badPoint={cur}");
+
+                            routeToNextWaypoint.Clear();
+                            UpdateTotalRoute();
+                            return;
+                        }
+
+                        // 2. Segment check (critical)
+                        if (SegmentBlockedEscapeAware(prev, cur))
+                        {
+                            logger.LogWarning(
+                                $"[BL] Path segment crosses blacklist; rejecting. " +
+                                $"seg=({prev} -> {cur})");
+
+                            routeToNextWaypoint.Clear();
+                            UpdateTotalRoute();
+                            return;
+                        }
+
+                        prev = cur;
+                    }
+                }
+            }
+        }
 
         stuckDetector.SetTargetLocation(StuckOwnerId, routeToNextWaypoint.Peek());
 

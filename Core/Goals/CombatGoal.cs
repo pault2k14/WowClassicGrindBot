@@ -405,7 +405,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // 1 of Us, Focus, or Pet is in combat with a target
         // trying to clean up picking up extra targets when they weren't
         // actually in combat with us
-        if (!bits.Target() || (bits.Target() && bits.Target_Dead()))
+        if (!bits.Target() || (!bits.Target_Combat() && combatLog.DamageTakenCount() > 0) || (bits.Target() && bits.Target_Dead()))
         {
             logger.LogInformation("Lost target!");
 

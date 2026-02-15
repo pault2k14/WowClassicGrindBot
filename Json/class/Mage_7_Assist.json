@@ -1,7 +1,7 @@
 {
   "ClassName": "Mage",
   "Mode": "AssistFocus",
-  "Loot": false,
+  "Loot": true,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,

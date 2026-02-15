@@ -21,7 +21,7 @@ public sealed class TargetFinder : IDisposable
     private DateTime targetFinderDisabledUntilUtc;
 
     private DateTime lastActive;
-    private static int DISABLE_DUE_TO_BLACKLIST_SECONDS = 3;
+    private static int DISABLE_DUE_TO_BLACKLIST_SECONDS = 12;
     private TimeSpan DisableDueToBlacklistTimeSpan = new TimeSpan(0, 0, 0, DISABLE_DUE_TO_BLACKLIST_SECONDS);
     
     public void Dispose()
@@ -56,7 +56,7 @@ public sealed class TargetFinder : IDisposable
 
     private void DisableTargetFinderForBlacklist()
     {
-        Console.WriteLine("DisablingTargetFinderForBlacklist");
+        Console.WriteLine("DisablingTargetFinderForBlacklist: Disabling for " + DISABLE_DUE_TO_BLACKLIST_SECONDS + " seconds!");
         var until = DateTime.UtcNow.Add(DisableDueToBlacklistTimeSpan);
         if (until > targetFinderDisabledUntilUtc)
             targetFinderDisabledUntilUtc = until; // extend, don’t shorten
@@ -118,7 +118,16 @@ public sealed class TargetFinder : IDisposable
                 !input.IsKeyDown(input.TurnRightKey))
             {
                 lastActive = DateTime.UtcNow;
-                return npcNameTargeting.AcquireNonBlacklisted(token);
+                bool acquiredNonBlacklisted = npcNameTargeting.AcquireNonBlacklisted(token);
+
+                if(npcNameTargeting.lastTargetWasBlacklisted)
+                {
+                    Console.WriteLine("TargetFinder: npcNameTargeting.AcquireNonBlacklisted shows last target was blacklisted");
+                    DisableTargetFinderForBlacklist();
+                    return false;
+                }
+
+                return acquiredNonBlacklisted;
             }
         }
 

@@ -127,6 +127,11 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         ClearTargetIfNeeded();
     }
 
+    public override void Update()
+    {
+
+    }
+
     private void WaitForLosingTarget()
     {
         float elapsedMs = wait.Until(playerReader.DoubleNetworkLatency, bits.NoTarget);
@@ -224,6 +229,17 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
     {
         SendGoapEvent(ScreenCaptureEvent.Default);
         Log("Loot Failed, target not found!");
+        state.LastCombatKillCount = 0;
+        state.ShouldConsumeCorpse = false;
+        state.LootableCorpseCount = 0;
+        state.GatherableCorpseCount = 0;
+        state.ConsumableCorpseCount = 0;
+
+        AddEffect(GoapKey.producedcorpse, false);
+        AddEffect(GoapKey.consumecorpse, false);
+        AddEffect(GoapKey.shouldloot, false);
+        AddEffect(GoapKey.shouldgather, false);
+        AddEffect(GoapKey.consumablecorpsenearby, false);
     }
 
     private void CleanUpAfterLooting()
@@ -280,6 +296,17 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
                         && bits.Combat())
                     {
                         logger.LogInformation("LootGoal: OnGoapEvent - Entered Combat while looting, trying to exit!");
+                        state.LastCombatKillCount = 0;
+                        state.ShouldConsumeCorpse = false;
+                        state.LootableCorpseCount = 0;
+                        state.GatherableCorpseCount = 0;
+                        state.ConsumableCorpseCount = 0;
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
                         return;
                     }
 
@@ -290,6 +317,17 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
                         && (bits.Combat() || bits.Focus_Combat()))
                     {
                         logger.LogInformation("LootGoal: OnGoapEvent - Party entered Combat while looting, trying to exit!");
+                        state.LastCombatKillCount = 0;
+                        state.ShouldConsumeCorpse = false;
+                        state.LootableCorpseCount = 0;
+                        state.GatherableCorpseCount = 0;
+                        state.ConsumableCorpseCount = 0;
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
                         return;
                     }
 
@@ -302,6 +340,11 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
                             + chatReader.AssistXPos
                             + " Y: "
                             + chatReader.AssistYPos);
+                        state.LastCombatKillCount = 0;
+                        state.ShouldConsumeCorpse = false;
+                        state.LootableCorpseCount = 0;
+                        state.GatherableCorpseCount = 0;
+                        state.ConsumableCorpseCount = 0;
 
                         AddEffect(GoapKey.producedcorpse, false);
                         AddEffect(GoapKey.consumecorpse, false);
