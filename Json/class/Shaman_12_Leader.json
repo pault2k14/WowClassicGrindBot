@@ -1,0 +1,205 @@
+{
+  "ClassName": "Shaman",
+  "Mode": "PartyLeader",
+  "Loot": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
+  "PathThereAndBack": true,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
+  "Blacklist": [
+
+  ],
+  "IntVariables": {
+    "Item_Earth_Totem": 5175
+  },
+  "PartyMember1": {
+    "Sequence": [
+      {
+        "Name": "Healing Wave",
+        "Key": "4",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "PartyMember1Health% < 60",
+          "Mana > 80",
+          "TargetAlive"
+        ]
+      }
+    ]
+  },
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Lightning Bolt",
+        "Key": "2",
+        "HasCastBar": true,
+        "Requirements": [
+          "!InMeleeRange",
+          "MaxRange < 27",
+          "MinRange > 6",
+          "Mana > 30"
+        ],
+        "AfterCastWaitMeleeRange": true
+      },
+      {
+        "Name": "Lightning Bolt",
+        "Key": "2",
+        "HasCastBar": true,
+        "Requirements": [
+          "!InMeleeRange",
+          "MaxRange < 27",
+          "MinRange > 6",
+          "Mana > 30"
+        ]
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirement": "Health% < 20"
+      },
+      {
+        "Name": "Healing Wave",
+        "Key": "4",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% < 40",
+          "Mana > 80"
+        ],
+        "Cooldown": 5000
+      },
+      {
+        "Name": "Lightning Bolt",
+        "Key": "2",
+        "HasCastBar": true,
+        "Requirements": [
+          "!InMeleeRange",
+          "MaxRange < 27",
+          "MinRange > 6",
+          "Mana > 30"
+        ]
+      },
+      {
+        "Name": "Close Lightning Bolt",
+        "Key": "2",
+        "HasCastBar": true,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "!InMeleeRange",
+          "MaxRange < 6",
+          "Mana > 30"
+        ]
+      },
+      {
+        "Name": "Flame Shock",
+        "Key": "3",
+        "WhenUsable": true,
+        "Cooldown": 6000,
+        "Requirements": [
+          "MaxRange > 20",
+          "Mana% > 15",
+          "TargetHealth% > 20"
+        ]
+      },
+      {
+        "Name": "Earth Shock",
+        "Key": "8",
+        "WhenUsable": true,
+        "Cooldown": 6000,
+        "Requirements": [
+          "MaxRange > 20",
+          "Mana% > 15",
+          "TargetCastingSpell",
+          "TargetHealth% > 20"
+        ]
+      },
+      {
+        "Name": "Stoneskin Totem",
+        "Key": "5",
+        "WhenUsable": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "InMeleeRange",
+          "TargetHealth% > 50",
+          "Mana% > 55",
+          "BagItem:Item_Earth_Totem",
+          "!Stoneskin"
+        ]
+      },
+      {
+        "Name": "AutoAttack",
+        "Requirements": [
+          "InMeleeRange",
+          "!Casting"
+        ]
+      }
+      /*
+      {
+        "Name": "Approach",
+        "Requirements": [
+          "!Casting",
+          "AutoAttacking"
+        ]
+      }
+      */
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Healing Wave",
+        "Key": "4",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% < 30",
+          "Mana% >  35",
+          "!Food",
+          "!Drink"
+        ],
+        "Cooldown": 5000
+      },
+      {
+        "Name": "Rockbiter Weapon",
+        "Key": "7",
+        "Requirements": [
+          "!HasMainHandEnchant",
+          "!Food",
+          "!Drink"
+        ],
+        "AfterCastAuraExpected": true
+      },
+      {
+        "Name": "Lightning Shield",
+        "Key": "6",
+        "Cooldown": 10000,
+        "Requirements": [
+          "!Lightning Shield",
+          "Mana% > 50",
+          "!Food",
+          "!Drink"
+        ]
+      }
+    ]
+  },
+  "Parallel": {
+    "Sequence": [
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health%<30"
+      },
+      {
+        "Name": "Drink",
+        "Key": "F11",
+        "Requirement": "Mana%<30"
+      }
+    ]
+  }
+}

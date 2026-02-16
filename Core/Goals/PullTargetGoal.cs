@@ -143,6 +143,14 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         {
             npcNameTargeting.ChangeNpcType(NpcNames.None);
         }
+
+        // Added this to stop moving when combat starts
+        // should we be checking for combat?
+        if(bits.Target() && bits.Target_Alive() && bits.Combat())
+        {
+            input.StopForward(false);
+        }
+        
     }
 
     public void OnGoapEvent(GoapEventArgs e)
