@@ -46,6 +46,7 @@
         "BeforeCastStop": true,
         "BeforeCastDelay": 500,
         "AfterCastWaitCastbar": true,
+        "AfterCastDelay": 250,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
           "MaxRange < 30"
@@ -91,6 +92,7 @@
         "BeforeCastStop": true,
         "AfterCastWaitCastbar": true,
         "BeforeCastDelay": 500,
+        "AfterCastDelay": 250,
         "BeforeCastFaceTarget": false,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
@@ -108,6 +110,7 @@
         "BeforeCastStop": true,
         "AfterCastWaitCastbar": true,
         "BeforeCastDelay": 500,
+        "AfterCastDelay": 250,
         "BeforeCastFaceTarget": true,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
