@@ -99,6 +99,8 @@ public sealed partial class NpcNameTargeting : IDisposable
 
     public bool AcquireNonBlacklisted(CancellationToken token)
     {
+        lastTargetWasBlacklisted = false;
+
         if (npcCount != NpcCount)
         {
             npcCount = NpcCount;

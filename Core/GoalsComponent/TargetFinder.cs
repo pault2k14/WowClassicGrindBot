@@ -21,7 +21,7 @@ public sealed class TargetFinder : IDisposable
     private DateTime targetFinderDisabledUntilUtc;
 
     private DateTime lastActive;
-    private static int DISABLE_DUE_TO_BLACKLIST_SECONDS = 12;
+    private static int DISABLE_DUE_TO_BLACKLIST_SECONDS = 6;
     private TimeSpan DisableDueToBlacklistTimeSpan = new TimeSpan(0, 0, 0, DISABLE_DUE_TO_BLACKLIST_SECONDS);
     
     public void Dispose()
@@ -124,6 +124,7 @@ public sealed class TargetFinder : IDisposable
                 {
                     Console.WriteLine("TargetFinder: npcNameTargeting.AcquireNonBlacklisted shows last target was blacklisted");
                     DisableTargetFinderForBlacklist();
+                    npcNameTargeting.lastTargetWasBlacklisted = false;
                     return false;
                 }
 

@@ -65,6 +65,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private DateTime onEnterTime;
 
+    // Assist-return rewind logic
+    private bool _assistReturnActive;
+    private Vector3 _assistReturnTargetW;
+
+    private bool _assistRewindActive;
+    private Vector3 _assistRewindAnchorW;
+
+    // 0 = normal attempt, 1 = after rewind retry
+    private int _assistAttempt;
+
+    private DateTime _assistReturnDeadlineUtc;
+
     #region IRouteProvider
 
     public DateTime LastActive => navigation.LastActive;
@@ -129,6 +141,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         navigation.OnPathCalculated += Navigation_OnPathCalculated;
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
         navigation.OnWayPointReached += Navigation_OnWayPointReached;
+        navigation.OnPathFailed += Navigation_OnPathFailed;
 
         this.chatReader = chatReader;
 
@@ -199,7 +212,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
 
             sideActivityCts.Dispose();
-            
+
+            navigation.OnPathFailed -= Navigation_OnPathFailed;
+
             // Now it’s safe to dispose other objects (or let DI do it)
             navigation.Dispose();
         }
@@ -212,8 +227,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Abort()
     {
+        
         if (!targetBlacklist.Is())
-            //navigation.StopMovement();
+            // Restored this to debug running off into distance
+            // after combat starts
+            navigation.StopMovement();
 
         navigation.PausePathing();
 
@@ -419,6 +437,28 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             _pausedByLocalLogic = false;
         }
 
+        // Assist return state machine: if rewinding and we reached anchor, retry assist target
+        if (_assistReturnActive)
+        {
+            if (DateTime.UtcNow > _assistReturnDeadlineUtc)
+            {
+                AbortAssistReturn("timeout");
+            }
+            else if (_assistRewindActive)
+            {
+                float distToAnchor = playerReader.WorldPos.WorldDistanceXYTo(_assistRewindAnchorW);
+
+                // When anchor is reached, retry assist target once
+                if (distToAnchor < 2.5f)
+                {
+                    _assistRewindActive = false;
+
+                    logger.LogInformation($"[FRG] AssistReturn rewind reached. Retrying assist target {_assistReturnTargetW}");
+                    navigation.SetSingleWaypoint(_assistReturnTargetW);
+                }
+            }
+        }
+
         // Drive navigation only when not paused
         if (!wantNavPaused)
         {
@@ -506,6 +546,77 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
     }
 
+    private void BeginAssistReturn(Vector3 assistTargetW)
+    {
+        _assistReturnActive = true;
+        _assistReturnTargetW = assistTargetW;
+
+        _assistRewindActive = false;
+        _assistRewindAnchorW = default;
+
+        _assistAttempt = 0;
+        _assistReturnDeadlineUtc = DateTime.UtcNow.AddSeconds(25);
+
+        logger.LogInformation($"[FRG] AssistReturn begin -> {assistTargetW}");
+    }
+
+    private void AbortAssistReturn(string reason)
+    {
+        if (!_assistReturnActive)
+            return;
+
+        logger.LogWarning($"[FRG] AssistReturn abort: {reason}");
+
+        _assistReturnActive = false;
+        _assistRewindActive = false;
+        _assistAttempt = 0;
+
+        // Clear only the local single-waypoint routing; the normal route logic will refill next.
+        navigation.ClearAllRoutes();
+    }
+
+    private void Navigation_OnPathFailed(Vector3 startW, Vector3 endW)
+    {
+        if (!_assistReturnActive)
+            return;
+
+        // Only react if the failed destination matches our assist target (within tolerance)
+        if (endW.WorldDistanceXYTo(_assistReturnTargetW) > 3.0f)
+            return;
+
+        // If we already tried rewind, abort (prevents ping-pong / runaway)
+        if (_assistAttempt >= 1)
+        {
+            AbortAssistReturn("Path failed after rewind retry");
+            return;
+        }
+
+        // Need an anchor to rewind to
+        if (!navigation.HasLastSafeAnchor)
+        {
+            AbortAssistReturn("No last safe anchor available for rewind");
+            return;
+        }
+
+        var anchor = navigation.LastSafeAnchorW;
+
+        // Safety: if anchor is inside blacklist, don't rewind into it
+        if (navigation.AreaBlacklist != null && navigation.AreaBlacklist.ContainsWorld(anchor))
+        {
+            AbortAssistReturn("Last safe anchor is inside blacklist");
+            return;
+        }
+
+        _assistAttempt = 1;
+        _assistRewindActive = true;
+        _assistRewindAnchorW = anchor;
+
+        logger.LogWarning($"[FRG] AssistReturn path failed. Rewind to anchor={anchor} then retry target={_assistReturnTargetW}");
+
+        // Override route to go to anchor first
+        navigation.SetSingleWaypoint(anchor);
+    }
+
     private void MountIfPossible()
     {
         float totalDistance = VectorExt.TotalDistance<Vector3>(navigation.TotalRoute, VectorExt.WorldDistanceXY);
@@ -533,19 +644,25 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     {
         if (debug)
             LogDebug("Navigation_OnDestinationReached");
+
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
-            //Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
-            //logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
-            //GoToOneWaypoint(assistWaypoint);
-            
-            // Just wait for assist to say i'm following or
-            // for another request to return.
+            // If we were actively doing assist-return movement and we hit destination, end assist-return.
+            if (_assistReturnActive && !_assistRewindActive)
+            {
+                logger.LogInformation("[FRG] AssistReturn destination reached.");
+                _assistReturnActive = false;
+                _assistAttempt = 0;
+            }
+
+            // Then wait for assist to say “following” / future requests
             return;
-        } else
+        }
+        else
         {
             RefillWaypoints(false);
         }
+
         MountIfPossible();
     }
 
@@ -564,6 +681,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     public void GoToOneWaypoint(Vector3 waypointToGoTo)
     {
         logger.LogInformation("FollowRouteGoal: GoToOneWaypoint!");
+
+        // If this is the PartyLeader responding to assist request, enable rewind/retry logic.
+        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+        {
+            if (!_assistReturnActive || _assistReturnTargetW.WorldDistanceXYTo(waypointToGoTo) > 1.0f)
+                BeginAssistReturn(waypointToGoTo);
+        }
+        else
+        {
+            // If something else is forcing a one-off move, disable assist mode
+            _assistReturnActive = false;
+            _assistRewindActive = false;
+            _assistAttempt = 0;
+        }
+
         navigation.SetWayPoints(stackalloc Vector3[1] { waypointToGoTo });
         return;
     }

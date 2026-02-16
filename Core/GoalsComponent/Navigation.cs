@@ -61,7 +61,7 @@ public sealed partial class Navigation : IDisposable
     public event Action? OnWayPointReached;
     public event Action? OnDestinationReached;
     public event Action? OnAnyPointReached;
-
+    public event Action<Vector3, Vector3>? OnPathFailed; // (startW, endW)
     public bool SimplifyRouteToWaypoint { get; set; } = true;
 
     private bool active;
@@ -123,7 +123,16 @@ public sealed partial class Navigation : IDisposable
     private const int StuckOwnerId = 1;
 
     private enum RectSide { Left, Right, Bottom, Top }
-   private Vector3 noProgressTargetW;
+    private Vector3 noProgressTargetW;
+
+    // Last "known-good" anchor in WORLD coords.
+    // Updated when we actually reach/progress a route point or a waypoint.
+    // Used by higher-level logic (FollowRouteGoal) to rewind and retry when pather returns no-path.
+    private Vector3 lastSafeAnchorW;
+
+    public bool HasLastSafeAnchor => lastSafeAnchorW != default;
+    public Vector3 LastSafeAnchorW => lastSafeAnchorW;
+
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
         PlayerDirection playerDirection,
@@ -237,6 +246,13 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation(
                 $"[NAV-SANITY] EXIT noWork inside={AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true}");
 
+            // IMPORTANT: don't leave "W" held down from previous tick
+            stopMoving.Stop();
+            input.StopForward(true);
+
+            // Also reset stuck state so we don't think we're still chasing something
+            ResetStuckParameters();
+
             OnDestinationReached?.Invoke();
             return;
         }
@@ -245,6 +261,10 @@ public sealed partial class Navigation : IDisposable
         SkipBlacklistedWaypoints();
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
+            stopMoving.Stop();
+            input.StopForward(true);
+            ResetStuckParameters();
+
             OnDestinationReached?.Invoke();
             return;
         }
@@ -437,11 +457,14 @@ public sealed partial class Navigation : IDisposable
             {
                 var popped = routeToNextWaypoint.Pop();
 
+                // Record this as a stable anchor: we reached it.
+                SetLastSafeAnchor(popped);
+
                 logger.LogInformation(
                     $"[NAV] POP reached {popped} newTop={(routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek().ToString() : "<none>")}"
                 );
             }
-                
+
 
             OnAnyPointReached?.Invoke();
 
@@ -452,7 +475,12 @@ public sealed partial class Navigation : IDisposable
             {
                 if (wayPoints.Count > 0)
                 {
+                    // The waypoint we’re finishing is the current top
+                    var completedWp = wayPoints.Peek();
                     wayPoints.Pop();
+
+                    SetLastSafeAnchor(completedWp);
+
                     UpdateTotalRoute();
 
                     if (debug)
@@ -539,6 +567,33 @@ public sealed partial class Navigation : IDisposable
             if (debug)
                 LogDebug($"Resume: removed {removed} waypoint!");
         }
+    }
+
+    // Helper: record anchor only if it's non-default and not identical (avoid spam)
+    private void SetLastSafeAnchor(Vector3 w)
+    {
+        if (w == default)
+            return;
+
+        // Keep it stable; don’t thrash for tiny noise
+        if (lastSafeAnchorW.WorldDistanceXYTo(w) < 0.05f)
+            return;
+
+        lastSafeAnchorW = w;
+    }
+
+    public void ClearAllRoutes()
+    {
+        routeToNextWaypoint.Clear();
+        // Do not clear wayPoints here; caller may be doing a "temporary" move.
+        UpdateTotalRoute();
+    }
+
+    public void SetSingleWaypoint(Vector3 worldOrMapPoint)
+    {
+        // Reuse your SetWayPoints conversion logic.
+        Span<Vector3> tmp = stackalloc Vector3[1] { worldOrMapPoint };
+        SetWayPoints(tmp);
     }
 
     public void PausePathing()
@@ -925,6 +980,9 @@ public sealed partial class Navigation : IDisposable
 
         if (result.Path.Length == 0)
         {
+            // Let higher-level logic react (assist return rewind, backoff, etc.)
+            OnPathFailed?.Invoke(result.StartW, result.EndW);
+
             if (lastFailedDestination != result.EndW)
             {
                 lastFailedDestination = result.EndW;
@@ -1081,16 +1139,20 @@ public sealed partial class Navigation : IDisposable
     private void ReduceByDistance(Vector3 playerW, float minDistance)
     {
         bool poppedAny = false;
+        Vector3 lastPopped = default;
 
         while (routeToNextWaypoint.Count > 0 &&
                playerW.WorldDistanceXYTo(routeToNextWaypoint.Peek()) < ReachedDistance(minDistance))
         {
-            routeToNextWaypoint.Pop();
+            lastPopped = routeToNextWaypoint.Pop();
             poppedAny = true;
         }
 
         if (!poppedAny)
             return;
+
+        // Record the furthest progressed point this tick as anchor
+        SetLastSafeAnchor(lastPopped);
 
         noProgressBestDist = float.MaxValue;
         noProgressSinceUtc = DateTime.MinValue;

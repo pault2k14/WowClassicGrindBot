@@ -129,7 +129,18 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
 
     public override void Update()
     {
+        logger.LogWarning("Inside LootGoal Update! Lets try to force exit!");
+        state.LastCombatKillCount = 0;
+        state.ShouldConsumeCorpse = false;
+        state.LootableCorpseCount = 0;
+        state.GatherableCorpseCount = 0;
+        state.ConsumableCorpseCount = 0;
 
+        AddEffect(GoapKey.producedcorpse, false);
+        AddEffect(GoapKey.consumecorpse, false);
+        AddEffect(GoapKey.shouldloot, false);
+        AddEffect(GoapKey.shouldgather, false);
+        AddEffect(GoapKey.consumablecorpsenearby, false);
     }
 
     private void WaitForLosingTarget()
