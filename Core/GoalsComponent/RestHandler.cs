@@ -72,8 +72,8 @@ public sealed partial class RestHandler
 
     public bool IsResting()
     {
-        if((playerReader.HealthPercent() != 100 && IsEating() && !bits.Combat() ) 
-            || (playerReader.ManaPercent() != 100 && IsDrinking() && !bits.Combat()))
+        if((playerReader.HealthPercent() != 100 && IsEating() && (!bits.Combat() && !bits.Focus_Combat()) ) 
+            || (playerReader.ManaPercent() != 100 && IsDrinking() && (!bits.Combat() && !bits.Focus_Combat())))
         {
             return true;
         }
