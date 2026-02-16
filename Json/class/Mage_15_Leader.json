@@ -3,6 +3,7 @@
   "Mode": "PartyLeader",
   "Loot": true,
   "Skin": true,
+  "KeyboardOnly": true,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
   "PathThereAndBack": false,
@@ -50,6 +51,7 @@
         "BeforeCastStop": true,
         "BeforeCastDelay": 500,
         "AfterCastWaitCastbar": true,
+        "AfterCastDelay": 500,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
           "MaxRange < 30"
@@ -84,6 +86,7 @@
         "AfterCastWaitCastbar": true,
         "BeforeCastDelay": 500,
         "BeforeCastFaceTarget": false,
+        "AfterCastDelay": 500,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
           "TargetHealth% > 15",
@@ -101,6 +104,7 @@
         "AfterCastWaitCastbar": true,
         "BeforeCastDelay": 500,
         "BeforeCastFaceTarget": true,
+        "AfterCastDelay": 500,
         "Requirements": [
           "Mana% > MIN_MANA_SPELL%",
           "TargetHealth% > 15",
