@@ -217,7 +217,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             logger.LogInformation("keyAction.ChangeTargetTo: " + keyAction.ChangeTargetTo);
 
-            if(!string.IsNullOrEmpty(keyAction.ChangeTargetTo))
+            if(!string.IsNullOrEmpty(keyAction.ChangeTargetTo) && keyAction.CanRun())
             {
                 wait.Update();
 
