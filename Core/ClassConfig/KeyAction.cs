@@ -163,6 +163,8 @@ public sealed partial class KeyAction
         set => features[ActionMask.CancelOnInterrupt] = value;
     }
 
+    public string ChangeTargetTo { get; set; } = string.Empty;
+
     public int AfterCastStepBack { get; set; }
 
     public string InCombat { get; set; } = "false";

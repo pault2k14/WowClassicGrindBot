@@ -7,6 +7,7 @@ using Newtonsoft.Json.Linq;
 using SharedLib;
 using System;
 using System.Collections.Generic;
+using System.Linq.Expressions;
 using System.Numerics;
 using System.Threading;
 
@@ -203,6 +204,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
+            KeyAction keyAction = span[i];
+            bool validChangeToTarget = false;
+
             if (chatReader.ForcedFollow)
             {
                 AddEffect(GoapKey.forcedfollow, true);
@@ -211,6 +215,40 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             wait.Update();
 
+            if(!keyAction.ChangeTargetTo.Equals(string.Empty))
+            {
+                wait.Update();
+
+                switch (keyAction.ChangeTargetTo)
+                {
+                    case "focus":
+                        validChangeToTarget = true;
+                        input.PressTargetFocus();
+                        break;
+                    case "party1":
+                        validChangeToTarget = true;
+                        input.PressTargetFocus();
+                        break;
+                    case "party2":
+                        validChangeToTarget = true;
+                        input.PressTargetFocusPartyMemberTwo();
+                        break;
+                    case "party3":
+                        validChangeToTarget = true;
+                        input.PressTargetFocusPartyMemberThree();
+                        break;
+                    case "party4":
+                        validChangeToTarget = true;
+                        input.PressTargetFocusPartyMemberFour();
+                        break;
+                    default:
+                        logger.LogWarning("keyAction.ChangeTargetTo not a valid target: " + keyAction.ChangeTargetTo);
+                        break;
+                }
+
+                wait.Update();
+            }
+
             // TODO Do we need Pet check to be put here? 
             if ((classConfig.Mode == Mode.AssistFocus 
                 && ((bits.Focus_Combat() && bits.FocusTarget_Combat() 
@@ -218,6 +256,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                      || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged())))
                 || (classConfig.Mode == Mode.PartyLeader) 
                      && !bits.Target() && bits.Focus_Combat() && bits.FocusTarget_Combat()
+                     && keyAction.ChangeTargetTo.Equals(string.Empty)
                    )
             {
                 if (classConfig.Mode == Mode.AssistFocus)
@@ -270,8 +309,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             foundValidCrowdControlAction = false;
             successfulCast = false;
 
-            KeyAction keyAction = span[i];
-
+            
             // Use specific raid icons to force attacking of a non focus target
             /*
             if (classConfig.Mode == Mode.AssistFocus
@@ -379,6 +417,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 break;
             }
 
+            if(!keyAction.ChangeTargetTo.Equals(string.Empty) && validChangeToTarget)
+            {
+                input.PressLastTarget();
+                wait.Update();
+            }
+
         }
 
         if (crowdControlAction && successfulCast)
@@ -480,9 +524,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         }
 
         if ((classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader) 
-            && bits.FocusTarget_Hostile() && bits.FocusTarget_Combat())
+            && bits.Focus_Combat() && bits.FocusTarget())
+        // bits.FocusTarget_Hostile() && bits.FocusTarget_Combat()
         {
             logger.LogWarning($"Found new combat target of focus.");
+            logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
+            logger.LogInformation("bits.FocusTarget(): " + bits.FocusTarget());
+            logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
+            logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
+
             ResetCooldowns();
 
             wait.Update();
@@ -504,6 +554,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         else
         {
             logger.LogInformation("Checking target in front...");
+            logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
+            logger.LogInformation("bits.FocusTarget(): " + bits.FocusTarget());
+            logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
+            logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
             input.PressNearestTarget();
             wait.Update();
         }
