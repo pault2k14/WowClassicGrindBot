@@ -115,4 +115,10 @@ public sealed class AddonBits : IReader, IGameMenuWindowShown
     public bool Party2_Connected() => v3[Mask._13];
     public bool Party3_Connected() => v3[Mask._14];
     public bool Party4_Connected() => v3[Mask._15];
+
+    public bool FocusTarget_Dead() => v3[Mask._16];
+
+    public bool FocusTarget_NotDead() => !v3[Mask._16];
+
+    public bool FocusTarget_Alive() => FocusTarget() && FocusTarget_NotDead();
 }

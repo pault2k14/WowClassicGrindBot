@@ -181,7 +181,8 @@ function DataToColor:Bits3()
         (UnitIsConnected(DataToColor.C.unitPartyMember1) and 2 or 0) ^ 12 +
         (UnitIsConnected(DataToColor.C.unitPartyMember2) and 2 or 0) ^ 13 +
         (UnitIsConnected(DataToColor.C.unitPartyMember3) and 2 or 0) ^ 14 +
-        (UnitIsConnected(DataToColor.C.unitPartyMember4) and 2 or 0) ^ 15
+        (UnitIsConnected(DataToColor.C.unitPartyMember4) and 2 or 0) ^ 15 +
+        (UnitIsDead(DataToColor.C.unitFocusTarget) and 2 or 0) ^ 16
 		
 end
 

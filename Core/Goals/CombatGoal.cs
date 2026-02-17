@@ -552,7 +552,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         }
 
         if ((classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader) 
-            && bits.Focus_Combat() && bits.FocusTarget())
+            && bits.Focus_Combat() && bits.FocusTarget() 
+            && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()
+            )
         // bits.FocusTarget_Hostile() && bits.FocusTarget_Combat()
         {
             logger.LogWarning($"Found new combat target of focus.");
