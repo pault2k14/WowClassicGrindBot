@@ -215,9 +215,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             wait.Update();
 
-            logger.LogInformation("keyAction.ChangeTargetTo: " + keyAction.ChangeTargetTo);
-
-            if(!string.IsNullOrEmpty(keyAction.ChangeTargetTo) && keyAction.CanRun())
+            if (!string.IsNullOrEmpty(keyAction.ChangeTargetTo) && keyAction.CanRun())
             {
                 wait.Update();
 
@@ -252,14 +250,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
 
             // TODO Do we need Pet check to be put here? 
-            if ((classConfig.Mode == Mode.AssistFocus 
+            if ((classConfig.Mode == Mode.AssistFocus
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                && ((bits.Focus_Combat() && bits.FocusTarget_Combat() 
+                && ((bits.Focus_Combat() && bits.FocusTarget_Combat()
                      && playerReader.TargetGuid != playerReader.FocusTargetGuid)
-                     || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged())))
+                     || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged()))
+                )
                 || ((classConfig.Mode == Mode.PartyLeader)
                      && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                     && !bits.Target() && bits.Focus_Combat() && bits.FocusTarget_Combat()
+                     && !bits.Target() && bits.Focus_Combat() 
+                     && bits.FocusTarget_Combat()
+                     // I believe I noticed bits.FocusTarget_Hostile() wasn't working
+                     // correctly somewhere else
+                     && bits.FocusTarget_Hostile()
                    )
                 )
             {
@@ -274,7 +277,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     logger.LogInformation("!bits.Target_Combat(): " + !bits.Target_Combat());
                     logger.LogInformation("bits.Target_Tagged(): " + bits.Target_Tagged());
                 }
-                else if(classConfig.Mode == Mode.PartyLeader)
+                else if (classConfig.Mode == Mode.PartyLeader)
                 {
                     logger.LogInformation("no target, but focus has target in combat, changing to that target");
                 }
@@ -290,10 +293,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             // Sometimes a mob will attack our assist while the party leader
             // is pulling a different mob.
-            if(classConfig.Mode == Mode.AssistFocus
+            if (classConfig.Mode == Mode.AssistFocus
                 && playerReader.OutOfCombatRange()
                 && !playerReader.TargetsMe()
                 && combatLog.DamageTakenCount() > 0
+                && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
                 && playerReader.TargetGuid == playerReader.FocusTargetGuid)
             {
                 // We are taking damage, we are out of combat range,
@@ -313,7 +317,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             foundValidCrowdControlAction = false;
             successfulCast = false;
 
-            
+
             // Use specific raid icons to force attacking of a non focus target
             /*
             if (classConfig.Mode == Mode.AssistFocus
@@ -421,9 +425,29 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 break;
             }
 
-            if(validChangeToTarget)
+            // After performing the action restore our previous target
+            if (validChangeToTarget)
             {
                 input.PressLastTarget();
+                wait.Update();
+            }
+
+            // Safety valve - if we accidentally target a friendly member we should,
+            // clear target.
+            if ((!bits.Target_Hostile()
+                 || bits.Target_PlayerControlled()
+                 || bits.Target_Player()
+                 || playerReader.TargetGuid == playerReader.FocusGuid 
+                 || playerReader.TargetGuid == playerReader.PartyMember1Guid
+                 || playerReader.TargetGuid == playerReader.PartyMember2Guid
+                 || playerReader.TargetGuid == playerReader.PartyMember3Guid
+                 || playerReader.TargetGuid == playerReader.PartyMember4Guid
+                )
+                && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
+                && !validChangeToTarget)
+            {
+                logger.LogWarning("We were still targeting a friendly target when KeyAction wasn't ChangeTargetTo");
+                input.PressClearTarget();
                 wait.Update();
             }
 
