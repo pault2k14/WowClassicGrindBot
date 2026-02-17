@@ -72,7 +72,7 @@
         "Name": "Power Word Fortitude",
         "Key": "0",
         "HasCastBar": false,
-        "Cooldown": 1000,
+        "Cooldown": 5000,
         "Requirements": [
           "!P1_Fortitude",
           "!InCombat",
@@ -291,6 +291,35 @@
         "Requirements": [
           "Health% < 70",
           "Mana > 30"
+        ]
+      },
+      {
+        "Name": "Heal party1",
+        "Key": "3",
+        "Cost": 2,
+        "Cooldown": 500,
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "ChangeTargetTo":  "party1",
+        "Requirements": [
+          "PartyMember1Health% < 60",
+          "Mana > 30",
+          "TargetAlive"
+        ]
+      },
+      {
+        "Name": "Renew party1",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 10000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "ChangeTargetTo": "party1",
+        "Requirements": [
+          "!P1_Renew",
+          "PartyMember1Health% < 45",
+          "Mana > 30",
+          "TargetAlive"
         ]
       },
       {
