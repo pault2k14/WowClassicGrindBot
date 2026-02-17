@@ -427,6 +427,22 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             Log("Target did not meet requirements.");
             input.PressClearTarget();
             wait.Update();
+
+            // If we rejected the target, resume searching immediately.
+            // Otherwise the side thread can remain paused forever (sideActivityManualReset.Reset() happened on "Found target!").
+            targetFinder.Reset();          // safe even if already reset
+            sideActivityManualReset.Set(); // re-arm the scanning thread
+
+            // If nav was paused due to prior target logic, resume it now.
+            // Don't just clear the flag, because that can strand nav in a paused state.
+            if (_pausedByLocalLogic)
+            {
+                navigation.Resume();
+                _pausedByLocalLogic = false;
+            }
+
+            // Also clear any pending pause request that might be queued from earlier timing.
+            Interlocked.Exchange(ref _pauseNavRequested, 0);
         }
 
         // 4) If policy says resume, request it and consume it (main thread)
@@ -503,10 +519,30 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 else
                 {
                     Log("Found target!");
-                    sideActivityManualReset.Reset();   // pause searching
-                    targetFinder.Reset();
-                    Interlocked.Exchange(ref _pauseNavRequested, 1);// optional
-                } 
+
+                    // Only pause searching if we actually intend to act on this target soon.
+                    // Otherwise keep searching and let Update() clear/ignore it naturally.
+                    bool actionable =
+                        bits.Target() &&
+                        bits.Target_Hostile() &&
+                        bits.Target_Alive() &&
+                        !bits.Target_Tagged() &&
+                        playerReader.WithInCombatRange() &&
+                        playerReader.WithInPullRange() &&
+                        !targetBlacklist.Is();
+
+                    if (actionable)
+                    {
+                        sideActivityManualReset.Reset();   // pause searching
+                        targetFinder.Reset();
+                        Interlocked.Exchange(ref _pauseNavRequested, 1);
+                    }
+                    else
+                    {
+                        // Not actionable: keep searching and avoid deadlocking the scanner.
+                        // Optionally clear immediately here, but Update() already handles it.
+                    }
+                }
             }
 
             wait.Update();
