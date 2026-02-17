@@ -106,8 +106,7 @@
         "Cooldown": 6000,
         "Requirements": [
           "MaxRange > 20",
-          "Mana% > 15",
-          "TargetHealth% > 20"
+          "Mana% > 15"
         ]
       },
       {
