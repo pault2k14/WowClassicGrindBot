@@ -215,7 +215,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             wait.Update();
 
-            if(!keyAction.ChangeTargetTo.Equals(string.Empty))
+            logger.LogInformation("keyAction.ChangeTargetTo: " + keyAction.ChangeTargetTo);
+
+            if(!string.IsNullOrEmpty(keyAction.ChangeTargetTo))
             {
                 wait.Update();
 
@@ -251,13 +253,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             // TODO Do we need Pet check to be put here? 
             if ((classConfig.Mode == Mode.AssistFocus 
+                && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
                 && ((bits.Focus_Combat() && bits.FocusTarget_Combat() 
                      && playerReader.TargetGuid != playerReader.FocusTargetGuid)
                      || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged())))
-                || (classConfig.Mode == Mode.PartyLeader) 
+                || ((classConfig.Mode == Mode.PartyLeader)
+                     && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
                      && !bits.Target() && bits.Focus_Combat() && bits.FocusTarget_Combat()
-                     && keyAction.ChangeTargetTo.Equals(string.Empty)
                    )
+                )
             {
                 if (classConfig.Mode == Mode.AssistFocus)
                 {
@@ -417,7 +421,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 break;
             }
 
-            if(!keyAction.ChangeTargetTo.Equals(string.Empty) && validChangeToTarget)
+            if(validChangeToTarget)
             {
                 input.PressLastTarget();
                 wait.Update();

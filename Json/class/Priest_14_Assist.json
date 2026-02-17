@@ -48,9 +48,10 @@
         "Cooldown": 500,
         "HasCastBar": true,
         "AfterCastWaitCastbar": true,
+        "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 60",
-          "Mana > 30",
+          "Mana > 75",
           "TargetAlive"
         ]
       },
@@ -283,6 +284,36 @@
         "Requirement": "Health% < 20"
       },
       {
+        "Name": "Heal Party1",
+        "Key": "3",
+        "Cost": 2,
+        "Cooldown": 500,
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "ChangeTargetTo": "party1",
+        "AfterCastDelay": 500,
+        "Requirements": [
+          "PartyMember1Health% < 60",
+          "Mana > 75",
+          "TargetAlive"
+        ]
+      },
+      {
+        "Name": "Renew Party1",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 10000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "ChangeTargetTo": "party1",
+        "Requirements": [
+          "!P1_Renew",
+          "PartyMember1Health% < 45",
+          "Mana > 75",
+          "TargetAlive"
+        ]
+      },
+      {
         "Name": "Heal",
         "Key": "3",
         "HasCastBar": true,
@@ -290,7 +321,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 30"
+          "Mana > 75"
         ]
       },
       {
@@ -474,7 +505,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 60",
-          "Mana > 30",
+          "Mana > 75",
           "!Food",
           "!Drink"
         ]
