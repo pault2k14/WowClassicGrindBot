@@ -252,17 +252,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             // TODO Do we need Pet check to be put here? 
             if ((classConfig.Mode == Mode.AssistFocus
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                && ((bits.Focus_Combat() && bits.FocusTarget_Combat()
+                && ((bits.FocusTarget_Alive() && bits.Focus_Combat() && bits.FocusTarget_Combat()
                      && playerReader.TargetGuid != playerReader.FocusTargetGuid)
-                     || (!bits.Target_Alive() || !bits.Target_Combat() || bits.Target_Tagged()))
+                   )
                 )
                 || ((classConfig.Mode == Mode.PartyLeader)
                      && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                     && !bits.Target() && bits.Focus_Combat() 
-                     && bits.FocusTarget_Combat()
-                     // I believe I noticed bits.FocusTarget_Hostile() wasn't working
-                     // correctly somewhere else
-                     && bits.FocusTarget_Hostile()
+                     && (!bits.Target() || bits.Target_Dead()) && bits.FocusTarget() 
+                     && bits.FocusTarget_Alive() && bits.Focus_Combat() 
+                     && bits.FocusTarget_Combat() && bits.FocusTarget_Hostile()
                    )
                 )
             {
@@ -271,6 +269,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     logger.LogInformation("targetGuid not equal to FocusTargetGuid");
                     logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
                     logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
+                    logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
                     logger.LogInformation("playerReader.TargetGuid: " + playerReader.TargetGuid);
                     logger.LogInformation("playerReader.FocusTargetGuid: " + playerReader.FocusTargetGuid);
                     logger.LogInformation("!bits.Target_Alive(): " + !bits.Target_Alive());
