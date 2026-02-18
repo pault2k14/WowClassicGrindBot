@@ -252,7 +252,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             // TODO Do we need Pet check to be put here? 
             if ((classConfig.Mode == Mode.AssistFocus
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                && ((bits.FocusTarget_Alive() && bits.Focus_Combat() && bits.FocusTarget_Combat()
+                && ((bits.FocusTarget_Alive() && bits.Focus_Combat() && bits.Target_Hostile()
+                     // does not seem to work corretly all of the time && bits.FocusTarget_Alive()
                      && playerReader.TargetGuid != playerReader.FocusTargetGuid)
                    )
                 )
@@ -260,7 +261,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                      && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
                      && (!bits.Target() || bits.Target_Dead()) && bits.FocusTarget() 
                      && bits.FocusTarget_Alive() && bits.Focus_Combat() 
-                     && bits.FocusTarget_Combat() && bits.FocusTarget_Hostile()
+                     && bits.FocusTarget_Hostile()
+                   // doesn't always seem to work correctly && bits.FocusTarget_Combat() 
                    )
                 )
             {
@@ -483,7 +485,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if ((combatLog.DamageTakenCount() > 0)
                 || (bits.Pet())
                 || ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus) 
-                      && bits.FocusTarget_Combat() && bits.FocusTarget_Hostile()))
+                      && bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()))
+            // doesn't seem to work correcly all of the time && bits.FocusTarget_Combat()
             {
                 if (bits.Target() && bits.Target_Dead())
                 {
@@ -554,13 +557,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             && bits.Focus_Combat() && bits.FocusTarget() 
             && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()
             )
-        // bits.FocusTarget_Hostile() && bits.FocusTarget_Combat()
+        // seems to be false incorrectly sometimes bits.FocusTarget_Combat()
         {
             logger.LogWarning($"Found new combat target of focus.");
             logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
             logger.LogInformation("bits.FocusTarget(): " + bits.FocusTarget());
             logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
             logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
+            logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
+
 
             ResetCooldowns();
 
@@ -587,6 +592,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("bits.FocusTarget(): " + bits.FocusTarget());
             logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
             logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
+            logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
             input.PressNearestTarget();
             wait.Update();
         }
@@ -609,7 +615,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 input.PressVeryFastInteract();
                 wait.Update();
                 return;
-            } else if(bits.Focus_Combat() && bits.FocusTarget_Combat())
+            } else if(bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile())
+            // doesn't seem to always work correctly && bits.FocusTarget_Combat()
             {
                 logger.LogWarning("Found new target of focus!");
                 ResetCooldowns();
