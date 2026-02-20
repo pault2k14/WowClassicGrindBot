@@ -62,8 +62,11 @@
       {
         "Name": "Hamstring",
         "Key": "7",
-        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
         "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
           "!Hamstring",
           "TargetHealth% < 40"
         ]
@@ -71,21 +74,31 @@
       {
         "Name": "Thunder Clap",
         "Key": "6",
-        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 5000,
         "Requirements": [
+          "InMeleeRange",
+          "Rage > 20",
           "!Thunder Clap && MobCount > 1"
         ]
       },
       {
         "Name": "Overpower",
         "Key": "0",
-        "WhenUsable": true
+        "BeforeCastFaceTarget": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 5"
+        ]
       },
       {
         "Name": "Heroic Strike",
         "Key": "2",
-        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
         "Requirements": [
+          "InMeleeRange",
+          "Rage > 15",
           "MainHandSwing > -400"
         ],
         "AfterCastWaitSwing": true
@@ -93,18 +106,34 @@
       {
         "Name": "Rend",
         "Key": "5",
-        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
         "Requirements": [
-          "TargetHealth% > 50",
+          "InMeleeRange",
+          "Rage > 10",
           "!Rend"
         ]
       },
       {
-        "Name": "AutoAttack"
+        "Name": "Bloodrage",
+        "Key": "8",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "Health% > 50"
+        ]
+      },
+      {
+        "Name": "AutoAttack",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "!AutoAttacking"
+        ]
       },
       {
         "Name": "Approach",
-        "Log": false
+        "Log": true
       }
     ]
   },

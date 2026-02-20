@@ -141,9 +141,6 @@
       },
       {
         "Name": "Approach",
-        //"Requirements": [
-        //  "!InCloseMeleeRange"
-        //],
         "Log": true
       }
     ]
