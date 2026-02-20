@@ -646,7 +646,7 @@ end
 -- Returns true if target of our target is us
 function DataToColor:IsUnitsTargetIsPlayerOrPet(unit, unittarget)
     local x = DataToColor:UnitsTargetAsNumber(unit, unittarget)
-    return x == 1 or x == 4
+    return x == 1 or x == 4 or x == 6
 end
 
 function DataToColor:IsUnitHostile(unit, unittarget)

@@ -174,6 +174,22 @@ public sealed partial class ClassConfiguration
         BaseAction = true,
     };
 
+    public KeyAction EnableSoftInteract { get; } = new()
+    {
+        Key = "F6",
+        Name = nameof(EnableSoftInteract),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
+    public KeyAction DisableSoftInteract { get; } = new()
+    {
+        Key = "F7",
+        Name = nameof(DisableSoftInteract),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
     public KeyAction Mount { get; } = new()
     {
         Key = "O",

@@ -135,6 +135,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         }
 
         pullStart = GetTimestamp();
+        input.PressDisableSoftInteract();
+        wait.Update();
     }
 
     public override void OnExit()

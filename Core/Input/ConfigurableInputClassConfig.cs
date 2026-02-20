@@ -37,5 +37,9 @@ public sealed partial class ConfigurableInput
 
     public KeyAction AssistIsNotFollowing => classConfig.AssistIsNotFollowing;
 
+    public KeyAction EnableSoftInteract => classConfig.EnableSoftInteract;
+    public KeyAction DisableSoftInteract => classConfig.DisableSoftInteract;
+
+
     public KeyAction Mount => classConfig.Mount;
 }

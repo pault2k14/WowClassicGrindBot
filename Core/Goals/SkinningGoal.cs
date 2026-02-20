@@ -76,6 +76,16 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         equipmentReader.OnEquipmentChanged -= EquipmentReader_OnEquipmentChanged;
         equipmentReader.OnEquipmentChanged += EquipmentReader_OnEquipmentChanged;
 
+
+        if (classConfig.Mode == Mode.AssistFocus)
+        {
+            AddPrecondition(GoapKey.partymembercombat, false);
+        }
+        else if (classConfig.Mode == Mode.PartyLeader)
+        {
+            AddPrecondition(GoapKey.partyleadercombat, false);
+        }
+
         //AddPrecondition(GoapKey.dangercombat, false);
 
         AddPrecondition(GoapKey.forcedfollow, false);
@@ -108,6 +118,46 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
                             + chatReader.AssistXPos
                             + " Y: "
                             + chatReader.AssistYPos);
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
+                    }
+
+                    break;
+
+                case GoapKey.incombat:
+                    if ((classConfig.Mode != Mode.PartyLeader && classConfig.Mode != Mode.AssistFocus)
+                        && bits.Combat())
+                    {
+                        logger.LogInformation("SkinningGoal: OnGoapEvent - Entered Combat while skinning, trying to exit!");
+                        state.LastCombatKillCount = 0;
+                        state.ShouldConsumeCorpse = false;
+                        state.LootableCorpseCount = 0;
+                        state.GatherableCorpseCount = 0;
+                        state.ConsumableCorpseCount = 0;
+
+                        AddEffect(GoapKey.producedcorpse, false);
+                        AddEffect(GoapKey.consumecorpse, false);
+                        AddEffect(GoapKey.shouldloot, false);
+                        AddEffect(GoapKey.shouldgather, false);
+                        AddEffect(GoapKey.consumablecorpsenearby, false);         
+                    }
+
+                    break;
+
+                case GoapKey.partyincombat:
+                    if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
+                        && (bits.Combat() || bits.Focus_Combat()))
+                    {
+                        logger.LogInformation("SkinningGoal: OnGoapEvent - Party entered Combat while skinning, trying to exit!");
+                        state.LastCombatKillCount = 0;
+                        state.ShouldConsumeCorpse = false;
+                        state.LootableCorpseCount = 0;
+                        state.GatherableCorpseCount = 0;
+                        state.ConsumableCorpseCount = 0;
 
                         AddEffect(GoapKey.producedcorpse, false);
                         AddEffect(GoapKey.consumecorpse, false);

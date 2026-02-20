@@ -412,8 +412,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // 2) Determine whether we WANT navigation paused this tick
         bool wantNavPaused = bits.Target() && bits.Target_Hostile() 
             && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()
-            && playerReader.WithInPullRange() && !targetBlacklist.Is();
-        
+            && !targetBlacklist.Is();
+            // && playerReader.WithInPullRange() 
+
         // 3) If policy says pause, do it (main thread)
         if (wantNavPaused && !_pausedByLocalLogic)
         {
@@ -425,6 +426,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (!wantNavPaused && bits.Target() && !bits.Target_Dead())
         {
             Log("Target did not meet requirements.");
+            Log($"bits.Target(): {bits.Target()}");
+            Log($"bits.Target_Hostile(): {bits.Target_Hostile()}");
+            Log($"bits.Target_Alive(): {bits.Target_Alive()}");
+            Log($"!bits.Target_Tagged(): {!bits.Target_Tagged()}");
+            Log($"playerReader.WithInCombatRange(): {playerReader.WithInCombatRange()}");
+            Log($"playerReader.WithInPullRange(): {playerReader.WithInPullRange()}");
+            Log($"!targetBlacklist.Is(): {!targetBlacklist.Is()}");
+
             input.PressClearTarget();
             wait.Update();
 

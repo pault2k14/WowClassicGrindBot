@@ -32,6 +32,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private float lastDirection;
     private float lastMinDistance;
     private float lastMaxDistance;
+    private int lastTargetGuid;
 
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
@@ -141,6 +142,32 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         }
 
         lastDirection = playerReader.Direction;
+
+        // Let's just totally disable soft interact for nwo
+        // to see if that will help
+        // Scenario
+        // 1. Target Mob
+        // 2. Press Disable Soft Interact
+        // 3. Additional mob
+        // 4. Kill first mob
+        // 5. Interact with additional mob (that is targeted) actually
+        //    interacts with Original mob as soft interact that was
+        //    established before disabling soft interact is not cleared
+        // - Possible solutions
+        //   Option 1 - Completely disable soft interact
+        //   Option 2 -
+        //      1. Disable soft interact
+        //      2. clear target
+        //      3. target last target
+        //   Option 3 - 
+        //      1. Enable soft interact on entering loot
+        //      2. Disable soft interact after leaving skinning
+        //input.PressClearTarget();
+        //wait.Update();
+        input.PressDisableSoftInteract();
+        wait.Update();
+        //input.PressLastTarget();
+        //wait.Update();
     }
 
     public override void OnExit()
@@ -149,11 +176,36 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             stopMoving.Stop();
         }
+
+        // Let's just totally disable soft interact for nwo
+        // to see if that will help
+        // Scenario
+        // 1. Target Mob
+        // 2. Press Disable Soft Interact
+        // 3. Additional mob
+        // 4. Kill first mob
+        // 5. Interact with additional mob (that is targeted) actually
+        //    interacts with Original mob as soft interact that was
+        //    established before disabling soft interact is not cleared
+        // - Possible solutions
+        //   Option 1 - Completely disable soft interact
+        //   Option 2 -
+        //      1. Disable soft interact
+        //      2. clear target
+        //      3. target last target
+        //   Option 3 - 
+        //      1. Enable soft interact on entering loot
+        //      2. Disable soft interact after leaving skinning
+        input.PressEnableSoftInteract();
+        wait.Update();
     }
 
     public override void Update()
     {
+        bool targetGuidChanged = false;
+        bool castOnTargetThisUpdate = false;
         wait.Update();
+        logger.LogInformation("In CombatGoals Update!");
 
         if (chatReader.ForcedFollow)
         {
@@ -175,6 +227,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             logger.LogInformation("Turning too fast!");
             stopMoving.Stop();
+
+            if(bits.Target())
+            {
+                wait.Update(100);
+                input.PressInteract();
+                wait.Update(100);
+            }
         }
 
         lastDirection = playerReader.Direction;
@@ -185,6 +244,35 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             input.PressJump();
             return;
+        }
+
+        // If we have no target or our target is dead we should
+        // try to figure out why we are still in combat
+        if(!bits.Target() || !bits.Target_Alive())
+        {
+            logger.LogInformation("No target or Target_Dead()");
+            logger.LogInformation("playerReader.TargetGuid: " + playerReader.TargetGuid);
+            logger.LogInformation("playerReader.FocusTargetGuid: " + playerReader.FocusTargetGuid);
+            logger.LogInformation("!bits.Target(): " + !bits.Target());
+            logger.LogInformation("!bits.Target_Alive(): " + !bits.Target_Alive());
+            logger.LogInformation("bits.FocusTarget(): " + bits.FocusTarget());
+            logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
+            logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
+            logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
+
+            if (bits.FocusTarget() && bits.Focus_Combat()
+                && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile())
+            // Doesn't always seem to work && bits.FocusTarget_Alive()
+            {
+                logger.LogInformation("Targeting target of focus as they are in combat");
+
+                wait.Update();
+                input.PressTargetFocus();
+                input.PressTargetOfTarget();
+                wait.Update();
+                input.PressInteract();
+                wait.Update();
+            }
         }
 
         if (classConfig.AutoPetAttack &&
@@ -201,9 +289,36 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
                 .IndexOf(playerReader.TargetRaidIcon()) != -1;
 
+        logger.LogInformation("bits.Target_Alive(): " + bits.Target_Alive());
+        logger.LogInformation("Target Guids We Know of");
+        logger.LogInformation($"playerReader.TargetGuid: {playerReader.TargetGuid}");
+        logger.LogInformation($"playerReader.FocusTargetGuid: {playerReader.FocusTargetGuid}");
+        logger.LogInformation($"playerReader.PTCurrent (Rage): {playerReader.PTCurrent()}");
+        
+        // Check to see if our target guid changed since the
+        // last time we ran combat actions
+        if(playerReader.TargetGuid != lastTargetGuid)
+        {
+            targetGuidChanged = true;
+        }
+
+        // After comparison update lastTargetGuid to current target.
+        lastTargetGuid = playerReader.TargetGuid;
+
+        logger.LogInformation($"targetGuidCHange: {targetGuidChanged}");
+
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
+            logger.LogInformation("Inside KeyAction loop: span[" + i + "]");
+
+            if (playerReader.TargetGuid != playerReader.FocusTargetGuid)
+            {
+                logger.LogInformation("playerReader.TargetGuid != playerReader.FocusTargetGuid");
+                logger.LogInformation($"playerReader.TargetGuid: {playerReader.TargetGuid}");
+                logger.LogInformation($"playerReader.FocusTargetGuid: {playerReader.FocusTargetGuid}");
+            }
+
             KeyAction keyAction = span[i];
             bool validChangeToTarget = false;
 
@@ -252,8 +367,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             // TODO Do we need Pet check to be put here? 
             if ((classConfig.Mode == Mode.AssistFocus
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                && ((bits.FocusTarget_Alive() && bits.Focus_Combat() && bits.Target_Hostile()
-                     // does not seem to work corretly all of the time && bits.FocusTarget_Alive()
+                && ((bits.Focus_Combat() && bits.Target_Hostile() && bits.FocusTarget_Alive()
+                     // does not seem to work corretly all of the time && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
                      && playerReader.TargetGuid != playerReader.FocusTargetGuid)
                    )
                 )
@@ -262,7 +377,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                      && (!bits.Target() || bits.Target_Dead()) && bits.FocusTarget() 
                      && bits.FocusTarget_Alive() && bits.Focus_Combat() 
                      && bits.FocusTarget_Hostile()
-                   // doesn't always seem to work correctly && bits.FocusTarget_Combat() 
+                   // doesn't always seem to work correctly && bits.FocusTarget_Alive()  && bits.FocusTarget_Combat() 
                    )
                 )
             {
@@ -281,13 +396,21 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 else if (classConfig.Mode == Mode.PartyLeader)
                 {
                     logger.LogInformation("no target, but focus has target in combat, changing to that target");
+                    logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
+                    logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
+                    logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
+                    logger.LogInformation("playerReader.TargetGuid: " + playerReader.TargetGuid);
+                    logger.LogInformation("playerReader.FocusTargetGuid: " + playerReader.FocusTargetGuid);
+                    logger.LogInformation("!bits.Target_Alive(): " + !bits.Target_Alive());
+                    logger.LogInformation("!bits.Target_Combat(): " + !bits.Target_Combat());
+                    logger.LogInformation("bits.Target_Tagged(): " + bits.Target_Tagged());
                 }
 
                 wait.Update();
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
                 wait.Update();
-                input.PressVeryFastInteract();
+                input.PressInteract();
                 wait.Update();
                 return;
             }
@@ -355,7 +478,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 && !playerReader.IsInMeleeRange()
                 && !keyAction.CrowdControl)
             {
-                input.PressFastInteract();
+                input.PressInteract();
                 wait.Update();
                 continue;
             }
@@ -423,6 +546,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 //logger.LogInformation("CombatGoals: Successful Cast");
                 successfulCast = true;
+                castOnTargetThisUpdate = true;
+                logger.LogInformation("castOnTargetThisUpdate: " + castOnTargetThisUpdate);
                 break;
             }
 
@@ -452,6 +577,21 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
             }
 
+        }
+
+        logger.LogInformation("After combat actions loop");
+        logger.LogInformation("castOnTargetThisUpdate: " + castOnTargetThisUpdate);
+        logger.LogInformation("targetGuidChanged: " + targetGuidChanged);
+
+        if(bits.TargetTarget_PlayerOrPet() && !castOnTargetThisUpdate && !targetGuidChanged
+            && playerReader.TargetGuid == playerReader.FocusTargetGuid)
+        {
+            logger.LogInformation("bits.TargetTarget_PlayerOrPet(): " + bits.TargetTarget_PlayerOrPet()
+                + "playerReader.TargetGuid == playerReader.FocusTargetGuid"
+                + "!castOnTargetThisUpdate: " + !castOnTargetThisUpdate
+                + "!targetGuidChanged: " + !targetGuidChanged);
+            input.PressInteract();
+            wait.Update();
         }
 
         if (crowdControlAction && successfulCast)
@@ -486,7 +626,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 || (bits.Pet())
                 || ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus) 
                       && bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()))
-            // doesn't seem to work correcly all of the time && bits.FocusTarget_Combat()
+            // doesn't seem to work correcly all of the time && bits.FocusTarget_Alive()  && bits.FocusTarget_Combat()
             {
                 if (bits.Target() && bits.Target_Dead())
                 {
@@ -538,6 +678,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
                 input.PressTargetPet();
                 input.PressTargetOfTarget();
+                input.PressInteract();
                 wait.Update();
 
                 if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
@@ -555,9 +696,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         if ((classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader) 
             && bits.Focus_Combat() && bits.FocusTarget() 
-            && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()
+            && bits.FocusTarget_Hostile()
+            && bits.FocusTarget_Alive()
             )
-        // seems to be false incorrectly sometimes bits.FocusTarget_Combat()
+        // seems to be false incorrectly sometimes && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
         {
             logger.LogWarning($"Found new combat target of focus.");
             logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
@@ -573,7 +715,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressTargetFocus();
             input.PressTargetOfTarget();
             wait.Update();
-            input.PressVeryFastInteract();
+            input.PressInteract();
             wait.Update();
 
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
@@ -612,11 +754,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
                 logger.LogWarning("Found new target!");
                 wait.Update();
-                input.PressVeryFastInteract();
+                input.PressInteract();
                 wait.Update();
                 return;
-            } else if(bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile())
-            // doesn't seem to always work correctly && bits.FocusTarget_Combat()
+            } else if(bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Hostile() && bits.FocusTarget_Alive())
+            // doesn't seem to always work correctly && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
             {
                 logger.LogWarning("Found new target of focus!");
                 ResetCooldowns();
@@ -624,7 +766,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
                 wait.Update();
-                input.PressVeryFastInteract();
+                input.PressInteract();
                 wait.Update();
                 return;
             }
@@ -638,6 +780,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         logger.LogWarning($"Waiting for target to exists or lose combat. Possible threats {combatLog.DamageTakenCount()}!");
         wait.Till(CastingHandler.GCD * 2,
             () => bits.Target_Alive() || !bits.Combat());
+
+        // Added this so we can hopefully pickup the target
+        // later if it is in combat with us
+        logger.LogInformation("CHECK - Added clear target to exit of FindPossibleThreats");
+        input.PressClearTarget();
+        wait.Update();
     }
 
     public bool CheckTargetsTargetingMe()
@@ -664,7 +812,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 && bits.Target_Hostile() && bits.Target_Alive())
             {
                 logger.LogInformation("CheckTargetsTargetingMe targets me, target within combat range, target hostile, and target alive!");
-                input.PressFastInteract();
+                input.PressInteract();
                 wait.Update();
                 return true;
             }
@@ -812,7 +960,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         if (bits.Target() && !InvalidSoftInteractExists())
         {
-            input.PressFastInteract();
+            input.PressInteract();
 
             const int updateCount = 2;
             float e = wait.AfterEquals(playerReader.SpellQueueTimeMs,

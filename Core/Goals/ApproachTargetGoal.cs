@@ -104,6 +104,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         approachStart = GetTimestamp();
         SetNextStuckTimeCheck();
+
+        input.PressDisableSoftInteract();
+        wait.Update();
     }
 
     public override void OnExit()

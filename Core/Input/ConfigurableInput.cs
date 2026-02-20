@@ -141,7 +141,7 @@ public sealed partial class ConfigurableInput
         {
             return;
         }
-
+        logger.LogInformation("PressApproachOnCooldown()");
         input.PressRandom(Approach.ConsoleKey, InputDuration.FastPress);
         Approach.SetClicked();
     }
@@ -194,6 +194,10 @@ public sealed partial class ConfigurableInput
     public void PressAssistCantFollow(CancellationToken token = default) => PressRandom(AssistCantFollow, token);
 
     public void PressAssistIsNotFollowing(CancellationToken token = default) => PressRandom(AssistIsNotFollowing, token);
+
+    public void PressEnableSoftInteract(CancellationToken token = default) => PressRandom(EnableSoftInteract, token);
+
+    public void PressDisableSoftInteract(CancellationToken token = default) => PressRandom(DisableSoftInteract, token);
 
     public void PressESC(CancellationToken token = default)
     {
