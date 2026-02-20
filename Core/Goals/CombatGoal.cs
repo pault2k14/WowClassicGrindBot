@@ -771,6 +771,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         wait.Till(CastingHandler.GCD * 2,
             () => bits.Target_Alive() || !bits.Combat());
 
+        /* DISABLE THIS AS IT SEEMS TO CAUSE ISSUES WHEN
+         * pulling and a mob attacks from behind
         if (classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader)
         {
             // Added this so we can hopefully pickup the target
@@ -779,7 +781,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressClearTarget();
             wait.Update();
         }
-
+        */
     }
 
     public bool CheckTargetsTargetingMe()
