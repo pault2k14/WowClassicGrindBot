@@ -34,6 +34,15 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
 
         this.lootEnabled = classConfig.Loot;
 
+        if (classConfig.Mode == Mode.AssistFocus)
+        {
+            AddPrecondition(GoapKey.partymembercombat, true);
+        }
+        else if (classConfig.Mode == Mode.PartyLeader)
+        {
+            AddPrecondition(GoapKey.partyleadercombat, true);
+        }
+
         if (classConfig.KeyboardOnly)
         {
             AddPrecondition(GoapKey.consumablecorpsenearby, true);

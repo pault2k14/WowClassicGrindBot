@@ -1,0 +1,169 @@
+{
+  "ClassName": "Warrior",
+  "Mode": "PartyLeader",
+  "Loot": true,
+  "Skin": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
+  "PathThereAndBack": false,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
+  "Blacklist": [
+    "Kolkar Wrangler",
+    "Kolkar Stormer",
+    "Kolkar Invader",
+    "Kolkar Stormseer"
+  ],
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Bloodrage",
+        "Key": "8",
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% > 50"
+        ]
+      }
+      /*
+      {
+        "Name": "Shoot",
+        "Key": "9",
+        "WhenUsable": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "AfterCastWaitMeleeRange": true,
+        "AfterCastDelay": 500,
+        "Requirements": [
+          "HasRangedWeapon && !Items Broken",
+          "!InMeleeRange",
+          "MaxRange < 25"
+        ]
+      },
+      */
+      /*
+      {
+        "Name": "Charge",
+        "Key": "3",
+        "WhenUsable": true,
+        "Requirements": [
+          "MaxRange < 11"
+        ],
+        "AfterCastWaitMeleeRange": true
+      }
+      */
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "StopAttack",
+        "BeforeCastDelay": 25,
+        "Requirements": [
+          "Battle Shout",
+          "AutoAttacking",
+          "TargetHealth% > 98",
+          "Rage >= Cost_Heroic Strike"
+        ],
+        "AfterCastDelay": 25
+      },
+      {
+        "Name": "Hamstring",
+        "Key": "7",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
+          "!Hamstring",
+          "TargetHealth% < 40"
+        ]
+      },
+      {
+        "Name": "Thunder Clap",
+        "Key": "6",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 5000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 20",
+          "!Thunder Clap && MobCount > 1"
+        ]
+      },
+      {
+        "Name": "Overpower",
+        "Key": "0",
+        "BeforeCastFaceTarget": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 5"
+        ]
+      },
+      {
+        "Name": "Heroic Strike",
+        "Key": "2",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 15",
+          "MainHandSwing > -400"
+        ],
+        "AfterCastWaitSwing": true
+      },
+      {
+        "Name": "Rend",
+        "Key": "5",
+        "BeforeCastFaceTarget": true,
+        "Cooldown":  10000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
+          "!Rend"
+        ]
+      },
+      {
+        "Name": "Bloodrage",
+        "Key": "8",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown":  30000,
+        "Requirements": [
+          "Health% > 50"
+        ]
+      },
+      {
+        "Name": "AutoAttack",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "!AutoAttacking"
+        ]
+      },
+      {
+        "Name": "Approach",
+        //"Requirements": [
+        //  "!InCloseMeleeRange"
+        //],
+        "Log": true
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Cost": 3.1,
+        "Name": "Battle Shout",
+        "Key": "4",
+        "InCombat": "i dont care",
+        "WhenUsable": true,
+        "Requirement": "!Battle Shout"
+      },
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health% < 40",
+        "Cost": 3
+      }
+    ]
+  }
+}

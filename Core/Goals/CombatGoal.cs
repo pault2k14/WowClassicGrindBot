@@ -55,28 +55,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.classConfig = classConfig;
         this.chatReader = chatReader;
 
-        if(classConfig.Mode == Mode.AssistFocus)
+        if (classConfig.Mode == Mode.AssistFocus)
         {
             AddPrecondition(GoapKey.partymembercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
-
-            /* 
-            AddPrecondition(GoapKey.hastarget, true);
-            AddPrecondition(GoapKey.targetisalive, true);
-            AddPrecondition(GoapKey.targethostile, true);
-            AddPrecondition(GoapKey.incombatrange, true);
-            */
         }
         else if(classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.partyleadercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
-            //AddPrecondition(GoapKey.incombat, true);
-            //AddPrecondition(GoapKey.hastarget, true);
-            //AddPrecondition(GoapKey.targetisalive, true);
-            //AddPrecondition(GoapKey.targethostile, true);
-            //AddPrecondition(GoapKey.incombatrange, true);
-
         }
         else
         {
@@ -485,6 +472,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
             {
+                foundValidCrowdControlAction = true;
                 continue;
             }
 
@@ -781,11 +769,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         wait.Till(CastingHandler.GCD * 2,
             () => bits.Target_Alive() || !bits.Combat());
 
-        // Added this so we can hopefully pickup the target
-        // later if it is in combat with us
-        logger.LogInformation("CHECK - Added clear target to exit of FindPossibleThreats");
-        input.PressClearTarget();
-        wait.Update();
+        if (classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader)
+        {
+            // Added this so we can hopefully pickup the target
+            // later if it is in combat with us
+            logger.LogInformation("CHECK - Added clear target to exit of FindPossibleThreats");
+            input.PressClearTarget();
+            wait.Update();
+        }
+
     }
 
     public bool CheckTargetsTargetingMe()
