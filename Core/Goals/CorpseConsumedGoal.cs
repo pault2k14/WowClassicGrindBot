@@ -36,11 +36,11 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
 
         if (classConfig.Mode == Mode.AssistFocus)
         {
-            AddPrecondition(GoapKey.partymembercombat, true);
+            AddPrecondition(GoapKey.partymembercombat, false);
         }
         else if (classConfig.Mode == Mode.PartyLeader)
         {
-            AddPrecondition(GoapKey.partyleadercombat, true);
+            AddPrecondition(GoapKey.partyleadercombat, false);
         }
 
         if (classConfig.KeyboardOnly)

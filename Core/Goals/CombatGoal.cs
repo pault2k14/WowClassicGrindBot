@@ -571,6 +571,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         logger.LogInformation("castOnTargetThisUpdate: " + castOnTargetThisUpdate);
         logger.LogInformation("targetGuidChanged: " + targetGuidChanged);
 
+        /* DISABLE THIS FOR NOW TO SEE IF IT IS REALLY NEEDED
         if(bits.TargetTarget_PlayerOrPet() && !castOnTargetThisUpdate && !targetGuidChanged
             && playerReader.TargetGuid == playerReader.FocusTargetGuid)
         {
@@ -581,6 +582,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressInteract();
             wait.Update();
         }
+        */
 
         if (crowdControlAction && successfulCast)
         {
