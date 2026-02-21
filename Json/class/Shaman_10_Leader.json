@@ -123,6 +123,13 @@
           "InMeleeRange",
           "!Casting"
         ]
+      },
+      {
+        "Name": "Approach",
+        "Requirements": [
+          "!Casting",
+          "AutoAttacking"
+        ]
       }
       /*
       {
