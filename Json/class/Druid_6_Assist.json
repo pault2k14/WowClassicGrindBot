@@ -1,0 +1,124 @@
+{
+  "ClassName": "Druid",
+  "Mode": "AssistFocus",
+  "Loot": false,
+  "UnitToFollow": "party1",
+  "PathFilename": "_pack\\1-20\\Night elf\\05-08_Teldrassil_Lake Al Ameth - Elementals.json",
+  "PathReduceSteps": true,
+  "AssistPull": false,
+  "AssistApproach": false,
+  "PartyMember1": {
+    "Sequence": [
+      {
+        "Name": "Mark of the Wild",
+        "Key": "6",
+        "Requirements": [
+          "!P1_Mark of the Wild",
+          "Mana > 50",
+          "TargetAlive"
+        ]
+      },
+      {
+        "Name": "Thorns",
+        "Key": "7",
+        "Requirements": [
+          "!P1_Thorns",
+          "Mana > 35",
+          "TargetAlive"
+        ]
+      },
+      {
+        "Name": "Healing Touch",
+        "Key": "5",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "PartyMember1Health% < 50",
+          "Mana > 55",
+          "TargetAlive"
+        ]
+      },
+      {
+        "Name": "Rejuvenation",
+        "Key": "4",
+        "WhenUsable": true,
+        "Requirements": [
+          "PartyMember1Health% < 60",
+          "!P1_Rejuvenation",
+          "TargetAlive"
+        ]
+      }
+    ]
+  },
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Wrath",
+        "Key": "2",
+        "HasCastBar": true
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "Healing Touch",
+        "Key": "5",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% < 40"
+        ]
+      },
+      {
+        "Name": "Rejuvenation",
+        "Key": "4",
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% < 55",
+          "!Rejuvenation"
+        ]
+      },
+      {
+        "Name": "Moonfire",
+        "Key": "3",
+        "Requirements": [
+          "!Moonfire",
+          "TargetHealth% > 25"
+        ]
+      },
+      {
+        "Name": "Wrath",
+        "Key": "2",
+        "HasCastBar": true,
+        "Requirement": "TargetHealth% > 50"
+      },
+      {
+        "Name": "AutoAttack",
+        "Requirements": [
+          "InMeleeRange",
+          "!Casting"
+        ]
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Mark of the Wild",
+        "Key": "6",
+        "Requirement": "!Mark of the Wild"
+      },
+      {
+        "Name": "Thorns",
+        "Key": "7",
+        "Requirement": "!Thorns"
+      },
+      {
+        "Name": "Drink",
+        "Key": "-",
+        "Requirement": "Mana% < 30"
+      }
+    ]
+  }
+}

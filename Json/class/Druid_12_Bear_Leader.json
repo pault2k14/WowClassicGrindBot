@@ -1,0 +1,155 @@
+{
+  "ClassName": "Druid",
+  "Mode": "PartyLeader",
+  "Loot": true,
+  "Skin": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
+  "PathThereAndBack": true,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
+  "Form": {
+    "Sequence": [
+      {
+        //macro: /cancelform
+        "Name": "cancelform",
+        "Key": "7",
+        "Form": "None"
+      },
+      {
+        "Name": "Bear Form",
+        "Key": "8",
+        "Form": "Druid_Bear"
+      }
+    ]
+  },
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Moonfire",
+        "Key": "5",
+        "BeforeCastStop": true,
+        "AfterCastWaitBuff": true,
+        "AfterCastWaitGCD": true,
+        "Requirements": [
+          "!Moonfire",
+          "AddVisible",
+          "SpellInRange:0",
+          "MinRange > 10"
+        ],
+        "Form": "None"
+      },
+      {
+        "Name": "Bear Form",
+        "Key": "8",
+        "AfterCastWaitMeleeRange": true,
+        "Requirements": [
+          "Moonfire",
+          "!Form:Druid_Bear"
+        ]
+      },
+      {
+        "Name": "Bear Form",
+        "Key": "8",
+        "Requirements": [
+          "!Form:Druid_Bear"
+        ]
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "Healing Touch",
+        "Key": "3",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirement": "Health% < 30",
+        "Form": "None"
+      },
+      {
+        "Name": "Enrage",
+        "Key": "4",
+        "WhenUsable": true,
+        "Requirement": "TargetHealth% > 40",
+        "Form": "Druid_Bear"
+      },
+      {
+        "Name": "Demoralizing Roar",
+        "Key": "3",
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "!Demoralizing Roar",
+          "Form:Druid_Bear"
+        ],
+        "Form": "Druid_Bear"
+      },
+      {
+        "Name": "Maul",
+        "Key": "2",
+        "Requirements": [
+          "InMeleeRange",
+          "LastMainHandMs > 2100",
+          "Form:Druid_Bear"
+        ], // bear swing speed fixed at 2.5
+        "AfterCastWaitSwing": true,
+        "Form": "Druid_Bear"
+      },
+      {
+        "Name": "Growl",
+        "Key": "5",
+        "Cooldown": 10000,
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Form:Druid_Bear"
+        ],
+        "Form": "Druid_Bear"
+      },
+      {
+        "Name": "AutoAttack",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "!AutoAttacking"
+        ]
+      },
+      {
+        "Name": "Approach",
+        "Log": true
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Healing Touch",
+        "Key": "3",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirement": "Health% < 60",
+        "Form": "None"
+      },
+      {
+        "Name": "Mark of the Wild",
+        "Key": "4",
+        "Requirement": "!Mark of the Wild",
+        "Form": "None"
+      },
+      {
+        "Name": "Thorns",
+        "Key": "2",
+        "Requirement": "!Thorns",
+        "Form": "None"
+      },
+      {
+        "Name": "Drink",
+        "Key": "F11",
+        "Requirement": "Mana% < 40",
+        "Form": "None"
+      }
+    ]
+  }
+}
