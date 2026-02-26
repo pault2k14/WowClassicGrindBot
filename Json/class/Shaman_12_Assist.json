@@ -1,0 +1,193 @@
+{
+  "ClassName": "Shaman",
+  "Mode": "AssistFocus",
+  "Loot": false,
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
+  "PathThereAndBack": false,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
+  "AssistPull": false,
+  "Blacklist": [
+
+  ],
+  "IntVariables": {
+    "Item_Earth_Totem": 5175
+  },
+  "PartyMember1": {
+    "Sequence": [
+      {
+        "Name": "Healing Wave",
+        "Key": "4",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "PartyMember1Health% < 65",
+          "Mana > 80",
+          "TargetAlive"
+        ]
+      }
+    ]
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirement": "Health% < 20"
+      },
+      {
+        "Name": "Healing Wave",
+        "Key": "4",
+        "ChangeTargetTo": "party1",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "TargetHealth% < 60",
+          "Mana > 80"
+        ],
+        "Cooldown": 3000
+      },
+      {
+        "Name": "Healing Wave",
+        "Key": "4",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% < 60",
+          "Mana > 80"
+        ],
+        "Cooldown": 3000
+      },
+      {
+        "Name": "Lightning Bolt",
+        "Key": "2",
+        "HasCastBar": true,
+        "Requirements": [
+          //"!InMeleeRange",
+          "MaxRange < 27",
+          "MinRange > 6",
+          "Mana > 30"
+        ]
+      },
+      {
+        "Name": "Close Lightning Bolt",
+        "Key": "2",
+        "HasCastBar": true,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          //"!InMeleeRange",
+          "MaxRange < 6",
+          "Mana > 30"
+        ]
+      },
+      {
+        "Name": "Flame Shock",
+        "Key": "3",
+        "WhenUsable": true,
+        "Cooldown": 6000,
+        "Requirements": [
+          "MaxRange > 20",
+          "Mana% > 15",
+          "TargetHealth% > 20"
+        ]
+      },
+      {
+        "Name": "Earth Shock",
+        "Key": "8",
+        "WhenUsable": true,
+        "Cooldown": 6000,
+        "Requirements": [
+          "MaxRange > 20",
+          "Mana% > 15",
+          "TargetCastingSpell",
+          "TargetHealth% > 20"
+        ]
+      },
+      {
+        "Name": "Stoneskin Totem",
+        "Key": "5",
+        "WhenUsable": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "InMeleeRange",
+          "TargetHealth% > 50",
+          "Mana% > 55",
+          "BagItem:Item_Earth_Totem",
+          "!Stoneskin"
+        ]
+      },
+      {
+        "Name": "AutoAttack",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          //"InMeleeRange",
+          "!Casting",
+          //"!AutoAttacking"
+        ]
+      }
+/*,
+      {
+        "Name": "Approach",
+        "Requirements": [
+          //"!InMeleeRange",
+          "!Casting",
+          "!AutoAttacking"
+        ],
+        "Log": true
+      }
+      */
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Healing Wave",
+        "Key": "4",
+        "HasCastBar": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% < 50",
+          "Mana% >  35",
+          "!Food",
+          "!Drink"
+        ],
+        "Cooldown": 5000
+      },
+      {
+        "Name": "Rockbiter Weapon",
+        "Key": "7",
+        "Requirements": [
+          "!HasMainHandEnchant",
+          "!Food",
+          "!Drink"
+        ],
+        "AfterCastAuraExpected": true
+      },
+      {
+        "Name": "Lightning Shield",
+        "Key": "6",
+        "Cooldown": 10000,
+        "Requirements": [
+          "!Lightning Shield",
+          "Mana% > 50",
+          "!Food",
+          "!Drink"
+        ]
+      }
+    ]
+  },
+  "Parallel": {
+    "Sequence": [
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health%<30"
+      },
+      {
+        "Name": "Drink",
+        "Key": "F11",
+        "Requirement": "Mana%<30"
+      }
+    ]
+  }
+}
