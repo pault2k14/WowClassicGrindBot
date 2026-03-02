@@ -40,7 +40,7 @@ public sealed partial class Navigation : IDisposable
     private readonly DataConfig dataConfig;
 
     private const float MinDistanceMount = 10;
-    private readonly float MaxDistance = 200;
+    private float MaxDistance = 200;
     private readonly float IndoorMinDistance = 1f;
     private readonly float OutDoorMinDistance = 3f;
 
@@ -133,6 +133,38 @@ public sealed partial class Navigation : IDisposable
     public bool HasLastSafeAnchor => lastSafeAnchorW != default;
     public Vector3 LastSafeAnchorW => lastSafeAnchorW;
 
+    // Backoff to prevent request spam on repeated blacklist rejections
+    private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
+    private DateTime noPathCooldownUntilUtc = DateTime.MinValue;
+    private Vector3 lastRejectStartW;
+    private Vector3 lastRejectEndW;
+    private int sameRejectCount;
+    private const int MaxSameRejectBeforeFallback = 4;
+
+    private long _navDebugNextTick;
+    private const int NavDebugEveryMs = 250;
+
+    private float _dbgBestWpDist = float.MaxValue;
+    private DateTime _dbgWpSinceUtc = DateTime.MinValue;
+    private Vector3 _dbgWpTarget;
+
+    private long waitingRequestId;
+
+    // Movement can stop at STOP_DIST, but we only advance (pop) at POP_DIST.
+    // IMPORTANT: POP_DIST MUST BE >= STOP_DIST to avoid deadlocks.
+    private const float STOP_DIST = 3.0f;              // when we stop applying movement input
+    private const float POP_DIST = 3.6f;              // when we pop route node / waypoint (>= STOP_DIST)
+    private const float STOP_DIST_SQ = STOP_DIST * STOP_DIST;
+    private const float POP_DIST_SQ = POP_DIST * POP_DIST;
+
+    // Chase-progress watchdog with movement hysteresis
+    private Vector3 _chaseProgTarget;
+    private float _chaseProgBestDist = float.MaxValue;
+    private DateTime _chaseProgSinceUtc = DateTime.MinValue;
+
+    private Vector3 _chaseLastPos;
+    private DateTime _chaseLastMovedUtc = DateTime.MinValue;
+
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
         PlayerDirection playerDirection,
@@ -195,6 +227,128 @@ public sealed partial class Navigation : IDisposable
         }
     }
 
+    private static Vector3 Nav2D(Vector3 w) => new Vector3(w.X, w.Y, 0f);
+
+    // (Optional but recommended) If you use 2D distances for nav, keep it consistent:
+    private static float DistSq2D(in Vector3 a, in Vector3 b)
+    {
+        float dx = a.X - b.X;
+        float dy = a.Y - b.Y;
+        return dx * dx + dy * dy;
+    }
+
+    // Helper: pop route node if close enough. Returns true if it popped.
+    private bool TryPopRouteTopIfReached(in Vector3 playerPos)
+    {
+        if (routeToNextWaypoint == null || routeToNextWaypoint.Count == 0)
+            return false;
+
+        var routeTop = Nav2D(routeToNextWaypoint.Peek());
+
+        // Use 2D distance consistently
+        float d = playerPos.WorldDistanceXYTo(routeTop);
+
+        // IMPORTANT:
+        // If this is the FINAL route node (very common in "direct" routing),
+        // do NOT pop using POP_DIST (3.6), because that can be > waypoint reach threshold
+        // (e.g., 3.35). That creates a refill loop where route pops but waypoint never pops.
+        float popDist = POP_DIST;
+
+        if (routeToNextWaypoint.Count == 1 && wayPoints.Count > 0)
+        {
+            // Keep this aligned with waypoint reach logic
+            float wpReach = ReachedDistance(OutDoorMinDistance) + 0.35f;
+
+            // Ensure popDist is not larger than what we consider "waypoint reached"
+            // (Add a tiny epsilon to avoid float jitter at the boundary)
+            popDist = wpReach + 0.05f;
+
+            // Still guarantee POP_DIST >= STOP_DIST behavior
+            if (popDist < STOP_DIST)
+                popDist = STOP_DIST;
+        }
+
+        if (d <= popDist)
+        {
+            routeToNextWaypoint.Pop();
+            return true;
+        }
+
+        return false;
+    }
+
+    // Helper: pop waypoint if close enough. Returns true if it popped.
+    private bool TryPopWaypointTopIfReached(in Vector3 playerPos)
+    {
+        if (wayPoints == null || wayPoints.Count == 0)
+            return false;
+
+        var wpTop = Nav2D(wayPoints.Peek());
+
+        float dSq = DistSq2D(playerPos, wpTop);
+        if (dSq <= POP_DIST_SQ)
+        {
+            wayPoints.Pop();
+
+            // If you have a progress watchdog, reset it here:
+            // ResetNoProgressWatchdog();
+
+            return true;
+        }
+        return false;
+    }
+
+    // Helper: should we apply movement input toward target?
+    private static bool ShouldMoveToward(in Vector3 playerPos, in Vector3 targetPos)
+    {
+        float dSq = DistSq2D(playerPos, targetPos);
+        return dSq > STOP_DIST_SQ;
+    }
+
+
+    private bool NavDebugDue()
+    {
+        long now = Environment.TickCount64;
+        if (now < _navDebugNextTick) return false;
+        _navDebugNextTick = now + NavDebugEveryMs;
+        return true;
+    }
+
+    private void NavDbg(string msg)
+    {
+        // Gate this however you want (navDebugDue, debug flag, etc.)
+        if(NavDebugDue())
+        {
+            logger.LogWarning("[NAV-DBG] " + msg);
+        }
+        
+    }
+
+    private bool RouteTargetsWaypointTop(float eps = 1.5f)
+    {
+        if (routeToNextWaypoint.Count == 0 || wayPoints.Count == 0)
+            return true;
+
+        Vector3 wpTop = wayPoints.Peek();
+
+        // Stack.ToArray() returns top-first. Bottom (final route destination) is last.
+        var arr = routeToNextWaypoint.ToArray();
+        Vector3 routeEnd = arr[arr.Length - 1];
+
+        return routeEnd.WorldDistanceXYTo(wpTop) <= eps;
+    }
+
+    private static float MinDistToAny(Vector3 p, IEnumerable<Vector3> pts)
+    {
+        float best = float.MaxValue;
+        foreach (var v in pts)
+        {
+            float d = p.WorldDistanceXYTo(v);
+            if (d < best) best = d;
+        }
+        return best == float.MaxValue ? -1 : best;
+    }
+
     public void Dispose()
     {
         stuckDetector.Release(StuckOwnerId);
@@ -208,7 +362,10 @@ public sealed partial class Navigation : IDisposable
 
     public void Update(CancellationToken token)
     {
-        logger.LogInformation($"[NAV-SANITY] Update entered navHash={GetHashCode()} tokenCancelled={token.IsCancellationRequested}");
+        if(NavDebugDue())
+        {
+            logger.LogInformation($"[NAV-SANITY] Update entered navHash={GetHashCode()} tokenCancelled={token.IsCancellationRequested}");
+        }
 
         if (!active)
         {
@@ -217,6 +374,14 @@ public sealed partial class Navigation : IDisposable
             // We simply don't drive movement/stuck while inactive.
             return;
         }
+
+        NavDbg($"STATE enter active={active} " +
+       $"wp={wayPoints.Count} route={routeToNextWaypoint.Count} " +
+       $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
+       $"waitingReq={Volatile.Read(ref waitingRequestId)} activeReq={Volatile.Read(ref activePathRequestId)} " +
+       $"noPathCd={(noPathCooldownUntilUtc - DateTime.UtcNow).TotalMilliseconds:0}ms " +
+       $"blCd={(blacklistRejectCooldownUntilUtc - DateTime.UtcNow).TotalMilliseconds:0}ms " +
+       $"npCd={(noProgressRefillCooldownUntilUtc - DateTime.UtcNow).TotalMilliseconds:0}ms");
 
         // Apply per-route area blacklists (map rects -> world rects)
         if (AreaBlacklist == null && pathSettings.MapBlacklistRects is { Length: > 0 })
@@ -244,7 +409,7 @@ public sealed partial class Navigation : IDisposable
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
             logger.LogInformation(
-                $"[NAV-SANITY] EXIT noWork inside={AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true}");
+                $"[NAV-SANITY] EXIT noWork inside={AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true}");
 
             // IMPORTANT: don't leave "W" held down from previous tick
             stopMoving.Stop();
@@ -254,6 +419,7 @@ public sealed partial class Navigation : IDisposable
             ResetStuckParameters();
 
             OnDestinationReached?.Invoke();
+            NavDbg("RETURN noWork (wp=0 route=0) -> OnDestinationReached");
             return;
         }
 
@@ -266,6 +432,7 @@ public sealed partial class Navigation : IDisposable
             ResetStuckParameters();
 
             OnDestinationReached?.Invoke();
+            NavDbg("RETURN afterSkipBlacklistedWaypoints noWork (wp=0 route=0)");
             return;
         }
 
@@ -280,12 +447,57 @@ public sealed partial class Navigation : IDisposable
             logger.LogWarning("[NAV] Path wait timeout; resetting pending/waiting gates.");
             waitingForPathResult = false;
             Interlocked.Exchange(ref pathRequestPending, 0);
+
+            // Important: also clear the "who are we waiting for" id.
+            Volatile.Write(ref waitingRequestId, 0);
+
+            // Optional (recommended): do NOT clear activePathRequestId here.
+            // Let the next enqueue overwrite it; clearing it here makes stale handling harder.
         }
 
-        logger.LogInformation(
-            $"[NAV-SANITY] afterResults route={routeToNextWaypoint.Count} waypoints={wayPoints.Count} " +
-            $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
-            $"reqQ={pathRequests.Count} resQ={pathResults.Count} threadTokenCancelled={token.IsCancellationRequested}");
+        if (NavDebugDue() && routeToNextWaypoint.Count > 0 && wayPoints.Count > 0)
+        {
+            var end = routeToNextWaypoint.ToArray()[^1];
+            logger.LogWarning($"[NAV-DBG] routeTop={routeToNextWaypoint.Peek()} routeEnd={end} wpTop={wayPoints.Peek()} endToWp={end.WorldDistanceXYTo(wayPoints.Peek()):0.00}");
+        }
+
+        // If we have a route but it's not actually routing to the current waypoint top,
+        // it's stale. Clear it and force a refill.
+        if (routeToNextWaypoint.Count > 0 && wayPoints.Count > 0)
+        {
+            bool insideBlacklist = AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true;
+
+            if (!insideBlacklist && !escapeActive)
+            {
+                // Don't stomp a route while we're actively waiting for a newer one.
+                if (!waitingForPathResult && Volatile.Read(ref pathRequestPending) == 0)
+                {
+                    if (!RouteTargetsWaypointTop())
+                    {
+                        var arr = routeToNextWaypoint.ToArray();
+                        var routeEnd = arr[arr.Length - 1];
+
+                        logger.LogWarning(
+                            $"[NAV] Stale route detected; clearing. " +
+                            $"routeTop={routeToNextWaypoint.Peek()} routeEnd={routeEnd} wpTop={wayPoints.Peek()}");
+
+                        routeToNextWaypoint.Clear();
+                        UpdateTotalRoute();
+                        ResetNoProgressWatchdog();
+                    }
+                }
+            }
+        }
+
+        if (NavDebugDue())
+        {
+            logger.LogInformation(
+                $"[NAV-SANITY] afterResults route={routeToNextWaypoint.Count} waypoints={wayPoints.Count} " +
+                $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
+                $"reqQ={pathRequests.Count} resQ={pathResults.Count} threadTokenCancelled={token.IsCancellationRequested}");
+        }
+
+
         int pending = Volatile.Read(ref pathRequestPending);
 
         // If pending is set, but we're not waiting and there is nothing queued,
@@ -297,7 +509,6 @@ public sealed partial class Navigation : IDisposable
         {
             logger.LogWarning("[NAV] pathRequestPending=1 but no queued/in-flight work. Clearing pending gate.");
             Interlocked.Exchange(ref pathRequestPending, 0);
-            Volatile.Write(ref activePathRequestId, 0);
         }
 
 
@@ -314,30 +525,40 @@ public sealed partial class Navigation : IDisposable
         // If we have a route already, KEEP MOVING even if a request is in flight.
         if (routeToNextWaypoint.Count > 0)
         {
-            // continue to movement section (do NOT return)
+            // continue to movement section
         }
         else
         {
             if (waitingForPathResult)
+            {
+                NavDbg("RETURN routeEmpty: waitingForPathResult=TRUE");
                 return;
+            }
 
             if (DateTime.UtcNow < noProgressRefillCooldownUntilUtc)
+            {
+                NavDbg($"RETURN routeEmpty: noProgressRefillCooldown active {(noProgressRefillCooldownUntilUtc - DateTime.UtcNow).TotalMilliseconds:0}ms");
                 return;
+            }
 
+            NavDbg("routeEmpty: calling RefillRouteToNextWaypoint()");
             RefillRouteToNextWaypoint(token);
+
+            NavDbg($"RETURN afterRefill: wp={wayPoints.Count} route={routeToNextWaypoint.Count} waiting={waitingForPathResult}");
             return;
         }
 
-        LastActive = DateTime.UtcNow;
-        input.StartForward(true);
+        // Comment this out due to having start forward later for heading/stuck logic
+        //LastActive = DateTime.UtcNow;
+        //input.StartForward(true);
 
         // main loop
-        Vector3 playerW = playerReader.WorldPos;
+        Vector3 playerW = Nav2D(playerReader.WorldPos);
         playerWorldPos = playerW;
 
         // If inside blacklist, do not progress along route points that are also blacklisted.
         // We want to escape first.
-        if (AreaBlacklist != null && AreaBlacklist.TryGetContainingRect(playerReader.WorldPos, out _))
+        if (AreaBlacklist != null && AreaBlacklist.TryGetContainingRect(Nav2D(playerReader.WorldPos), out _))
         {
             // If current next-step is inside blacklist, clear route so refill chooses escape.
             if (routeToNextWaypoint.Count > 0 && IsBlacklistedPoint(routeToNextWaypoint.Peek()))
@@ -348,7 +569,23 @@ public sealed partial class Navigation : IDisposable
             }
         }
 
-        Vector3 targetW = routeToNextWaypoint.Peek();
+        Vector3 targetW = Nav2D(routeToNextWaypoint.Peek());
+        if (routeToNextWaypoint.Count > 0 && Math.Abs(routeToNextWaypoint.Peek().Z) > 0.001f)
+            logger.LogWarning($"[NAV] Z LEAK routeTop={routeToNextWaypoint.Peek()}");
+
+        NavDbg($"MOVE target(routeTop)={targetW} player={playerReader.WorldPos} d={playerReader.WorldPos.WorldDistanceXYTo(targetW):0.00}");
+
+        if (NavDebugDue())
+        {
+            Vector3 wpTop = wayPoints.Count > 0 ? wayPoints.Peek() : default;
+            float distToWp = wayPoints.Count > 0 ? playerW.WorldDistanceXYTo(wpTop) : -1;
+            float distToRoute = playerW.WorldDistanceXYTo(targetW);
+            float dAnyWp = MinDistToAny(playerW, wayPoints);
+
+            logger.LogWarning(
+                $"[NAV-DBG]  dAnyWp={dAnyWp:0.00} player={playerW} routeTop={targetW} dRoute={distToRoute:0.00} " +
+                $"wpTop={wpTop} dWp={distToWp:0.00} routeCount={routeToNextWaypoint.Count} wpCount={wayPoints.Count}");
+        }
 
         if (noProgressSinceUtc != DateTime.MinValue && noProgressTargetW.WorldDistanceXYTo(targetW) > 0.05f)
         {
@@ -365,17 +602,22 @@ public sealed partial class Navigation : IDisposable
 
 
         float worldDistance = playerW.WorldDistanceXYTo(targetW);
-        logger.LogInformation($"[NAV] chase target={targetW} dist={worldDistance:0.00} routeCount={routeToNextWaypoint.Count} wpCount={wayPoints.Count}");
+        
+        if(NavDebugDue())
+        {
+            logger.LogInformation($"[NAV] chase player={playerW} target={targetW} dist={worldDistance:0.00} routeCount={routeToNextWaypoint.Count} wpCount={wayPoints.Count}");
+        }
+
 
         // ---- ESCAPE FALLBACK WATCHDOG
         if (escapeActive && routeToNextWaypoint.Count > 0)
         {
             // Stop escape mode once we are outside
-            if (AreaBlacklist?.ContainsWorld(playerReader.WorldPos) != true)
+            if (AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) != true)
             {
                 // Still treat as escaping if we are near the boundary
                 float edgeBuffer = DetourMargin + 6f; // tune: 6–15
-                if (!IsNearBlacklistEdge(playerReader.WorldPos, edgeBuffer))
+                if (!IsNearBlacklistEdge(Nav2D(playerReader.WorldPos), edgeBuffer))
                 {
                     escapeActive = false;
                 }
@@ -399,8 +641,8 @@ public sealed partial class Navigation : IDisposable
                     stopMoving.Stop();
                     EnqueuePathRequest(
                         playerReader.UIMapId.Value,
-                        playerReader.WorldPos,
-                        escapeTargetW,
+                        Nav2D(playerReader.WorldPos),
+                        Nav2D(escapeTargetW),
                         d
                     );
 
@@ -409,33 +651,122 @@ public sealed partial class Navigation : IDisposable
             }
         }
 
+        // -------------------- NAV HYSTERESIS UPDATE GATE START --------------------
+        var playerPos = playerW;
+
+        // 1) Always try to pop route nodes first. This prevents “stuck near routeTop”.
+        if (TryPopRouteTopIfReached(playerPos))
+        {
+            stopMoving.Stop();
+            input.StopForward(true);
+
+            UpdateTotalRoute();
+            ResetNoProgressWatchdog();
+
+            // Retarget stuck detector to the new route top (or reset if none)
+            if (routeToNextWaypoint.Count > 0)
+                stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(routeToNextWaypoint.Peek()));
+            else
+                stuckDetector.Reset(StuckOwnerId);
+
+            return;
+        }
+
+        if (routeToNextWaypoint.Count == 0)
+        {
+            if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
+            {
+                // Normalize Z=0 on the current waypoint so reach checks don't get stuck.
+                Vector3 wpTopRaw = wayPoints.Peek();
+                Vector3 wpTop = Nav2D(wpTopRaw);
+
+                // If your TryPopWaypointTopIfReached() uses distance internally,
+                // it may still be using 3D distance. So do a direct XY check here.
+                float dWpXY = playerPos.WorldDistanceXYTo(wpTop);
+
+                // Use your waypoint hysteresis / reach radius (tune as needed).
+                float wpReach = ReachedDistance(OutDoorMinDistance) + 0.35f;
+
+                if (dWpXY <= wpReach)
+                {
+                    var completed = Nav2D(wayPoints.Pop());
+                    logger.LogWarning($"[NAV] POP WAYPOINT (XY reached) completed={completed} newWpTop={(wayPoints.Count > 0 ? wayPoints.Peek().ToString() : "<none>")} dWpXY={dWpXY:0.00}");
+
+                    stopMoving.Stop();
+                    input.StopForward(true);
+
+                    routeToNextWaypoint.Clear();
+                    UpdateTotalRoute();
+                    ResetNoProgressWatchdog();
+
+                    OnWayPointReached?.Invoke();
+                    return;
+                }
+            }
+        }
+        // -------------------- NAV HYSTERESIS UPDATE GATE END --------------------
+
         // If we're not getting closer for a short period, force a route refresh.
         // Helps when route has 1 point but movement is "stalled" or jittering.
         if (routeToNextWaypoint.Count > 0)
         {
-            if (worldDistance + 0.05f < noProgressBestDist) // made progress
+            // ------------------- CHASE PROGRESS WATCHDOG (MOVEMENT-AWARE) -------------------
+            var now = DateTime.UtcNow;
+            Vector3 chaseW = targetW;
+            float dChase = playerW.WorldDistanceXYTo(chaseW);
+
+            // Reset if chase target changes
+            if (_chaseProgSinceUtc == DateTime.MinValue || _chaseProgTarget.WorldDistanceXYTo(chaseW) > 0.05f)
             {
-                noProgressBestDist = worldDistance;
-                noProgressSinceUtc = DateTime.UtcNow;
+                _chaseProgTarget = chaseW;
+                _chaseProgBestDist = dChase;
+                _chaseProgSinceUtc = now;
+
+                _chaseLastPos = playerW;
+                _chaseLastMovedUtc = now;
             }
             else
             {
-                if (noProgressSinceUtc == DateTime.MinValue)
-                    noProgressSinceUtc = DateTime.UtcNow;
-
-                if ((DateTime.UtcNow - noProgressSinceUtc).TotalSeconds > 1.0)
+                // Track whether we are physically moving (even if dChase temporarily increases)
+                float moved = playerW.WorldDistanceXYTo(_chaseLastPos);
+                if (moved > 0.75f) // tune: 0.5–1.5
                 {
-                    logger.LogWarning($"[NAV] No progress for 1s. Clearing route and refilling. dist={worldDistance} best={noProgressBestDist}");
+                    _chaseLastPos = playerW;
+                    _chaseLastMovedUtc = now;
+                }
+
+                // Track best distance-to-chase (with a little slack)
+                if (dChase + 0.10f < _chaseProgBestDist)
+                {
+                    _chaseProgBestDist = dChase;
+                    _chaseProgSinceUtc = now;
+                }
+
+                double sinceBestSec = (now - _chaseProgSinceUtc).TotalSeconds;
+                double sinceMoveSec = (now - _chaseLastMovedUtc).TotalSeconds;
+
+                // Only declare "stuck" if:
+                // 1) we haven't improved for a while AND
+                // 2) we also haven't actually moved recently.
+                //
+                // This prevents downhill / switchback / turning cases from causing replans.
+                if (sinceBestSec > 4.0 && sinceMoveSec > 1.5 &&
+                    !waitingForPathResult && Volatile.Read(ref pathRequestPending) == 0 &&
+                    now >= noProgressRefillCooldownUntilUtc)
+                {
+                    logger.LogWarning(
+                        $"[NAV] No chase progress while stationary; forcing refill. " +
+                        $"player={playerW} chase={chaseW} dChase={dChase:0.00} best={_chaseProgBestDist:0.00} " +
+                        $"sinceBest={sinceBestSec:0.00}s sinceMove={sinceMoveSec:0.00}s");
+
+                    // cooldown so we don't thrash-replan every tick
+                    noProgressRefillCooldownUntilUtc = now.AddMilliseconds(1500);
+
+                    stopMoving.Stop();
                     routeToNextWaypoint.Clear();
-                    noProgressBestDist = float.MaxValue;
-                    noProgressSinceUtc = DateTime.MinValue;
-
-                    // set cooldown so the next few frames don’t thrash
-                    noProgressRefillCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
-
-                    // DO the refill now (one shot)
-                    RefillRouteToNextWaypoint(token);
-                    return;
+                    UpdateTotalRoute();
+                    ResetNoProgressWatchdog(); // if you still have this helper
+                    return; // next Update will refill
                 }
             }
         }
@@ -444,64 +775,25 @@ public sealed partial class Navigation : IDisposable
         Vector3 targetM = WorldMapAreaDB.ToMap_FlipXY(targetW, playerReader.WorldMapArea);
         float heading = DirectionCalculator.CalculateMapHeading(playerM, targetM);
 
+        // NOTE: Reached/popping is handled by the hysteresis gate above.
+        // Keep this block ONLY for Z-sync / route simplification if you still want it.
         if (ShouldTreatAsReached(playerW, targetW, OutDoorMinDistance))
         {
-            if (targetW.Z != 0 && targetW.Z != playerW.Z)
-            {
-                playerReader.WorldPosZ = targetW.Z;
-            }
+            // IMPORTANT: do NOT force player Z to match the route node.
+            // On slopes / stairs this causes oscillation when route nodes have different Z.
+            //if (targetW.Z != 0 && targetW.Z != playerW.Z)
+            //{
+            //    playerReader.WorldPosZ = targetW.Z;
+            //}
 
             if (SimplifyRouteToWaypoint)
-                ReduceByDistance(playerW, OutDoorMinDistance);
-            else
             {
-                var popped = routeToNextWaypoint.Pop();
-
-                // Record this as a stable anchor: we reached it.
-                SetLastSafeAnchor(popped);
-
-                logger.LogInformation(
-                    $"[NAV] POP reached {popped} newTop={(routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek().ToString() : "<none>")}"
-                );
+                // Disable so we can test navigation hysteresis
+                //ReduceByDistance(playerW, OutDoorMinDistance);
+                UpdateTotalRoute();
             }
 
-
-            OnAnyPointReached?.Invoke();
-
-            lastWorldDistance = float.MaxValue;
-            UpdateTotalRoute();
-
-            if (routeToNextWaypoint.Count == 0)
-            {
-                if (wayPoints.Count > 0)
-                {
-                    // The waypoint we’re finishing is the current top
-                    var completedWp = wayPoints.Peek();
-                    wayPoints.Pop();
-
-                    SetLastSafeAnchor(completedWp);
-
-                    UpdateTotalRoute();
-
-                    if (debug)
-                        LogDebug($"Reached wayPoint! Distance: {worldDistance} -- Remains: {wayPoints.Count}");
-
-                    OnWayPointReached?.Invoke();
-                }
-            }
-            else
-            {
-                targetW = routeToNextWaypoint.Peek();
-                stuckDetector.SetTargetLocation(StuckOwnerId, targetW);
-
-                playerM = WorldMapAreaDB.ToMap_FlipXY(playerW, playerReader.WorldMapArea);
-                targetM = WorldMapAreaDB.ToMap_FlipXY(targetW, playerReader.WorldMapArea);
-                heading = DirectionCalculator.CalculateMapHeading(playerM, targetM);
-
-                AdjustHeading(heading, token);
-
-                return;
-            }
+            // Do NOT pop here anymore.
         }
 
         if (routeToNextWaypoint.Count == 0)
@@ -513,12 +805,23 @@ public sealed partial class Navigation : IDisposable
             return;
         }
 
+        // If we're inside STOP_DIST of the chase, stop driving forward and let the pop gate advance next tick.
+        if (!ShouldMoveToward(playerW, targetW))
+        {
+            stopMoving.Stop();
+            input.StopForward(true);
+            return;
+        }
+
         // once we get here, always drive movement this tick
         LastActive = DateTime.UtcNow;
         input.StartForward(true);
 
         if (routeToNextWaypoint.Count > 0)
         {
+            // CRITICAL: always sync stuck detector to the current chase target
+            stuckDetector.SetTargetLocation(StuckOwnerId, targetW);
+
             if (stuckDetector.IsGettingCloser(StuckOwnerId))
             {
                 AdjustHeading(heading, token);
@@ -538,8 +841,8 @@ public sealed partial class Navigation : IDisposable
 
                 if (HasBeenActiveRecently())
                 {
-                    stuckDetector.Update(StuckOwnerId,token);
-                    worldDistance = playerW.WorldDistanceXYTo(routeToNextWaypoint.Peek());
+                    stuckDetector.Update(StuckOwnerId, token);
+                    worldDistance = playerW.WorldDistanceXYTo(targetW);
                 }
             }
         }
@@ -550,6 +853,7 @@ public sealed partial class Navigation : IDisposable
     public void Resume()
     {
         active = true;
+        SetLastSafeAnchor(playerReader.WorldPos);
         stuckDetector.Acquire(StuckOwnerId);
         ResetStuckParameters();
 
@@ -603,6 +907,12 @@ public sealed partial class Navigation : IDisposable
         // Don’t stomp request gates; a request may be in flight.
         // waitingForPathResult can stay true/false; it won’t matter while inactive.
 
+        // Ensure we don't deadlock on a dropped/in-flight request while paused.
+        // Any result that comes back will still be ignored if !active, but gates will clear.
+        waitingForPathResult = false;
+        Interlocked.Exchange(ref pathRequestPending, 0);
+        Volatile.Write(ref waitingRequestId, 0);
+
         // Freeze stuck behavior cleanly
         stuckDetector.Release(StuckOwnerId);
 
@@ -641,12 +951,13 @@ public sealed partial class Navigation : IDisposable
 
     public Vector3 NextMapPoint()
     {
-        return WorldMapAreaDB.ToMap_FlipXY(routeToNextWaypoint.Peek(), playerReader.WorldMapArea);
+        return WorldMapAreaDB.ToMap_FlipXY(Nav2D(routeToNextWaypoint.Peek()), playerReader.WorldMapArea);
     }
 
     public void  SetWayPoints(Span<Vector3> points)
     {
         active = true;
+        SetLastSafeAnchor(playerReader.WorldPos);
         wayPoints.Clear();
         routeToNextWaypoint.Clear();
 
@@ -666,7 +977,7 @@ public sealed partial class Navigation : IDisposable
                 mapDistanceXY += point.WorldDistanceXYTo(prev);
             }
 
-            wayPoints.Push(point);
+            wayPoints.Push(Nav2D(point));
         }
 
         AvgDistance = wayPoints.Count > 1 ? Max(mapDistanceXY / wayPoints.Count, OutDoorMinDistance) : OutDoorMinDistance;
@@ -706,9 +1017,9 @@ public sealed partial class Navigation : IDisposable
 
     private void RefillRouteToNextWaypoint(CancellationToken token)
     {
-        logger.LogInformation(
+        LogRefill(
             $"[NAV-SANITY] Refill entered. " +
-            $"insideBlacklist={AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true} " +
+            $"insideBlacklist={AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true} " +
             $"waypoints={wayPoints.Count} route={routeToNextWaypoint.Count}");
 
         // Don’t log "called" every frame; only log occasionally.
@@ -728,7 +1039,17 @@ public sealed partial class Navigation : IDisposable
             return;
         }
 
-        logger.LogInformation("[NAV] RefillRouteToNextWaypoint called");
+        if (DateTime.UtcNow < noPathCooldownUntilUtc) 
+        {
+            LogRefill("[NAV] Refill: exit (no path rejection cooldown)");
+            return;
+        }
+
+        if (DateTime.UtcNow < blacklistRejectCooldownUntilUtc)
+        {
+            LogRefill("[NAV] Refill: exit (blacklist rejection cooldown)");
+            return;
+        }
 
         if (routeToNextWaypoint.Count > 0)
             return;
@@ -739,8 +1060,8 @@ public sealed partial class Navigation : IDisposable
 
         routeToNextWaypoint.Clear();
 
-        Vector3 startW = playerReader.WorldPos;
-
+        Vector3 startW = Nav2D(playerReader.WorldPos);
+        
         // Escape-mode guard — do not plan normal routing while escapeActive
         if (escapeActive)
         {
@@ -763,8 +1084,8 @@ public sealed partial class Navigation : IDisposable
             {
                 if (routeToNextWaypoint.Count == 0)
                 {
-                    routeToNextWaypoint.Push(escapeTargetW);
-                    stuckDetector.SetTargetLocation(StuckOwnerId, escapeTargetW);
+                    routeToNextWaypoint.Push(Nav2D(escapeTargetW));
+                    stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(escapeTargetW));
                     UpdateTotalRoute();
                 }
                 return;
@@ -777,7 +1098,7 @@ public sealed partial class Navigation : IDisposable
         if (TryComputeEscapeOutOfBlacklist(startW, out var escapeW))
         {
             escapeActive = true;
-            escapeTargetW = escapeW;
+            escapeTargetW = Nav2D(escapeW);
             escapeBestDist = float.MaxValue;
             escapeNoProgressSinceUtc = DateTime.UtcNow;
 
@@ -802,8 +1123,8 @@ public sealed partial class Navigation : IDisposable
 
             // Ensure it becomes the immediate movement target this frame
             routeToNextWaypoint.Clear();
-            routeToNextWaypoint.Push(escapeW);
-            stuckDetector.SetTargetLocation(StuckOwnerId, escapeW);
+            routeToNextWaypoint.Push(Nav2D(escapeW));
+            stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(escapeW));
 
             // Was causing ping ponging from where we were to edge of blacklist area
             // Optional: keep it in waypoints too so "waypoint reached" logic remains consistent
@@ -832,9 +1153,45 @@ public sealed partial class Navigation : IDisposable
             return;
         }
 
-        Vector3 targetW = wayPoints.Peek();
+        Vector3 targetRaw = wayPoints.Peek();
+        Vector3 targetW = Nav2D(wayPoints.Peek());
+
         float distance = startW.WorldDistanceXYTo(targetW);
 
+        logger.LogWarning(
+            $"[NAV-DBG] REFILL start={startW} wpTop(raw)={targetRaw} wpTop(norm)={targetW} " +
+            $"dist={distance:0.00} usePather? TBD wpCount={wayPoints.Count}");
+
+        // -------------------- WAYPOINT HYSTERESIS: POP IF ALREADY REACHED --------------------
+        // If we're already within reach distance of the waypoint, don't try to build a route.
+        // Pop it and let the next Update/Refill tick move on.
+        float wpReached = ReachedDistance(OutDoorMinDistance);   // uses your existing method
+
+        // Add a little hysteresis so we don't thrash near the boundary
+        float wpPopThreshold = MathF.Max(wpReached + 0.35f, POP_DIST - 0.05f);                // tune 0.25–0.75
+        if (distance <= wpPopThreshold)
+        {
+            var completed = wayPoints.Peek();
+            wayPoints.Pop();
+
+            logger.LogWarning(
+                $"[NAV] REFILL: waypoint already reached -> POP {completed} " +
+                $"newWpTop={(wayPoints.Count > 0 ? wayPoints.Peek().ToString() : "<none>")} " +
+                $"d={distance:0.00} thr={wpPopThreshold:0.00}");
+
+            // Clear any stale route just in case and reset progress tracking
+            routeToNextWaypoint.Clear();
+            ResetNoProgressWatchdog();
+            UpdateTotalRoute();
+
+            OnWayPointReached?.Invoke();
+
+            // If that was the last waypoint, destination reached
+            if (wayPoints.Count == 0)
+                OnDestinationReached?.Invoke();
+
+            return;
+        }
         // If you removed “directBlocked forcing pather”, then you may never enqueue.
         // Decide your policy:
         bool usePather = distance > MaxDistance || distance > AvgDistance * 2;
@@ -861,6 +1218,12 @@ public sealed partial class Navigation : IDisposable
         if (usePather)
         {
             stopMoving.Stop();
+
+            logger.LogWarning(
+                $"[NAV-DBG] ENQUEUE PATH start={startW} end(targetWp raw)={targetRaw} end(targetWp norm)={targetW} dist={distance:0.00}");
+
+            NavDbg($"REFILL enqueuePath start={startW} end={targetW} dist={distance:0.00}");
+
             EnqueuePathRequest(playerReader.UIMapId.Value, startW, targetW, distance);
             return;
         }
@@ -875,27 +1238,34 @@ public sealed partial class Navigation : IDisposable
             mid = new Vector3(
                 (startW.X + targetW.X) * 0.5f,
                 (startW.Y + targetW.Y) * 0.5f,
-                playerReader.WorldPosZ
+                startW.Z   // keep in same plane
             );
 
             hasMid = !IsBlacklistedPoint(mid) && !SegmentBlockedEscapeAware(startW, mid);
         }
 
         // Push final target first, then optional mid so mid is on top (next step).
-        routeToNextWaypoint.Push(targetW);
+        routeToNextWaypoint.Push(Nav2D(targetW));
 
         if (hasMid)
-            routeToNextWaypoint.Push(mid);
+            routeToNextWaypoint.Push(Nav2D(mid));
 
         noProgressBestDist = float.MaxValue;
         noProgressSinceUtc = DateTime.MinValue;
         noProgressTargetW = routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek() : default;
 
         if (routeToNextWaypoint.Count > 0)
-            stuckDetector.SetTargetLocation(StuckOwnerId, routeToNextWaypoint.Peek());
+        {
+            var chase = Nav2D(routeToNextWaypoint.Peek());
+            stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(chase));
+        }
 
         UpdateTotalRoute();
-
+        NavDbg(
+            $"REFILL builtDirect routeCount={routeToNextWaypoint.Count} " +
+            $"top={(routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek().ToString() : "<none>")} " +
+            $"wpTop(raw)={(wayPoints.Count > 0 ? wayPoints.Peek().ToString() : "<none>")} " +
+            $"wpTop(norm)={(wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()).ToString() : "<none>")}");
     }
 
     private void EnqueuePathRequest(int mapId, Vector3 startW, Vector3 endW, float distance)
@@ -905,10 +1275,6 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation($"[NAV] EnqueuePathRequest: blocked (pending). start={startW} end={endW}");
             return;
         }
-
-
-        waitingForPathResult = true;
-        waitingSinceUtc = DateTime.UtcNow;
 
         logger.LogInformation($"[NAV] EnqueuePathRequest: QUEUED reqId={requestId} start={startW} end={endW} dist={distance}");
 
@@ -941,7 +1307,10 @@ public sealed partial class Navigation : IDisposable
             return false;
 
         requestId = Interlocked.Increment(ref nextPathRequestId);
+
+        // These must be set AFTER we successfully acquired the pending gate.
         Volatile.Write(ref activePathRequestId, requestId);
+        Volatile.Write(ref waitingRequestId, requestId);
 
         lastRequestStart = startW;
         lastRequestEnd = endW;
@@ -951,35 +1320,57 @@ public sealed partial class Navigation : IDisposable
 
     private void EndPathRequest(long requestId)
     {
+        long activeId = Volatile.Read(ref activePathRequestId);
+
         // Only clear if this is the currently-active request.
-        // This avoids a stale callback clearing the gate for a newer request.
-        if (Volatile.Read(ref activePathRequestId) == requestId)
+        if (activeId == requestId)
         {
             Interlocked.Exchange(ref pathRequestPending, 0);
+            Volatile.Write(ref activePathRequestId, 0);
         }
+    }
+
+    private void ResetNoProgressWatchdog(Vector3? newTarget = null)
+    {
+        noProgressBestDist = float.MaxValue;
+        noProgressSinceUtc = DateTime.MinValue;
+        noProgressTargetW = newTarget ?? default;
     }
 
     private void PathCalculatedCallback(long requestId, PathResult result)
     {
-        // Always end the request FIRST (or at least before any early return)
-        EndPathRequest(requestId);
+        long activeId = Volatile.Read(ref activePathRequestId);
+        long waitingId = Volatile.Read(ref waitingRequestId);
 
+        // Primary: only accept the currently active request id.
+        if (activeId != requestId)
+        {
+            logger.LogInformation(
+                $"[NAV] Ignoring stale path result reqId={requestId} waitingReqId={waitingId} activeReqId={activeId}");
+            return;
+        }
+
+        // We are processing the active request -> clear "waiting" markers now.
+        Volatile.Write(ref waitingRequestId, 0);
+
+        EndPathRequest(requestId);
         waitingForPathResult = false;
 
         logger.LogInformation($"[NAV] PathCalculatedCallback reqId={requestId} pathLen={result.Path.Length} start={result.StartW} end={result.EndW}");
+        
+        Vector3 wpTop = wayPoints.Count > 0 ? wayPoints.Peek() : default;
+        logger.LogWarning(
+            $"[NAV-DBG] PATH RESULT requestId={requestId} resultStart={result.StartW} resultEnd={result.EndW} " +
+            $"currentWpTop={wpTop} endMatchesWp={(wayPoints.Count > 0 ? wpTop.WorldDistanceXYTo(result.EndW) : -1):0.00}");
 
         if (!active)
             return;
 
-        // Ignore stale results: if another request has superseded this one
-        if (Volatile.Read(ref activePathRequestId) != requestId)
-        {
-            logger.LogInformation($"[NAV] Ignoring stale path result reqId={requestId} activeReqId={Volatile.Read(ref activePathRequestId)}");
-            return;
-        }
-
         if (result.Path.Length == 0)
         {
+            // throttle refills so we don’t enqueue again the same frame
+            noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(350);
+
             // Let higher-level logic react (assist return rewind, backoff, etc.)
             OnPathFailed?.Invoke(result.StartW, result.EndW);
 
@@ -993,7 +1384,7 @@ public sealed partial class Navigation : IDisposable
             if (failedAttempt > 2)
             {
                 failedAttempt = 0;
-                stuckDetector.SetTargetLocation(StuckOwnerId, result.EndW);
+                stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(result.EndW));
                 stuckDetector.Update(StuckOwnerId);
             }
             return;
@@ -1010,38 +1401,48 @@ public sealed partial class Navigation : IDisposable
 
         routeToNextWaypoint.Clear();
 
+        Vector3 start2D = Nav2D(result.StartW);
+        Vector3 end2D = Nav2D(result.EndW);
+
         for (int i = result.Path.Length - 1; i >= 0; i--)
         {
-            Vector3 p = result.Path[i];
-            if (p.WorldDistanceXYTo(result.StartW) < MIN_FIRST_STEP_DIST)
+            Vector3 p = Nav2D(result.Path[i]);
+
+            if (p.WorldDistanceXYTo(start2D) < MIN_FIRST_STEP_DIST)
                 continue;
 
-            routeToNextWaypoint.Push(p);
+            routeToNextWaypoint.Push(Nav2D(p));
         }
 
         if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
-            routeToNextWaypoint.Push(wayPoints.Peek());
+            routeToNextWaypoint.Push(Nav2D(wayPoints.Peek()));
 
         if (SimplifyRouteToWaypoint)
             SimplyfyRouteToWaypoint();
 
         if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
-            routeToNextWaypoint.Push(wayPoints.Peek());
+            routeToNextWaypoint.Push(Nav2D(wayPoints.Peek()));
 
+        logger.LogWarning(
+            $"[NAV-DBG] ROUTESET reqId={requestId} routeCount={routeToNextWaypoint.Count} " +
+            $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +
+            $"wpTop={(wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()).ToString() : "<none>")} " +
+            $"player={playerReader.WorldPos}"
+            );
 
         // ----------------------------------------
         // Validate pather route against blacklist
         // ----------------------------------------
         if (AreaBlacklist != null)
         {
-            bool startedInside = AreaBlacklist.ContainsWorld(result.StartW);
+            bool startedInside = AreaBlacklist.ContainsWorld(Nav2D(result.StartW));
 
             // Only enforce when starting OUTSIDE
             if (!startedInside)
             {
                 // Optional: avoid rejecting while near the edge (prevents oscillation)
                 bool nearEdge = AreaBlacklist.TryGetContainingRectInflated(
-                    result.StartW,
+                    Nav2D(result.StartW),
                     DetourMargin + 6f,
                     out _
                 );
@@ -1052,7 +1453,7 @@ public sealed partial class Navigation : IDisposable
                     var steps = routeToNextWaypoint.ToArray();
                     Array.Reverse(steps); // travel order
 
-                    Vector3 prev = result.StartW;
+                    Vector3 prev = Nav2D(result.StartW);
 
                     for (int i = 0; i < steps.Length; i++)
                     {
@@ -1065,8 +1466,32 @@ public sealed partial class Navigation : IDisposable
                                 $"[BL] Path node inside blacklist; rejecting. " +
                                 $"badPoint={cur}");
 
+                            // Try to change the problem by inserting a detour around the offending rect
+                            if (TryInsertDetourFromRejectedPath(result.StartW, result.EndW, cur))
+                            {
+                                sameRejectCount = 0;
+                                lastRejectStartW = default;
+                                lastRejectEndW = default;
+
+                                // small cooldown so we don't refill-spam same tick
+                                blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
+                                ResetNoProgressWatchdog();
+                                return; // next Update will refill with the new detour waypoint on top
+                            }
+
+                            // Detour insertion failed -> use reject-counter fallback to avoid deadlock
+                            if (HandleBlacklistReject(result))
+                            {
+                                ResetNoProgressWatchdog();
+                                return;
+                            }
+
+                            // If detour insertion failed, still backoff to avoid tight loop spam
+                            blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
+
                             routeToNextWaypoint.Clear();
                             UpdateTotalRoute();
+                            ResetNoProgressWatchdog();
                             return;
                         }
 
@@ -1077,8 +1502,31 @@ public sealed partial class Navigation : IDisposable
                                 $"[BL] Path segment crosses blacklist; rejecting. " +
                                 $"seg=({prev} -> {cur})");
 
+                            Vector3 hint = new Vector3((prev.X + cur.X) * 0.5f, (prev.Y + cur.Y) * 0.5f, 0f);
+
+                            if (TryInsertDetourFromRejectedPath(result.StartW, result.EndW, hint))
+                            {
+                                sameRejectCount = 0;
+                                lastRejectStartW = default;
+                                lastRejectEndW = default;
+
+                                blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
+                                ResetNoProgressWatchdog();
+                                return;
+                            }
+
+                            // Detour insertion failed -> use reject-counter fallback to avoid deadlock
+                            if (HandleBlacklistReject(result))
+                            {
+                                ResetNoProgressWatchdog();
+                                return;
+                            }
+
+                            blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
+
                             routeToNextWaypoint.Clear();
                             UpdateTotalRoute();
+                            ResetNoProgressWatchdog();
                             return;
                         }
 
@@ -1088,14 +1536,113 @@ public sealed partial class Navigation : IDisposable
             }
         }
 
-        stuckDetector.SetTargetLocation(StuckOwnerId, routeToNextWaypoint.Peek());
+        if (routeToNextWaypoint.Count == 0)
+        {
+            UpdateTotalRoute();
+            // Optional: treat as failed so caller can react / refill.
+            noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(350);
+            OnPathFailed?.Invoke(result.StartW, result.EndW);
+            return;
+        }
 
-        noProgressBestDist = float.MaxValue;
-        noProgressSinceUtc = DateTime.MinValue;
-        noProgressTargetW = routeToNextWaypoint.Peek();
+        stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(routeToNextWaypoint.Peek()));
 
+        ResetNoProgressWatchdog(routeToNextWaypoint.Peek());
         UpdateTotalRoute();
         OnPathCalculated?.Invoke();
+    }
+
+    private bool TryInsertDetourFromRejectedPath(Vector3 startW, Vector3 endW, Vector3 badPointW)
+    {
+        if (AreaBlacklist == null)
+            return false;
+
+        // We only support detouring the current goal (top waypoint)
+        if (wayPoints.Count == 0 || wayPoints.Peek().WorldDistanceXYTo(endW) > 0.1f)
+            return false;
+
+        // Find which rect caused the rejection
+        if (!AreaBlacklist.TryGetContainingRect(Nav2D(badPointW), out var rect))
+            return false;
+
+        float m = DetourMargin;
+        float z = 0f;
+
+        // Generate candidate points around the rect boundary
+        var inflated = rect.Inflate(m * 0.5f);
+
+        Vector3 best = default;
+        float bestScore = float.MaxValue;
+        bool found = false;
+
+        foreach (var d in BuildDetourCandidates(inflated, m, z))
+        {
+            if (IsBlacklistedPoint(d)) continue;
+
+            // Critical: don't cross forbidden region
+            if (SegmentBlockedEscapeAware(startW, d)) continue;
+            if (SegmentBlockedEscapeAware(d, endW)) continue;
+
+            float score = startW.WorldDistanceXYTo(d) + d.WorldDistanceXYTo(endW);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = d;
+                found = true;
+            }
+        }
+
+        if (!found)
+            return false;
+
+        // Insert detour BEFORE the current waypoint
+        Vector3 target = Nav2D(wayPoints.Pop()); // == endW
+        wayPoints.Push(Nav2D(target));
+        wayPoints.Push(Nav2D(best));
+
+        routeToNextWaypoint.Clear();
+        UpdateTotalRoute();
+
+        logger.LogWarning($"[BL] Inserted detour after rejection: detour={best} target={endW} badPoint={badPointW}");
+        return true;
+    }
+
+    private bool HandleBlacklistReject(PathResult result)
+    {
+        bool same = lastRejectStartW.WorldDistanceXYTo(result.StartW) < 0.1f &&
+                    lastRejectEndW.WorldDistanceXYTo(result.EndW) < 0.1f;
+
+        if (!same)
+        {
+            lastRejectStartW = result.StartW;
+            lastRejectEndW = result.EndW;
+            sameRejectCount = 0;
+        }
+
+        sameRejectCount++;
+
+        if (sameRejectCount < MaxSameRejectBeforeFallback)
+        {
+            // short cooldown so we don't insta-thrash
+            blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
+            return false; // did NOT skip waypoint
+        }
+
+        logger.LogError($"[BL] Rejected same path {sameRejectCount} times. Skipping waypoint {result.EndW} to avoid deadlock.");
+
+        sameRejectCount = 0;
+
+        // Drop the unreachable waypoint (only if it's the current target)
+        if (wayPoints.Count > 0 && wayPoints.Peek().WorldDistanceXYTo(result.EndW) < 0.1f)
+            wayPoints.Pop();
+
+        routeToNextWaypoint.Clear();
+        UpdateTotalRoute();
+
+        // longer cooldown to avoid thrash
+        blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddSeconds(1);
+
+        return true; // skipped waypoint and we already cleaned up; caller must return
     }
 
     private void PathFinderThread()
@@ -1112,14 +1659,16 @@ public sealed partial class Navigation : IDisposable
 
                     Vector3[] path = pather.FindWorldRoute(pathRequest.MapId, pathRequest.StartW, pathRequest.EndW);
 
-                    if (active)
-                        pathResults.Enqueue(new PathResult(pathRequest, path, pathRequest.Callback));
+                    // IMPORTANT:
+                    // Always enqueue the result so PathCalculatedCallback runs and clears
+                    // waitingForPathResult / pathRequestPending gates.
+                    // The callback itself already bails out if !active, but it clears gates first.
+                    pathResults.Enqueue(new PathResult(pathRequest, path, pathRequest.Callback));
                 }
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "[NAV] PathFinderThread exception; returning empty path");
-                    if (active)
-                        pathResults.Enqueue(new PathResult(pathRequest, Array.Empty<Vector3>(), pathRequest.Callback));
+                    pathResults.Enqueue(new PathResult(pathRequest, Array.Empty<Vector3>(), pathRequest.Callback));
                 }
             }
 
@@ -1151,6 +1700,13 @@ public sealed partial class Navigation : IDisposable
         if (!poppedAny)
             return;
 
+        if (NavDebugDue())
+        {
+            Vector3 newTop = routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek() : default;
+            Vector3 wpTop = wayPoints.Count > 0 ? wayPoints.Peek() : default;
+            logger.LogWarning($"[NAV-DBG] ReduceByDistance poppedLast={lastPopped} newRouteTop={newTop} wpTop={wpTop}");
+        }
+
         // Record the furthest progressed point this tick as anchor
         SetLastSafeAnchor(lastPopped);
 
@@ -1175,7 +1731,7 @@ public sealed partial class Navigation : IDisposable
                 stopMoving.Stop();
             }
 
-            playerDirection.SetDirection(heading, routeToNextWaypoint.Peek(), OutDoorMinDistance, token);
+            playerDirection.SetDirection(heading, Nav2D(routeToNextWaypoint.Peek()), OutDoorMinDistance, token);
         }
     }
 
@@ -1183,14 +1739,14 @@ public sealed partial class Navigation : IDisposable
     {
         if (wayPoints.Count < 2) { return false; }
 
-        Vector3 A = wayPoints.Pop();
+        Vector3 A = Nav2D(wayPoints.Pop());
         Vector3 B = wayPoints.Peek();
         Vector2 result = VectorExt.GetClosestPointOnLineSegment(A.AsVector2(), B.AsVector2(), playerReader.WorldPos.AsVector2());
-        Vector3 newPoint = new(result.X, result.Y, playerReader.WorldPosZ);
+        Vector3 newPoint = new(result.X, result.Y, 0f);
 
         if (newPoint.WorldDistanceXYTo(wayPoints.Peek()) > OutDoorMinDistance)
         {
-            wayPoints.Push(newPoint);
+            wayPoints.Push(Nav2D(newPoint));
             if (debug)
                 LogDebug("Adjusted resume point");
 
@@ -1208,9 +1764,18 @@ public sealed partial class Navigation : IDisposable
         float totalDistance = VectorExt.TotalDistance<Vector3>(TotalRoute, VectorExt.WorldDistanceXY);
         if (totalDistance > MaxDistance / 2)
         {
-            Vector3 playerW = playerReader.WorldPos;
+            Vector3 playerW = Nav2D(playerReader.WorldPos);
             float distanceToRoute = playerW.WorldDistanceXYTo(routeToNextWaypoint.Peek());
             float distanceToPrevLoc = playerW.WorldDistanceXYTo(playerWorldPos);
+
+            // NEW: if the current route doesn't end near the current waypoint, it is stale.
+            if (!RouteTargetsWaypointTop())
+            {
+                logger.LogWarning("[NAV] KeepRoute vetoed: route does not target current waypoint. Clearing.");
+                routeToNextWaypoint.Clear();
+                return;
+            }
+
             if (distanceToRoute > 2 * MinDistanceMount &&
                 distanceToPrevLoc > 2 * MinDistanceMount)
             {
@@ -1240,7 +1805,7 @@ public sealed partial class Navigation : IDisposable
         routeToNextWaypoint.Clear();
         for (int i = reduced.Length - 1; i >= 0; i--)
         {
-            routeToNextWaypoint.Push(reduced[i]);
+            routeToNextWaypoint.Push(Nav2D(reduced[i]));
         }
     }
 
@@ -1254,7 +1819,7 @@ public sealed partial class Navigation : IDisposable
     public bool IsInBlacklistArea()
     {
         //Console.WriteLine("IsInBlacklistArea AreaBlacklist: " + AreaBlacklist);
-        bool inside = AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true;
+        bool inside = AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true;
 
         /*
         logger.LogInformation(
@@ -1277,6 +1842,9 @@ public sealed partial class Navigation : IDisposable
     /// </summary>
     private bool TryGetBlockingRectEscapeAware(Vector3 startW, Vector3 endW, out BlacklistRect blockingRect)
     {
+        startW = Nav2D(startW);
+        endW = Nav2D(endW);
+
         blockingRect = default;
         if (AreaBlacklist == null) return false;
 
@@ -1303,7 +1871,7 @@ public sealed partial class Navigation : IDisposable
         if (AreaBlacklist == null) return wayPoints.Count > 0;
 
         // Escape-first handles "inside" behavior
-        if (AreaBlacklist.TryGetContainingRect(playerReader.WorldPos, out _))
+        if (AreaBlacklist.TryGetContainingRect(Nav2D(playerReader.WorldPos), out _))
             return wayPoints.Count > 0;
 
         int removed = 0;
@@ -1405,7 +1973,7 @@ public sealed partial class Navigation : IDisposable
         }
 
         float m = DetourMargin;
-        float z = playerReader.WorldPosZ;
+        float z = 0f;
 
         // Slightly inflate the rect to give extra clearance when generating points
         var inflated = blockingRect.Inflate(m * 0.5f); // smaller than m
@@ -1447,8 +2015,8 @@ public sealed partial class Navigation : IDisposable
         }
 
         wayPoints.Pop();          // remove target
-        wayPoints.Push(targetW);  // restore target
-        wayPoints.Push(best);     // detour is next
+        wayPoints.Push(Nav2D(targetW));  // restore target
+        wayPoints.Push(Nav2D(best));     // detour is next
 
         routeToNextWaypoint.Clear(); // force recalculation immediately
         UpdateTotalRoute();
@@ -1471,7 +2039,7 @@ public sealed partial class Navigation : IDisposable
             return false;
 
         float m = DetourMargin;
-        float z = playerReader.WorldPosZ;
+        float z = 0f;
 
         // Prefer escaping toward the next real goal if we have one
         Vector3 goalW = wayPoints.Count > 0 ? wayPoints.Peek() : startW;

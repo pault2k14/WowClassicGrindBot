@@ -50,6 +50,17 @@ public sealed class StuckDetector
     public double ActionDurationMs => GetElapsedTime(startTime).TotalMilliseconds;
     private double UnstuckMs => GetElapsedTime(attemptTime).TotalMilliseconds;
 
+    // --- Movement-aware progress tracking (prevents false stuck on slopes) ---
+    private float bestDistance = MAX_RANGE;
+    private Vector3 lastPos;
+    private long lastMoveTime;
+
+    // Tunables
+    private const float PROGRESS_EPS = 0.08f;         // accept smaller progress steps
+    private const float MOVE_EPS = 0.20f;             // accept smaller XY movement per tick
+    private const double NO_MOVE_MS = 1800;           // more tolerant before declaring stationary
+    private const double NO_BEST_PROGRESS_MS = 3500;  // more tolerant on slopes/switchbacks
+
     public StuckDetector(ILogger<StuckDetector> logger, ConfigurableInput input,
         AddonBits bits, PlayerReader playerReader, PlayerDirection playerDirection,
         StopMoving stopMoving)
@@ -133,9 +144,16 @@ public sealed class StuckDetector
 
     private void ResetInternal()
     {
-        attemptTime = GetTimestamp();
-        startTime = GetTimestamp();
+        long now = GetTimestamp();
+
+        attemptTime = now;
+        startTime = now;
+
         prevDistance = MAX_RANGE;
+        bestDistance = MAX_RANGE;
+
+        lastPos = playerReader.WorldPos;
+        lastMoveTime = now;
     }
 
     // Legacy API (ownerId=0)
@@ -210,14 +228,22 @@ public sealed class StuckDetector
         if (!IsOwner(callerOwnerId))
             return true;
 
-        float distance = playerReader.WorldPos.WorldDistanceXYTo(worldTarget);
-        if (MathF.Abs(distance - prevDistance) > MIN_DISTANCE)
+        Vector3 pos = playerReader.WorldPos;
+        long now = GetTimestamp();
+
+        float moved = pos.WorldDistanceXYTo(lastPos);
+        if (moved > MOVE_EPS)
         {
-            ResetInternal();
-            prevDistance = distance;
+            lastPos = pos;
+            lastMoveTime = now;
+
+            // If we are moving, refresh timers so we don't accumulate stuck time.
+            startTime = now;
             return true;
         }
 
-        return ActionDurationMs < ACTION_STUCK_TIME;
+        // Not moving much. Only call it "not moving" once we've been stationary long enough.
+        double sinceMoveMs = GetElapsedTime(lastMoveTime).TotalMilliseconds;
+        return sinceMoveMs < NO_MOVE_MS;
     }
 }

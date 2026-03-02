@@ -487,7 +487,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // Drive navigation only when not paused
         if (!wantNavPaused)
         {
-            logger.LogInformation($"[FRG] Calling navigation.Update navHash={navigation.GetHashCode()}");
+            //logger.LogInformation($"[FRG] Calling navigation.Update navHash={navigation.GetHashCode()}");
             navigation.Update(CancellationToken.None);
         }
 

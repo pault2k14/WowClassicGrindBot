@@ -2,6 +2,7 @@
   "ClassName": "Warrior",
   "Mode": "PartyLeader",
   "Loot": true,
+  "Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
@@ -14,15 +15,7 @@
   "Pull": {
     "Sequence": [
       {
-        "Name": "Bloodrage",
-        "Key": "8",
-        "WhenUsable": true,
-        "Requirements": [
-          "Health% > 50"
-        ]
-      },
-      {
-        "Name": "Shoot",
+        "Name": "Shoot Bow",
         "Key": "9",
         "WhenUsable": true,
         "BeforeCastStop": true,
@@ -34,15 +27,6 @@
           "!InMeleeRange",
           "MaxRange < 25"
         ]
-      },
-      {
-        "Name": "Charge",
-        "Key": "3",
-        "WhenUsable": true,
-        "Requirements": [
-          "MaxRange < 11"
-        ],
-        "AfterCastWaitMeleeRange": true
       }
     ]
   },
