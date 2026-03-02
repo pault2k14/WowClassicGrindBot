@@ -344,6 +344,13 @@
           "!Shooting",
           "SpellInRange:1"
         ]
+      },
+      {
+        "Name": "Approach",
+        "Requirements": [
+          "!InCombatRange"
+        ],
+        "Log": true
       }
           //{
           //  "Name": "Lesser Heal",
