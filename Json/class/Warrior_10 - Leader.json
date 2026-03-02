@@ -2,21 +2,25 @@
   "ClassName": "Warrior",
   "Mode": "PartyLeader",
   "Loot": true,
-  "Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/08-09_Durotar_Razormane Q-Encroachment (cl 11-12) v2.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    "Kolkar Wrangler",
-    "Kolkar Stormer",
-    "Kolkar Invader",
-    "Kolkar Stormseer"
+    "Captain Flat Tusk"
   ],
   "Pull": {
     "Sequence": [
+      {
+        "Name": "Bloodrage",
+        "Key": "8",
+        "WhenUsable": true,
+        "Requirements": [
+          "Health% > 50"
+        ]
+      },
       {
         "Name": "Shoot Bow",
         "Key": "9",
@@ -30,6 +34,15 @@
           "!InMeleeRange",
           "MaxRange < 25"
         ]
+      },
+      {
+        "Name": "Charge",
+        "Key": "3",
+        "WhenUsable": true,
+        "Requirements": [
+          "MaxRange < 11"
+        ],
+        "AfterCastWaitMeleeRange": true
       }
     ]
   },
@@ -45,6 +58,13 @@
           "Rage >= Cost_Heroic Strike"
         ],
         "AfterCastDelay": 25
+      },
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirements": [
+          "Health% < 20"
+        ]
       },
       {
         "Name": "Hamstring",
@@ -70,16 +90,6 @@
         ]
       },
       {
-        "Name": "Overpower",
-        "Key": "0",
-        "BeforeCastFaceTarget": true,
-        "WhenUsable": true,
-        "Requirements": [
-          "InMeleeRange",
-          "Rage > 5"
-        ]
-      },
-      {
         "Name": "Heroic Strike",
         "Key": "2",
         "BeforeCastFaceTarget": true,
@@ -94,7 +104,7 @@
         "Name": "Rend",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown":  10000,
+        "Cooldown": 10000,
         "Requirements": [
           "InMeleeRange",
           "Rage > 10",
@@ -106,7 +116,7 @@
         "Key": "8",
         "WhenUsable": true,
         "BeforeCastFaceTarget": true,
-        "Cooldown":  30000,
+        "Cooldown": 30000,
         "Requirements": [
           "Health% > 50"
         ]
