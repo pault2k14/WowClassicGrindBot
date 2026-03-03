@@ -28,17 +28,20 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private readonly IMountHandler mountHandler;
     private readonly CombatLog combatLog;
     private readonly ChatReader chatReader;
+    private readonly StuckDetector stuckDetector;
     
     private float lastDirection;
     private float lastMinDistance;
     private float lastMaxDistance;
     private int lastTargetGuid;
+    private int consecutiveApproach;
 
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
         ClassConfiguration classConfiguration, ClassConfiguration classConfig,
         CastingHandler castingHandler, CombatLog combatLog,
-        IMountHandler mountHandler, ChatReader chatReader)
+        IMountHandler mountHandler, ChatReader chatReader,
+        StuckDetector stuckDetector)
         : base(nameof(CombatGoal))
     {
         this.logger = logger;
@@ -54,6 +57,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.mountHandler = mountHandler;
         this.classConfig = classConfig;
         this.chatReader = chatReader;
+        this.stuckDetector = stuckDetector;
 
         if (classConfig.Mode == Mode.AssistFocus)
         {
@@ -123,6 +127,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     public override void OnEnter()
     {
+        wait.Update();
+        stuckDetector.Reset();
+
         if (mountHandler.IsMounted())
         {
             mountHandler.Dismount();
@@ -231,6 +238,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             input.PressJump();
             return;
+        }
+
+        if (consecutiveApproach >= 3)
+        {
+            if (!stuckDetector.IsMoving())
+                stuckDetector.Update();
         }
 
         // If we have no target or our target is dead we should
@@ -532,6 +545,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if (castingHandler.CastIfReady(keyAction, interrupt))
             {
+                if(keyAction.Name.Equals("Approach"))
+                {
+                    consecutiveApproach = consecutiveApproach + 1;
+                }
+                else
+                {
+                    consecutiveApproach = 0; 
+                }
+                
                 //logger.LogInformation("CombatGoals: Successful Cast");
                 successfulCast = true;
                 castOnTargetThisUpdate = true;
