@@ -164,6 +164,11 @@ public sealed partial class Navigation : IDisposable
 
     private Vector3 _chaseLastPos;
     private DateTime _chaseLastMovedUtc = DateTime.MinValue;
+    private DateTime _chaseUnstuckCooldownUntilUtc = DateTime.MinValue;
+
+    // True while we're actively following an escape route that does NOT target the waypoint stack.
+    private bool escapeRouteInProgress;
+    private Vector3 escapeRouteEndW;
 
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
@@ -467,7 +472,7 @@ public sealed partial class Navigation : IDisposable
         {
             bool insideBlacklist = AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true;
 
-            if (!insideBlacklist && !escapeActive)
+            if (!insideBlacklist && !escapeActive && !escapeRouteInProgress)
             {
                 // Don't stomp a route while we're actively waiting for a newer one.
                 if (!waitingForPathResult && Volatile.Read(ref pathRequestPending) == 0)
@@ -646,6 +651,9 @@ public sealed partial class Navigation : IDisposable
                         d
                     );
 
+                    escapeRouteInProgress = true;
+                    escapeRouteEndW = Nav2D(escapeTargetW);
+
                     // keep escapeActive true until we're outside
                 }
             }
@@ -659,6 +667,25 @@ public sealed partial class Navigation : IDisposable
         {
             stopMoving.Stop();
             input.StopForward(true);
+
+            // If we just consumed the last node of an escape route, exit escape mode and
+            // allow normal waypoint routing to resume immediately.
+            if (escapeRouteInProgress && routeToNextWaypoint.Count == 0)
+            {
+                escapeRouteInProgress = false;
+                escapeActive = false;
+
+                escapeBestDist = float.MaxValue;
+                escapeNoProgressSinceUtc = DateTime.UtcNow;
+
+                // allow immediate refill next tick
+                noProgressRefillCooldownUntilUtc = DateTime.MinValue;
+
+                // Also reset chase watchdog state so it doesn't instantly force another refill
+                _chaseProgSinceUtc = DateTime.MinValue;
+                _chaseLastMovedUtc = DateTime.MinValue;
+                _chaseProgBestDist = float.MaxValue;
+            }
 
             UpdateTotalRoute();
             ResetNoProgressWatchdog();
@@ -751,22 +778,46 @@ public sealed partial class Navigation : IDisposable
                 //
                 // This prevents downhill / switchback / turning cases from causing replans.
                 if (sinceBestSec > 4.0 && sinceMoveSec > 1.5 &&
-                    !waitingForPathResult && Volatile.Read(ref pathRequestPending) == 0 &&
-                    now >= noProgressRefillCooldownUntilUtc)
+                    !waitingForPathResult && Volatile.Read(ref pathRequestPending) == 0)
                 {
                     logger.LogWarning(
-                        $"[NAV] No chase progress while stationary; forcing refill. " +
+                        $"[NAV] No chase progress while stationary. " +
                         $"player={playerW} chase={chaseW} dChase={dChase:0.00} best={_chaseProgBestDist:0.00} " +
                         $"sinceBest={sinceBestSec:0.00}s sinceMove={sinceMoveSec:0.00}s");
 
-                    // cooldown so we don't thrash-replan every tick
-                    noProgressRefillCooldownUntilUtc = now.AddMilliseconds(1500);
+                    // 1) Try actual unstuck FIRST (turn/move/jump), rate-limited.
+                    if (now >= _chaseUnstuckCooldownUntilUtc)
+                    {
+                        stopMoving.Stop();
 
-                    stopMoving.Stop();
-                    routeToNextWaypoint.Clear();
-                    UpdateTotalRoute();
-                    ResetNoProgressWatchdog(); // if you still have this helper
-                    return; // next Update will refill
+                        // make sure stuck detector is aiming at the same chase target
+                        stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(chaseW));
+                        stuckDetector.Update(StuckOwnerId, token);
+
+                        // give the unstuck routine time to play out before we try again
+                        _chaseUnstuckCooldownUntilUtc = now.AddMilliseconds(1400);
+
+                        // reset movement tracking so we don't instantly re-trigger
+                        _chaseLastPos = playerW;
+                        _chaseLastMovedUtc = now;
+
+                        return;
+                    }
+
+                    // 2) Only if we've been stuck for a while, replan (route refresh).
+                    // This avoids infinite "replan spam" when we're physically wedged on terrain.
+                    if (sinceBestSec > 6.0 && now >= noProgressRefillCooldownUntilUtc)
+                    {
+                        noProgressRefillCooldownUntilUtc = now.AddMilliseconds(1500);
+
+                        stopMoving.Stop();
+                        routeToNextWaypoint.Clear();
+                        UpdateTotalRoute();
+
+                        ResetNoProgressWatchdog();
+                        ResetChaseProgressWatchdog(); // important: don't keep inherited timers
+                        return;
+                    }
                 }
             }
         }
@@ -856,6 +907,7 @@ public sealed partial class Navigation : IDisposable
         SetLastSafeAnchor(playerReader.WorldPos);
         stuckDetector.Acquire(StuckOwnerId);
         ResetStuckParameters();
+        ResetChaseProgressWatchdog();
 
         if (pather.GetType() != typeof(RemotePathingAPIV3) && routeToNextWaypoint.Count > 0)
         {
@@ -1258,6 +1310,7 @@ public sealed partial class Navigation : IDisposable
         {
             var chase = Nav2D(routeToNextWaypoint.Peek());
             stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(chase));
+            ResetChaseProgressWatchdog(chase);
         }
 
         UpdateTotalRoute();
@@ -1328,6 +1381,21 @@ public sealed partial class Navigation : IDisposable
             Interlocked.Exchange(ref pathRequestPending, 0);
             Volatile.Write(ref activePathRequestId, 0);
         }
+    }
+
+    private void ResetChaseProgressWatchdog(Vector3? newTarget = null)
+    {
+        var now = DateTime.UtcNow;
+
+        _chaseProgTarget = newTarget ?? default;
+        _chaseProgBestDist = float.MaxValue;
+        _chaseProgSinceUtc = DateTime.MinValue;
+
+        _chaseLastPos = Nav2D(playerReader.WorldPos);
+        _chaseLastMovedUtc = now;
+
+        // allow an unstuck immediately after a route/target change
+        _chaseUnstuckCooldownUntilUtc = DateTime.MinValue;
     }
 
     private void ResetNoProgressWatchdog(Vector3? newTarget = null)
@@ -1545,9 +1613,13 @@ public sealed partial class Navigation : IDisposable
             return;
         }
 
-        stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(routeToNextWaypoint.Peek()));
+        var chase = Nav2D(routeToNextWaypoint.Peek());
+        stuckDetector.SetTargetLocation(StuckOwnerId, chase);
 
-        ResetNoProgressWatchdog(routeToNextWaypoint.Peek());
+        // IMPORTANT: route changed -> reset chase watchdog so it doesn't inherit old "stuck" timers
+        ResetChaseProgressWatchdog(chase);
+
+        ResetNoProgressWatchdog(chase);
         UpdateTotalRoute();
         OnPathCalculated?.Invoke();
     }
