@@ -240,10 +240,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (consecutiveApproach >= 3)
+        if (consecutiveApproach >= 6 && !playerReader.IsInMeleeRange())
         {
+            
             if (!stuckDetector.IsMoving())
+            {
                 stuckDetector.Update();
+                consecutiveApproach = 0;
+            }
+                
         }
 
         // If we have no target or our target is dead we should
