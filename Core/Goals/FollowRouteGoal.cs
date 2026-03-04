@@ -75,7 +75,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // 0 = normal attempt, 1 = after rewind retry
     private int _assistAttempt;
 
-    private DateTime _assistReturnDeadlineUtc;
+    // Assist-return timeout should be based on ACTIVE navigation time (not wall clock time)
+    private const double ASSIST_RETURN_TIMEOUT_ACTIVE_SEC = 25.0;
+    private TimeSpan _assistReturnActiveElapsed;
+    private DateTime _assistReturnLastTickUtc;
+    private bool _assistReturnTimerInit;
 
     #region IRouteProvider
 
@@ -462,14 +466,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             _pausedByLocalLogic = false;
         }
 
-        // Assist return state machine: if rewinding and we reached anchor, retry assist target
+        // Assist return state machine: active-time timeout + rewind retry
         if (_assistReturnActive)
         {
-            if (DateTime.UtcNow > _assistReturnDeadlineUtc)
-            {
-                AbortAssistReturn("timeout");
-            }
-            else if (_assistRewindActive)
+            // Tick active-time timeout (won't count time while paused/combat)
+            TickAssistReturnTimeout(wantNavPaused);
+
+            // If TickAssistReturnTimeout aborted it, stop here
+            if (!_assistReturnActive)
+                return;
+
+            if (_assistRewindActive)
             {
                 float distToAnchor = playerReader.WorldPos.WorldDistanceXYTo(_assistRewindAnchorW);
 
@@ -591,6 +598,43 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
     }
 
+    private void TickAssistReturnTimeout(bool wantNavPaused)
+    {
+        if (!_assistReturnActive)
+            return;
+
+        var now = DateTime.UtcNow;
+
+        // Initialize the timer on first tick so we don't count a giant delta.
+        if (!_assistReturnTimerInit)
+        {
+            _assistReturnTimerInit = true;
+            _assistReturnLastTickUtc = now;
+            _assistReturnActiveElapsed = TimeSpan.Zero;
+            return;
+        }
+
+        // Only count time when we are actually allowed to drive navigation.
+        // This prevents timeout while paused for combat/targets or other local logic.
+        bool countActive =
+            !wantNavPaused &&
+            !_pausedByLocalLogic &&
+            !bits.Combat() &&
+            !bits.Focus_Combat();
+
+        if (countActive)
+        {
+            _assistReturnActiveElapsed += (now - _assistReturnLastTickUtc);
+        }
+
+        _assistReturnLastTickUtc = now;
+
+        if (_assistReturnActiveElapsed.TotalSeconds >= ASSIST_RETURN_TIMEOUT_ACTIVE_SEC)
+        {
+            AbortAssistReturn($"timeout (active={_assistReturnActiveElapsed.TotalSeconds:0.0}s)");
+        }
+    }
+
     private void BeginAssistReturn(Vector3 assistTargetW)
     {
         _assistReturnActive = true;
@@ -600,7 +644,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         _assistRewindAnchorW = default;
 
         _assistAttempt = 0;
-        _assistReturnDeadlineUtc = DateTime.UtcNow.AddSeconds(25);
+
+        // Active-time timeout init
+        _assistReturnActiveElapsed = TimeSpan.Zero;
+        _assistReturnTimerInit = false;          // will init on first TickAssistReturnTimeout
+        _assistReturnLastTickUtc = DateTime.UtcNow;
 
         logger.LogInformation($"[FRG] AssistReturn begin -> {assistTargetW}");
     }
@@ -615,6 +663,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         _assistReturnActive = false;
         _assistRewindActive = false;
         _assistAttempt = 0;
+
+        // Reset active-time timeout state
+        _assistReturnActiveElapsed = TimeSpan.Zero;
+        _assistReturnTimerInit = false;
 
         // Clear only the local single-waypoint routing; the normal route logic will refill next.
         navigation.ClearAllRoutes();

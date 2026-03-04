@@ -241,7 +241,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (consecutiveApproach >= 6 && !playerReader.IsInMeleeRange())
+        if (consecutiveApproach >= 6 
+            && (!playerReader.IsInMeleeRange() || combatLog.DamageDoneCount() == 0))
         {
             
             if (!stuckDetector.IsMoving())
@@ -255,7 +256,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
                 
         }
-        else if (consecutiveApproach >= 6 && playerReader.IsInMeleeRange())
+        else if (consecutiveApproach >= 6 
+            && (playerReader.IsInMeleeRange() && combatLog.DamageDoneCount() > 0))
         {
             consecutiveApproach = 0;
             logger.LogInformation("StuckDetector: Reset consecutiveApproach");

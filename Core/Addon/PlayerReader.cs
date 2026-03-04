@@ -182,6 +182,9 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public bool MinRangeZero() => MinRange() == 0;
 
     public bool IsInMeleeRange() => MinRange() == 0 && MaxRange() != 0 && MaxRange() <= 5;
+
+    public bool IsInMidMeleeRange() => MinRange() == 0 && MaxRange() != 0 && MaxRange() <= 4;
+
     public bool InCloseMeleeRange() => MinRange() == 0 && MaxRange() <= 2;
 
     public bool IsInDeadZone() => MinRange() >= 5 && SpellInRange.Target_Trade; // between 5-8 yard - hunter and warrior
