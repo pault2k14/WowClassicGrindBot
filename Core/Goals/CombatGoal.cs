@@ -200,6 +200,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool castOnTargetThisUpdate = false;
         wait.Update();
         logger.LogInformation("In CombatGoals Update!");
+        logger.LogInformation("consecutiveApproach: " + consecutiveApproach);
 
         if (chatReader.ForcedFollow)
         {
@@ -245,10 +246,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             
             if (!stuckDetector.IsMoving())
             {
+                logger.LogInformation("StuckDetector: We aren't moving");
                 stuckDetector.Update();
-                consecutiveApproach = 0;
+            }
+            else
+            {
+                logger.LogInformation("StuckDetector: We are moving");
             }
                 
+        }
+        else if (consecutiveApproach >= 6 && playerReader.IsInMeleeRange())
+        {
+            consecutiveApproach = 0;
+            logger.LogInformation("StuckDetector: Reset consecutiveApproach");
         }
 
         // If we have no target or our target is dead we should
