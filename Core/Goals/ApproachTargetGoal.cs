@@ -73,6 +73,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if(classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.assistisfollowing, true);
+
+            // This might allow assist focus to approach mob when
+            // they have requested a return.
+            AddPrecondition(GoapKey.assistrequestreturn, false);
         }
 
         AddPrecondition(GoapKey.forcedfollow, false);
@@ -81,7 +85,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.targethostile, true);
         AddPrecondition(GoapKey.incombatrange, false);
         AddPrecondition(GoapKey.inblacklistarea, false);
-        AddPrecondition(GoapKey.assistrequestreturn, false);
+        
 
         AddEffect(GoapKey.incombatrange, true);
     }

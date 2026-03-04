@@ -129,6 +129,20 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void Update()
     {
+        // Situation where we may have gotten stuck following focus
+        // and now focus is in combat. Let's try to acquire their target
+        // and approach it.
+        if(bits.Focus_Combat() && bits.FocusTarget())
+        {
+            wait.Update();
+            input.PressTargetFocus();
+            input.PressTargetOfTarget();
+            wait.Update();
+            input.PressInteract();
+            wait.Update();
+            return;
+        }
+
         while (restHandler.IsResting())
         {
             logger.LogInformation("FollowFocusGoal: I'm waiting while resting.");
