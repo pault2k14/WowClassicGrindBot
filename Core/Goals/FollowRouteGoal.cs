@@ -315,7 +315,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             switch (g.Key)
             {
                 case GoapKey.assistisfollowing:
-                    if(!chatReader.AssistIsFollowing)
+                    if(!chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn)
                     {
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - !chatReader.AssistIsFollowing");
                         Abort();

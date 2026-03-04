@@ -18,6 +18,7 @@
         "Name": "StopAttack",
         "BeforeCastDelay": 25,
         "Requirements": [
+          "InMeleeRange",
           "Battle Shout",
           "AutoAttacking",
           "TargetHealth% > 98",
@@ -42,6 +43,7 @@
         "BeforeCastFaceTarget": true,
         "Cooldown": 120000,
         "Requirements": [
+          "InMeleeRange",
           "!TargetsMe",
           "Health% > 10"
         ]
@@ -105,6 +107,7 @@
         "Name": "AutoAttack",
         "BeforeCastFaceTarget": true,
         "Requirements": [
+          "InMeleeRange",
           "!AutoAttacking"
         ]
       },
