@@ -126,6 +126,7 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public UnitClassification TargetClassification => (UnitClassification)(reader.GetInt(43) % 100);
 
     public bool TargetIsElite() => TargetClassification == UnitClassification.Elite;
+    public bool TargetIsRareElite() => TargetClassification == UnitClassification.RareElite;
 
     public int Money => reader.GetInt(44) + (reader.GetInt(45) * 1000000);
 

@@ -241,7 +241,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (consecutiveApproach >= 6 
+        if (consecutiveApproach >= 5 
             && (!playerReader.IsInMeleeRange() || combatLog.DamageDoneCount() == 0))
         {
             
@@ -256,7 +256,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
                 
         }
-        else if (consecutiveApproach >= 6 
+        else if (consecutiveApproach >= 5 
             && (playerReader.IsInMeleeRange() && combatLog.DamageDoneCount() > 0))
         {
             consecutiveApproach = 0;

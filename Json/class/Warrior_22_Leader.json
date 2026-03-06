@@ -1,0 +1,180 @@
+{
+  "ClassName": "Warrior",
+  "Mode": "PartyLeader",
+  "Loot": true,
+  "Skin": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/20-30/Stonetalon Mountains/23-26 Stone Path.json",
+  "PathThereAndBack": false,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
+  "Blacklist": [
+
+  ],
+  "IntVariables": {
+    "Debuff_POISON": 136067
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirement": "Health% < 20"
+      },
+      {
+        "Name": "Strong Anti-Venom",
+        "Key": "F8",
+        "Requirements": [ "Debuff_POISON > 1" ]
+      },
+      {
+        "Name": "StopAttack",
+        "BeforeCastDelay": 25,
+        "Requirements": [
+          "InMeleeRange",
+          "Battle Shout",
+          "AutoAttacking",
+          "TargetHealth% > 98",
+          "Rage >= Cost_Heroic Strike"
+        ],
+        "AfterCastDelay": 25
+      },
+      {
+        "Name": "Bloodrage",
+        "Key": "8",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "Health% > 50"
+        ]
+      },
+      {
+        "Name": "Retaliation",
+        "Key": "9",
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "TargetElite || TargetRareElite"
+        ]
+      },
+      {
+        "Name": "Mocking Blow",
+        "Key": "1",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 120000,
+        "Requirements": [
+          "InMeleeRange",
+          "!TargetsMe",
+          "Health% > 10"
+        ]
+      },
+      {
+        "Name": "Hamstring",
+        "Key": "7",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
+          "!Hamstring",
+          "TargetHealth% < 40"
+        ]
+      },
+      {
+        "Name": "Thunder Clap",
+        "Key": "6",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 5000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 20",
+          "!Thunder Clap && MobCount > 1"
+        ]
+      },
+      {
+        "Name": "Cleave",
+        "Key": "=",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 20",
+          "MobCount > 1",
+          "MainHandSwing > -400"
+        ],
+        "AfterCastWaitSwing": true
+      },
+      {
+        "Name": "Overpower",
+        "Key": "0",
+        "BeforeCastFaceTarget": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 5"
+        ]
+      },
+      {
+        "Name": "Heroic Strike",
+        "Key": "2",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 15",
+          "MainHandSwing > -400",
+          "MobCount < 2"
+        ],
+        "AfterCastWaitSwing": true
+      },
+      {
+        "Name": "Rend",
+        "Key": "5",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
+          "!Rend"
+        ]
+      },
+      {
+        "Name": "AutoAttack",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "!AutoAttacking"
+        ]
+      },
+      {
+        "Name": "Approach",
+        "Log": true
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Cost": 3.1,
+        "Name": "Battle Shout",
+        "Key": "4",
+        "InCombat": "i dont care",
+        "WhenUsable": true,
+        "Requirement": "!Battle Shout"
+      },
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health% < 40",
+        "Cost": 3
+      },
+      {
+        "Name": "Swap Thrown",
+        "Key": "-",
+        "Requirements": [
+          "!HasRangedWeapon"
+        ]
+      }
+    ]
+  }
+}

@@ -146,6 +146,7 @@ public sealed partial class RequirementFactory
             { "TargetsPet", playerReader.TargetsPet },
             { "TargetsNone", playerReader.TargetsNone },
             { "TargetElite", playerReader.TargetIsElite },
+            { "TargetRareElite", playerReader.TargetIsRareElite },
             { "TargetCombat", bits.Target_Combat },
             { "TargetTargetsPlayerOrPet", bits.TargetTarget_PlayerOrPet },
 
