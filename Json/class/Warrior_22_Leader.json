@@ -5,8 +5,8 @@
   "Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/20-30/Stonetalon Mountains/23-26 Stone Path.json",
-  "PathThereAndBack": false,
+  "PathFilename": "_pack/20-30/Ashenvale/22-25 (mob level) Thistlefur Village.json",
+  "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
@@ -15,17 +15,40 @@
   "IntVariables": {
     "Debuff_POISON": 136067
   },
+  "Pull": {
+    "Sequence": [
+      {
+        "Name": "Thrown",
+        "Key": "9",
+        "WhenUsable": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "AfterCastWaitMeleeRange": true,
+        "AfterCastDelay": 500,
+        "Requirements": [
+          "HasRangedWeapon && !Items Broken",
+          "!InMeleeRange",
+          "MaxRange < 26",
+          "MinRange > 9"
+        ]
+      },
+      {
+        "Name": "Charge",
+        "Key": "3",
+        "WhenUsable": true,
+        "Requirements": [
+          "MaxRange < 9"
+        ],
+        "AfterCastWaitMeleeRange": true
+      }
+    ]
+  },
   "Combat": {
     "Sequence": [
       {
         "Name": "HP Potion",
         "Key": "F10",
         "Requirement": "Health% < 20"
-      },
-      {
-        "Name": "Strong Anti-Venom",
-        "Key": "F8",
-        "Requirements": [ "Debuff_POISON > 1" ]
       },
       {
         "Name": "StopAttack",
@@ -51,7 +74,7 @@
       },
       {
         "Name": "Retaliation",
-        "Key": "9",
+        "Key": "F9",
         "WhenUsable": true,
         "Requirements": [
           "InMeleeRange",
