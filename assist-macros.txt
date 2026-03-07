@@ -1,3 +1,11 @@
+F1
+Follow Me macro
+/p follow me
+
+F2
+Stop following me macro
+/p stop following me
+
 F3
 Following Macro
 /p i'm following
@@ -8,9 +16,15 @@ I'm not following Macro
 
 F5
 Map Pos Macro
-/run local c=C_Map.GetBestMapForUnit("player") local p=C_Map.GetPlayerMapPosition(c,"player") SendChatMessage(format("i tried following but you are too far away my position:%0.1f,%0.1f",p.x*100,p.y*100),"PARTY")
+/run local c=C_Map.GetBestMapForUnit("player") local p=C_Map.GetPlayerMapPosition(c,"player") SendChatMessage(format("i tried following but you are too far away my position:%0.6f,%0.6f",p.x*100,p.y*100),"PARTY")
 
-Added Z
-/run local c=C_Map.GetBestMapForUnit("player") local p=C_Map.GetPlayerMapPosition(c,"player") SendChatMessage(format("i tried following but you are too far away my position:%0.1f,%0.1f,%0.1f",p.x*100,p.y*100,p.z*100),"PARTY")
+F6
+Enable EIK
+/run SetCVar('SoftTargetInteract', 3)
 
- - Would need to update chat reader and go to waypoint
+F7
+Disable EIK
+/run SetCVar('SoftTargetInteract', 0)
+
+
+
