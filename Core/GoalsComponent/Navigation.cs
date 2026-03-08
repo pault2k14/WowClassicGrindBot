@@ -175,7 +175,10 @@ public sealed partial class Navigation : IDisposable
     private bool escapeRouteInProgress;
     private Vector3 escapeRouteEndW;
 
-
+    private Vector3 lastNoPathStartW;
+    private Vector3 lastNoPathEndW;
+    private int sameNoPathCount;
+    private const int MaxSameNoPathBeforeFallback = 3;
 
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
@@ -1516,6 +1519,76 @@ public sealed partial class Navigation : IDisposable
         noProgressTargetW = newTarget ?? default;
     }
 
+    private bool HandleRepeatedNoPath(Vector3 startW, Vector3 endW)
+    {
+        bool same =
+            lastNoPathStartW.WorldDistanceXYTo(startW) < 0.1f &&
+            lastNoPathEndW.WorldDistanceXYTo(endW) < 0.1f;
+
+        if (!same)
+        {
+            lastNoPathStartW = startW;
+            lastNoPathEndW = endW;
+            sameNoPathCount = 0;
+        }
+
+        sameNoPathCount++;
+
+        logger.LogWarning(
+            $"[NAV] Repeated no-path count={sameNoPathCount} start={startW} end={endW} wpCount={wayPoints.Count}");
+
+        // For single-waypoint / one-off movement, try fallback sooner.
+        if (wayPoints.Count == 1)
+        {
+            float dist = startW.WorldDistanceXYTo(endW);
+
+            // First fallback: try direct movement route for shorter distances.
+            if (sameNoPathCount == 2 && dist <= 30f)
+            {
+                logger.LogWarning(
+                    $"[NAV] No-path fallback: building direct route start={startW} end={endW} dist={dist:0.00}");
+
+                routeToNextWaypoint.Clear();
+                routeToNextWaypoint.Push(Nav2D(endW));
+                stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(endW));
+                ResetChaseProgressWatchdog(Nav2D(endW));
+                ResetNoProgressWatchdog(Nav2D(endW));
+                UpdateTotalRoute();
+
+                // small cooldown so we don't instantly re-enter refill
+                noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
+                return true;
+            }
+
+            // Second fallback: force unstuck
+            if (sameNoPathCount == 3)
+            {
+                logger.LogWarning(
+                    $"[NAV] No-path fallback: forcing unstuck start={startW} end={endW}");
+
+                stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(endW));
+                stuckDetector.Update(StuckOwnerId, token);
+
+                noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(1000);
+                return true;
+            }
+        }
+
+        // Let higher-level logic take over after repeated failures.
+        if (sameNoPathCount >= MaxSameNoPathBeforeFallback)
+        {
+            logger.LogWarning(
+                $"[NAV] No-path fallback: escalating to OnPathFailed start={startW} end={endW}");
+
+            sameNoPathCount = 0;
+            OnPathFailed?.Invoke(startW, endW);
+            noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(1000);
+            return true;
+        }
+
+        return false;
+    }
+
     private void PathCalculatedCallback(long requestId, PathResult result)
     {
         long activeId = Volatile.Read(ref activePathRequestId);
@@ -1550,9 +1623,6 @@ public sealed partial class Navigation : IDisposable
             // throttle refills so we don’t enqueue again the same frame
             noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(350);
 
-            // Let higher-level logic react (assist return rewind, backoff, etc.)
-            OnPathFailed?.Invoke(result.StartW, result.EndW);
-
             if (lastFailedDestination != result.EndW)
             {
                 lastFailedDestination = result.EndW;
@@ -1560,16 +1630,26 @@ public sealed partial class Navigation : IDisposable
             }
 
             failedAttempt++;
+
+            // NEW: repeated no-path handling for the same request
+            if (HandleRepeatedNoPath(Nav2D(result.StartW), Nav2D(result.EndW)))
+                return;
+
+            // Keep a light unstuck fallback too
             if (failedAttempt > 2)
             {
                 failedAttempt = 0;
                 stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(result.EndW));
                 stuckDetector.Update(StuckOwnerId);
             }
+
             return;
         }
 
         failedAttempt = 0;
+        sameNoPathCount = 0;
+        lastNoPathStartW = default;
+        lastNoPathEndW = default;
 
         // (Keep your blacklist validation here if needed)
         // ...
@@ -1629,14 +1709,17 @@ public sealed partial class Navigation : IDisposable
                 // If near edge, allow path (escape logic handles it)
                 if (!nearEdge)
                 {
+                    // IMPORTANT:
+                    // routeToNextWaypoint.Peek() is already the NEXT step to travel to.
+                    // Stack.ToArray() returns top-first, which is already travel order for this stack.
+                    // Do NOT reverse here, or we'll incorrectly validate start -> final end directly.
                     var steps = routeToNextWaypoint.ToArray();
-                    Array.Reverse(steps); // travel order
 
                     Vector3 prev = Nav2D(result.StartW);
 
                     for (int i = 0; i < steps.Length; i++)
                     {
-                        Vector3 cur = steps[i];
+                        Vector3 cur = Nav2D(steps[i]);
 
                         // 1. Point check (cheap)
                         if (AreaBlacklist.ContainsWorld(cur))
@@ -1678,7 +1761,9 @@ public sealed partial class Navigation : IDisposable
                         {
                             logger.LogWarning(
                                 $"[BL] Path segment crosses blacklist; rejecting. " +
-                                $"seg=({prev} -> {cur})");
+                                $"seg=({prev} -> {cur}) i={i} " +
+                                $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +
+                                $"routeEnd={(steps.Length > 0 ? Nav2D(steps[^1]).ToString() : "<none>")}");
 
                             Vector3 hint = new Vector3((prev.X + cur.X) * 0.5f, (prev.Y + cur.Y) * 0.5f, 0f);
 
@@ -1844,11 +1929,6 @@ public sealed partial class Navigation : IDisposable
                     logger.LogError(ex, "[NAV] PathFinderThread exception; returning empty path");
                     pathResults.Enqueue(new PathResult(pathRequest, Array.Empty<Vector3>(), pathRequest.Callback));
                 }
-            }
-
-            if (pathRequests.IsEmpty && Volatile.Read(ref pathRequestPending) == 1 && waitingForPathResult)
-            {
-                logger.LogError("[NAV] Path gate stuck: pending=1 waiting=true but request queue is empty.");
             }
 
             manualReset.Wait();
