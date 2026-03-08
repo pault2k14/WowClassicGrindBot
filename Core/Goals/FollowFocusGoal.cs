@@ -178,7 +178,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
             }
-            else if (!playerReader.SpellInRange.Focus_Inspect)
+            else if (!bits.AutoFollow() && !playerReader.SpellInRange.Focus_Inspect)
             {
                 // I want to follow but the party member has gone too far
                 // let's tell them and give them our coordinates to find us at
@@ -221,7 +221,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
 
-            } else if(!playerReader.SpellInRange.PartyMember1_Inspect) 
+            } else if(!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember1_Inspect) 
             {
                 // I want to follow but the party member has gone too far
                 // let's tell them and give them our coordinates to find us at
@@ -264,7 +264,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
             }
-            else if (!playerReader.SpellInRange.PartyMember2_Inspect)
+            else if (!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember2_Inspect)
             {
                 // I want to follow but the party member has gone too far
                 // let's tell them and give them our coordinates to find us at
@@ -307,7 +307,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
             }
-            else if (!playerReader.SpellInRange.PartyMember3_Inspect)
+            else if (!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember3_Inspect)
             {
                 // I want to follow but the party member has gone too far
                 // let's tell them and give them our coordinates to find us at
@@ -350,7 +350,7 @@ public sealed class FollowFocusGoal : GoapGoal
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
             }
-            else if (!playerReader.SpellInRange.PartyMember4_Inspect)
+            else if (!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember4_Inspect)
             {
                 // I want to follow but the party member has gone too far
                 // let's tell them and give them our coordinates to find us at

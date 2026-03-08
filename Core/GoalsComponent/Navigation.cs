@@ -65,6 +65,7 @@ public sealed partial class Navigation : IDisposable
     public bool SimplifyRouteToWaypoint { get; set; } = true;
 
     private bool active;
+    private bool destinationReachedLatched;
     private Vector3 playerWorldPos;
 
     private readonly ConcurrentQueue<PathRequest> pathRequests = new();
@@ -180,6 +181,7 @@ public sealed partial class Navigation : IDisposable
     private int sameNoPathCount;
     private const int MaxSameNoPathBeforeFallback = 3;
 
+
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
         PlayerDirection playerDirection,
@@ -281,6 +283,7 @@ public sealed partial class Navigation : IDisposable
             return false;
 
         Vector3 completed = Nav2D(wayPoints.Pop());
+        SetLastSafeAnchor(playerPos);
 
         logger.LogWarning(
             $"[NAV] POP WAYPOINT (XY reached) completed={completed} " +
@@ -293,8 +296,7 @@ public sealed partial class Navigation : IDisposable
 
         if (wayPoints.Count == 0)
         {
-            StopAndResetAtDestination();
-            OnDestinationReached?.Invoke();
+            CompleteDestinationReached();
         }
 
         return true;
@@ -330,6 +332,24 @@ public sealed partial class Navigation : IDisposable
         return routeToNextWaypoint.Count > 0;
     }
 
+    private void CompleteDestinationReached(bool fireWaypointReached = false)
+    {
+        if (destinationReachedLatched)
+            return;
+
+        destinationReachedLatched = true;
+
+        escapeRouteInProgress = false;
+        escapeActive = false;
+
+        StopAndResetAtDestination();
+
+        if (fireWaypointReached)
+            OnWayPointReached?.Invoke();
+
+        OnDestinationReached?.Invoke();
+    }
+
     private void StopAndResetAtDestination()
     {
         stopMoving.Stop();
@@ -338,6 +358,11 @@ public sealed partial class Navigation : IDisposable
         ResetStuckParameters();
         ResetNoProgressWatchdog();
         ResetChaseProgressWatchdog();
+    }
+
+    private void ClearDestinationLatch()
+    {
+        destinationReachedLatched = false;
     }
 
     private bool IsAtFinalWaypoint(in Vector3 playerPos, out Vector3 finalWp)
@@ -569,19 +594,17 @@ public sealed partial class Navigation : IDisposable
 
         if (AreaBlacklist == null && pathSettings.MapBlacklistRects is { Length: > 0 })
         {
-            logger.LogInformation("[NAV]: Update - pathSettings.MapBlacklistRects.Length: " + pathSettings.MapBlacklistRects.Length);
-
             AreaBlacklist = BlacklistConversion.BuildWorldBlacklistFromMapRects(
                 pathSettings.MapBlacklistRects,
                 playerReader.WorldMapArea
             );
 
+            // Tune these as desired
             DetourMargin = 12f;
             MaxDetourAttemptsPerTarget = 6;
         }
         else if (pathSettings.MapBlacklistRects is { Length: 0 })
         {
-            logger.LogInformation("[NAV]: Update - pathSettings.MapBlacklistRects.Length: " + pathSettings.MapBlacklistRects.Length);
             AreaBlacklist = null;
         }
 
@@ -593,16 +616,34 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation(
                 $"[NAV-SANITY] EXIT noWork inside={AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true}");
 
-            StopAndResetAtDestination();
-            OnDestinationReached?.Invoke();
+            // Only do destination-stop/event logic once per completed route.
+            if (!destinationReachedLatched)
+            {
+                destinationReachedLatched = true;
+
+                StopAndResetAtDestination();
+
+                OnDestinationReached?.Invoke();
+                NavDbg("RETURN noWork (wp=0 route=0) -> OnDestinationReached");
+            }
+
             return;
         }
 
         SkipBlacklistedWaypoints();
+
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
-            StopAndResetAtDestination();
-            OnDestinationReached?.Invoke();
+            if (!destinationReachedLatched)
+            {
+                destinationReachedLatched = true;
+
+                StopAndResetAtDestination();
+
+                OnDestinationReached?.Invoke();
+                NavDbg("RETURN afterSkipBlacklistedWaypoints noWork (wp=0 route=0)");
+            }
+
             return;
         }
 
@@ -669,13 +710,12 @@ public sealed partial class Navigation : IDisposable
         {
             if (IsAtFinalWaypoint(playerPos, out _))
             {
+                SetLastSafeAnchor(playerPos);
                 wayPoints.Pop();
                 routeToNextWaypoint.Clear();
                 SyncRouteStateToTop();
 
-                StopAndResetAtDestination();
-                OnWayPointReached?.Invoke();
-                OnDestinationReached?.Invoke();
+                CompleteDestinationReached(fireWaypointReached: true);
                 return;
             }
 
@@ -718,6 +758,7 @@ public sealed partial class Navigation : IDisposable
                 break;
 
             poppedAny = true;
+            SetLastSafeAnchor(playerPos);
 
             if (escapeRouteInProgress && routeToNextWaypoint.Count == 0)
             {
@@ -736,13 +777,12 @@ public sealed partial class Navigation : IDisposable
         {
             if (IsAtFinalWaypoint(playerPos, out _))
             {
+                SetLastSafeAnchor(playerPos);
                 wayPoints.Pop();
                 routeToNextWaypoint.Clear();
                 SyncRouteStateToTop();
 
-                StopAndResetAtDestination();
-                OnWayPointReached?.Invoke();
-                OnDestinationReached?.Invoke();
+                CompleteDestinationReached(fireWaypointReached: true);
                 return;
             }
 
@@ -830,13 +870,12 @@ public sealed partial class Navigation : IDisposable
         {
             if (IsAtFinalWaypoint(playerPos, out _))
             {
+                SetLastSafeAnchor(playerPos);
                 wayPoints.Pop();
                 routeToNextWaypoint.Clear();
                 SyncRouteStateToTop();
 
-                StopAndResetAtDestination();
-                OnWayPointReached?.Invoke();
-                OnDestinationReached?.Invoke();
+                CompleteDestinationReached(fireWaypointReached: true);
                 return;
             }
 
@@ -948,6 +987,7 @@ public sealed partial class Navigation : IDisposable
     public void Resume()
     {
         active = true;
+        ClearDestinationLatch();
         SetLastSafeAnchor(playerReader.WorldPos);
         stuckDetector.Acquire(StuckOwnerId);
         ResetStuckParameters();
@@ -985,6 +1025,7 @@ public sealed partial class Navigation : IDisposable
     public void ClearAllRoutes()
     {
         routeToNextWaypoint.Clear();
+        ClearDestinationLatch();
         escapeRouteInProgress = false;
         escapeActive = false;
         SyncRouteStateToTop();
@@ -1019,6 +1060,7 @@ public sealed partial class Navigation : IDisposable
     public void Stop()
     {
         active = false;
+        ClearDestinationLatch();
         stuckDetector.Release(StuckOwnerId);
 
         Volatile.Write(ref activePathRequestId, Interlocked.Increment(ref nextPathRequestId));
@@ -1059,6 +1101,7 @@ public sealed partial class Navigation : IDisposable
     public void  SetWayPoints(Span<Vector3> points)
     {
         active = true;
+        ClearDestinationLatch();
         SetLastSafeAnchor(playerReader.WorldPos);
         wayPoints.Clear();
         routeToNextWaypoint.Clear();
@@ -1150,7 +1193,7 @@ public sealed partial class Navigation : IDisposable
                 LogRefill("[NAV] Refill: exit (no waypoints)");
                 RefillExit("noWaypoints");
                 UpdateTotalRoute();
-                OnDestinationReached?.Invoke();
+                CompleteDestinationReached();
 
                 goto REFILL_EXIT;
                 //return;
@@ -1290,7 +1333,7 @@ public sealed partial class Navigation : IDisposable
             {
                 RefillExit("SkipBlacklistedWaypoints_false_destinationReached");
                 logger.LogInformation("[NAV] Refill: SkipBlacklistedWaypoints returned false -> destination reached");
-                UpdateTotalRoute();
+                CompleteDestinationReached();
                 OnDestinationReached?.Invoke();
                 _phase = "exit_SkipBlacklistedWaypoints_false_destinationReached";
                 goto REFILL_EXIT;
@@ -1330,8 +1373,7 @@ public sealed partial class Navigation : IDisposable
 
                 if (wayPoints.Count == 0)
                 {
-                    StopAndResetAtDestination();
-                    OnDestinationReached?.Invoke();
+                    CompleteDestinationReached();
 
                     RefillExit("wpAlreadyReached_pop");
                     _phase = "exit_wpAlreadyReached_pop";

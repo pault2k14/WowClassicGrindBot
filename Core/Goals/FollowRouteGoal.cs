@@ -287,9 +287,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         sideActivityManualReset.Set();
 
-        // If we are the PartyLeader and our assist has requested a return to them
-        // let's use their location as a waypoint and go to them.
-        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+        // PartyLeader assist-return handling:
+        // IMPORTANT: "AssistIsFollowing" wins over stale "AssistRequestReturn".
+        // Once the assist is following again, immediately clear assist-return mode
+        // and resume the normal route instead of re-issuing the one-off return waypoint.
+        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistIsFollowing)
+        {
+            ClearAssistReturnState();
+            navigation.ClearAllRoutes();
+            RefillWaypoints(true);
+        }
+        else if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
             Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
             logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
@@ -315,19 +323,28 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             switch (g.Key)
             {
                 case GoapKey.assistisfollowing:
-                    if(!chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn)
+                    if (!chatReader.AssistIsFollowing)
                     {
-                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - !chatReader.AssistIsFollowing");
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist stopped following");
                         Abort();
                     }
-                    else if(chatReader.AssistIsFollowing)
+                    else
                     {
-                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - !chatReader.AssistIsFollowing");
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist is following again");
+
+                        // IMPORTANT:
+                        // If we were in assist-return mode, clear it first so Resume() does not
+                        // get pulled back into the stale assist-return waypoint path.
+                        ClearAssistReturnState();
+
+                        // Clear any one-off nav state from the assist return move.
+                        navigation.ClearAllRoutes();
+
                         Resume();
                     }
 
                     break;
-                
+
                 case GoapKey.assistrequestreturn:
                     if (chatReader.AssistRequestReturn)
                     {
@@ -660,16 +677,24 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         logger.LogWarning($"[FRG] AssistReturn abort: {reason}");
 
+        ClearAssistReturnState();
+
+        // Clear only the local single-waypoint routing; the normal route logic will refill next.
+        navigation.ClearAllRoutes();
+    }
+
+    private void ClearAssistReturnState()
+    {
         _assistReturnActive = false;
         _assistRewindActive = false;
         _assistAttempt = 0;
 
-        // Reset active-time timeout state
-        _assistReturnActiveElapsed = TimeSpan.Zero;
-        _assistReturnTimerInit = false;
+        _assistReturnTargetW = default;
+        _assistRewindAnchorW = default;
 
-        // Clear only the local single-waypoint routing; the normal route logic will refill next.
-        navigation.ClearAllRoutes();
+        _assistReturnActiveElapsed = TimeSpan.Zero;
+        _assistReturnLastTickUtc = DateTime.MinValue;
+        _assistReturnTimerInit = false;
     }
 
     private void Navigation_OnPathFailed(Vector3 startW, Vector3 endW)
@@ -742,24 +767,19 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (debug)
             LogDebug("Navigation_OnDestinationReached");
 
-        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+        // Use local assist-return state, not just chat state.
+        if (classConfig.Mode == Mode.PartyLeader && _assistReturnActive && !_assistRewindActive)
         {
-            // If we were actively doing assist-return movement and we hit destination, end assist-return.
-            if (_assistReturnActive && !_assistRewindActive)
-            {
-                logger.LogInformation("[FRG] AssistReturn destination reached.");
-                _assistReturnActive = false;
-                _assistAttempt = 0;
-            }
+            logger.LogInformation("[FRG] AssistReturn destination reached.");
 
-            // Then wait for assist to say “following” / future requests
+            ClearAssistReturnState();
+
+            // We are intentionally idle here until the assist confirms they are following again.
+            navigation.PausePathing();
             return;
         }
-        else
-        {
-            RefillWaypoints(false);
-        }
 
+        RefillWaypoints(false);
         MountIfPossible();
     }
 
@@ -788,13 +808,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         else
         {
             // If something else is forcing a one-off move, disable assist mode
-            _assistReturnActive = false;
-            _assistRewindActive = false;
-            _assistAttempt = 0;
+            ClearAssistReturnState();
         }
 
         navigation.SetWayPoints(stackalloc Vector3[1] { waypointToGoTo });
-        return;
     }
 
     public void RefillWaypoints(bool onlyClosest)
