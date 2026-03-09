@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualBasic;
 using System;
+using System.Threading;
 
 
 namespace Core.Goals;
@@ -20,6 +21,17 @@ public sealed class FollowFocusGoal : GoapGoal
     private readonly ChatReader chatReader;
     private DateTime lastExecution = DateTime.MinValue;
     private TimeSpan gateInterval = TimeSpan.FromSeconds(30);
+    private int focusTargetGuid;
+    private Action<CancellationToken> FocusTargetInput;
+    private followMessage lastMessageSent = followMessage.None;
+
+    private enum followMessage
+    {
+        None,
+        ImFollowing,
+        ImNotFollowing,
+        ICantFollow
+    }
 
     public FollowFocusGoal(ConfigurableInput input,
         PlayerReader playerReader,
@@ -40,7 +52,7 @@ public sealed class FollowFocusGoal : GoapGoal
         this.logger = logger;
         this.restHandler = restHandler;
         this.chatReader = chatReader;
-
+        
         if (classConfig.UnitToFollow == "focus")
         {
             AddPrecondition(GoapKey.hasfocus, true);
@@ -60,6 +72,34 @@ public sealed class FollowFocusGoal : GoapGoal
         // TODO Trying to fix NO GOAL issue, Drinking seems to temporarily become true?
         //AddPrecondition(GoapKey.eating, false);
         //AddPrecondition(GoapKey.drinking, false);
+
+        switch(classConfig.UnitToFollow)
+        {
+            case "focus":
+                focusTargetGuid = playerReader.FocusGuid;
+                FocusTargetInput = input.PressTargetFocus;
+                break;
+            case "party1":
+                focusTargetGuid = playerReader.PartyMember1Guid;
+                FocusTargetInput = input.PressTargetFocus;
+                break;
+            case "party2":
+                focusTargetGuid = playerReader.PartyMember2Guid;
+                FocusTargetInput = input.PressTargetFocusPartyMemberTwo;
+                break;
+            case "party3":
+                focusTargetGuid = playerReader.PartyMember3Guid;
+                FocusTargetInput = input.PressTargetFocusPartyMemberThree;
+                break;
+            case "party4":
+                focusTargetGuid = playerReader.PartyMember4Guid;
+                FocusTargetInput = input.PressTargetFocusPartyMemberFour;
+                break;
+            default:
+                focusTargetGuid = playerReader.FocusGuid;
+                FocusTargetInput = input.PressTargetFocus;
+                break;
+        }
     }
 
     public override void OnEnter()
@@ -77,52 +117,17 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void OnExit()
     {
-
-        if (classConfig.UnitToFollow == "focus")
+        if (playerReader.TargetGuid == focusTargetGuid)
         {
-            if (playerReader.TargetGuid == playerReader.FocusGuid)
-            {
-                input.PressClearTarget();
-                wait.Update();
-            }
-        }
-        else if (classConfig.UnitToFollow == "party1")
-        {
-            if (playerReader.TargetGuid == playerReader.PartyMember1Guid)
-            {
-                input.PressClearTarget();
-                wait.Update();
-            }
-        }
-        else if (classConfig.UnitToFollow == "party2")
-        {
-            if (playerReader.TargetGuid == playerReader.PartyMember2Guid)
-            {
-                input.PressClearTarget();
-                wait.Update();
-            }
-        }
-        else if (classConfig.UnitToFollow == "party3")
-        {
-            if (playerReader.TargetGuid == playerReader.PartyMember3Guid)
-            {
-                input.PressClearTarget();
-                wait.Update();
-            }
-        }
-        else if (classConfig.UnitToFollow == "party4")
-        {
-            if (playerReader.TargetGuid == playerReader.PartyMember4Guid)
-            {
-                input.PressClearTarget();
-                wait.Update();
-            }
+            input.PressClearTarget();
+            wait.Update();
         }
 
         input.StepBackwards();
         
         // Use Macro to say I'm not following in party chat
         input.PressAssistIsNotFollowing();
+        lastMessageSent = followMessage.ImNotFollowing;
         wait.Update();
 
     }
@@ -155,220 +160,60 @@ public sealed class FollowFocusGoal : GoapGoal
             return;
         }
 
-        if (classConfig.UnitToFollow == "focus")
+        if(bits.AutoFollow() && (lastMessageSent == followMessage.ImFollowing))
         {
-            if (playerReader.TargetGuid != playerReader.FocusGuid)
-            {
-                input.PressTargetFocus();
-                wait.Update();
-            }
-
-            if (playerReader.TargetGuid == playerReader.FocusGuid &&
-                playerReader.SpellInRange.Focus_Inspect &&
-                !bits.AutoFollow() &&
-                !input.FollowTarget.OnCooldown())
-            {
-                input.PressFollowTarget();
-
-                wait.Update();
-                // Use Macro to send i'm following in party chat
-                input.PressAssistIsFollowing();
-                wait.Update();
-
-                chatReader.AssistRequestReturn = false;
-                wait.Update();
-            }
-            else if (!bits.AutoFollow() && !playerReader.SpellInRange.Focus_Inspect)
-            {
-                // I want to follow but the party member has gone too far
-                // let's tell them and give them our coordinates to find us at
-                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
-                // 2. Party leader will recieve the chatReader event, parse the map coordinates
-                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
-                //    move to the indicated Map Pos
-                if (DateTime.Now - lastExecution > gateInterval)
-                {
-                    lastExecution = DateTime.Now;
-                    input.StepBackwards();
-                    wait.Update();
-                    input.PressAssistCantFollow();
-                }
-
-                wait.Update();
-                return;
-            }
+            // We are already following we don't need to send another message
+            return;
         }
-        else if (classConfig.UnitToFollow == "party1")
-        {
-            if (playerReader.TargetGuid != playerReader.PartyMember1Guid)
-            {
-                input.PressTargetFocus();
-                wait.Update();
-            }
-
-            if (playerReader.TargetGuid == playerReader.PartyMember1Guid &&
-                playerReader.SpellInRange.PartyMember1_Inspect &&
-                !bits.AutoFollow() &&
-                !input.FollowTarget.OnCooldown())
-            {
-                input.PressFollowTarget();
-                wait.Update();
-
-                // Use Macro to send i'm following in party chat
-                input.PressAssistIsFollowing();
-                wait.Update();
-
-                chatReader.AssistRequestReturn = false;
-                wait.Update();
-
-            } else if(!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember1_Inspect) 
-            {
-                // I want to follow but the party member has gone too far
-                // let's tell them and give them our coordinates to find us at
-                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
-                // 2. Party leader will recieve the chatReader event, parse the map coordinates
-                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
-                //    move to the indicated Map Pos
-                if (DateTime.Now - lastExecution > gateInterval)
-                {
-                    lastExecution = DateTime.Now;
-                    input.StepBackwards();
-                    wait.Update();
-                    input.PressAssistCantFollow();
-                }
-
-                wait.Update();
-                return;
-            }
+        else if(bits.AutoFollow() && (lastMessageSent != followMessage.ImFollowing)) {
+            
+            input.PressAssistIsFollowing();
+            lastMessageSent = followMessage.ImFollowing;
+            wait.Update();
+            return;
         }
-        else if (classConfig.UnitToFollow == "party2")
+
+        if (playerReader.TargetGuid != focusTargetGuid)
         {
-            if (playerReader.TargetGuid != playerReader.PartyMember2Guid)
-            {
-                input.PressTargetFocusPartyMemberTwo();
-                wait.Update();
-            }
-
-            if (playerReader.TargetGuid == playerReader.PartyMember2Guid &&
-                playerReader.SpellInRange.PartyMember2_Inspect &&
-                !bits.AutoFollow() &&
-                !input.FollowTarget.OnCooldown())
-            {
-                input.PressFollowTarget();
-                wait.Update();
-
-                // Use Macro to send i'm following in party chat
-                input.PressAssistIsFollowing();
-                wait.Update();
-
-                chatReader.AssistRequestReturn = false;
-                wait.Update();
-            }
-            else if (!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember2_Inspect)
-            {
-                // I want to follow but the party member has gone too far
-                // let's tell them and give them our coordinates to find us at
-                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
-                // 2. Party leader will recieve the chatReader event, parse the map coordinates
-                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
-                //    move to the indicated Map Pos
-                if (DateTime.Now - lastExecution > gateInterval)
-                {
-                    lastExecution = DateTime.Now;
-                    input.StepBackwards();
-                    wait.Update();
-                    input.PressAssistCantFollow();
-                }
-
-                wait.Update();
-                return;
-            }
+            FocusTargetInput(default);
+            wait.Update();
         }
-        else if (classConfig.UnitToFollow == "party3")
+
+        if (playerReader.TargetGuid == focusTargetGuid &&
+            playerReader.SpellInRange.Focus_Inspect &&
+            !bits.AutoFollow() &&
+            !input.FollowTarget.OnCooldown())
         {
-            if (playerReader.TargetGuid != playerReader.PartyMember3Guid)
-            {
-                input.PressTargetFocusPartyMemberThree();
-                wait.Update();
-            }
+            input.PressFollowTarget();
 
-            if (playerReader.TargetGuid == playerReader.PartyMember3Guid &&
-                playerReader.SpellInRange.PartyMember3_Inspect &&
-                !bits.AutoFollow() &&
-                !input.FollowTarget.OnCooldown())
-            {
-                input.PressFollowTarget();
-                wait.Update();
+            wait.Update();
+            // Use Macro to send i'm following in party chat
+            input.PressAssistIsFollowing();
+            lastMessageSent = followMessage.ImFollowing;
+            wait.Update();
 
-                // Use Macro to send i'm following in party chat
-                input.PressAssistIsFollowing();
-                wait.Update();
-
-                chatReader.AssistRequestReturn = false;
-                wait.Update();
-            }
-            else if (!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember3_Inspect)
-            {
-                // I want to follow but the party member has gone too far
-                // let's tell them and give them our coordinates to find us at
-                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
-                // 2. Party leader will recieve the chatReader event, parse the map coordinates
-                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
-                //    move to the indicated Map Pos
-                if (DateTime.Now - lastExecution > gateInterval)
-                {
-                    lastExecution = DateTime.Now;
-                    input.StepBackwards();
-                    wait.Update();
-                    input.PressAssistCantFollow();
-                }
-
-                wait.Update();
-                return;
-            }
+            chatReader.AssistRequestReturn = false;
+            wait.Update();
         }
-        else if (classConfig.UnitToFollow == "party4")
+        else if (!bits.AutoFollow() && !playerReader.SpellInRange.Focus_Inspect)
         {
-            if (playerReader.TargetGuid != playerReader.PartyMember4Guid)
+            // I want to follow but the party member has gone too far
+            // let's tell them and give them our coordinates to find us at
+            // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
+            // 2. Party leader will recieve the chatReader event, parse the map coordinates
+            // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
+            //    move to the indicated Map Pos
+            if (DateTime.Now - lastExecution > gateInterval)
             {
-                input.PressTargetFocusPartyMemberFour();
+                lastExecution = DateTime.Now;
+                input.StepBackwards();
                 wait.Update();
+                input.PressAssistCantFollow();
+                lastMessageSent = followMessage.ICantFollow;
             }
 
-            if (playerReader.TargetGuid == playerReader.PartyMember4Guid &&
-                playerReader.SpellInRange.PartyMember4_Inspect &&
-                !bits.AutoFollow() &&
-                !input.FollowTarget.OnCooldown())
-            {
-                input.PressFollowTarget();
-                wait.Update();
-
-                // Use Macro to send i'm following in party chat
-                input.PressAssistIsFollowing();
-                wait.Update();
-
-                chatReader.AssistRequestReturn = false;
-                wait.Update();
-            }
-            else if (!bits.AutoFollow() && !playerReader.SpellInRange.PartyMember4_Inspect)
-            {
-                // I want to follow but the party member has gone too far
-                // let's tell them and give them our coordinates to find us at
-                // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
-                // 2. Party leader will recieve the chatReader event, parse the map coordinates
-                // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
-                //    move to the indicated Map Pos
-                if (DateTime.Now - lastExecution > gateInterval)
-                {
-                    lastExecution = DateTime.Now;
-                    input.StepBackwards();
-                    wait.Update();
-                    input.PressAssistCantFollow();
-                }
-
-                wait.Update();
-                return;
-            }
+            wait.Update();
+            return;
         }
 
         wait.Update();
