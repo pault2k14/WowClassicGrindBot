@@ -81,6 +81,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private DateTime _assistReturnLastTickUtc;
     private bool _assistReturnTimerInit;
 
+    // Path traversal direction for PathThereAndBack routes.
+    //  0 = unknown/uninitialized
+    // +1 = move forward through mapRoute (index increasing)
+    // -1 = move backward through mapRoute (index decreasing)
+    private int _pathTraversalDirection;
+
     #region IRouteProvider
 
     public DateTime LastActive => navigation.LastActive;
@@ -295,7 +301,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             ClearAssistReturnState();
             navigation.ClearAllRoutes();
-            RefillWaypoints(true);
+            RefillWaypoints(false);
         }
         else if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
@@ -305,7 +311,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else if (!navigation.HasWaypoint())
         {
-            RefillWaypoints(true);
+            // Normal resume should continue forward along the route,
+            // not snap to a single closest point.
+            RefillWaypoints(false);
         }
         else
         {
@@ -693,7 +701,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         _assistRewindAnchorW = default;
 
         _assistReturnActiveElapsed = TimeSpan.Zero;
-        _assistReturnLastTickUtc = DateTime.MinValue;
+        _assistReturnLastTickUtc = DateTime.UtcNow;
         _assistReturnTimerInit = false;
     }
 
@@ -767,14 +775,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (debug)
             LogDebug("Navigation_OnDestinationReached");
 
-        // Use local assist-return state, not just chat state.
-        if (classConfig.Mode == Mode.PartyLeader && _assistReturnActive && !_assistRewindActive)
+        if (classConfig.Mode == Mode.PartyLeader && (_assistReturnActive || _assistRewindActive))
         {
             logger.LogInformation("[FRG] AssistReturn destination reached.");
 
             ClearAssistReturnState();
 
-            // We are intentionally idle here until the assist confirms they are following again.
+            // Intentionally idle until assist-following signal arrives
             navigation.PausePathing();
             return;
         }
@@ -814,6 +821,46 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         navigation.SetWayPoints(stackalloc Vector3[1] { waypointToGoTo });
     }
 
+    private static int ChooseForwardResumeIndex(ReadOnlySpan<Vector3> pathMap, Vector3 playerMap, int closestIndex)
+    {
+        if (pathMap.Length == 0)
+            return 0;
+
+        if (closestIndex < 0)
+            return 0;
+
+        if (closestIndex >= pathMap.Length - 1)
+            return closestIndex;
+
+        Vector3 a = pathMap[closestIndex];
+        Vector3 b = pathMap[closestIndex + 1];
+
+        float abX = b.X - a.X;
+        float abY = b.Y - a.Y;
+        float abLenSq = (abX * abX) + (abY * abY);
+
+        // Degenerate segment, keep closest
+        if (abLenSq <= 0.0001f)
+            return closestIndex;
+
+        float apX = playerMap.X - a.X;
+        float apY = playerMap.Y - a.Y;
+
+        // Projection of player onto segment A->B in map space
+        float t = ((apX * abX) + (apY * abY)) / abLenSq;
+
+        float dA = playerMap.MapDistanceXYTo(a);
+        float dB = playerMap.MapDistanceXYTo(b);
+
+        // Prefer the next point if:
+        // 1) player is already past the midpoint of the segment, or
+        // 2) next point is almost as close as the closest point
+        if (t >= 0.55f || dB <= dA + 0.75f)
+            return closestIndex + 1;
+
+        return closestIndex;
+    }
+
     public void RefillWaypoints(bool onlyClosest)
     {
         Log($"{nameof(RefillWaypoints)} - findClosest:{onlyClosest} - ThereAndBack:{pathSettings.PathThereAndBack}");
@@ -823,25 +870,23 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         Span<Vector3> pathMap = stackalloc Vector3[mapRoute.Length];
         mapRoute.CopyTo(pathMap);
 
+        if (pathMap.Length == 0)
+            return;
+
         float mapDistanceToFirst = playerMap.MapDistanceXYTo(pathMap[0]);
         float mapDistanceToLast = playerMap.MapDistanceXYTo(pathMap[^1]);
 
-        if (mapDistanceToLast < mapDistanceToFirst)
-        {
-            pathMap.Reverse();
-        }
-
         int closestIndex = 0;
         Vector3 mapClosestPoint = Vector3.Zero;
-        float distance = float.MaxValue;
+        float closestDistance = float.MaxValue;
 
         for (int i = 0; i < pathMap.Length; i++)
         {
             Vector3 p = pathMap[i];
             float d = playerMap.MapDistanceXYTo(p);
-            if (d < distance)
+            if (d < closestDistance)
             {
-                distance = d;
+                closestDistance = d;
                 closestIndex = i;
                 mapClosestPoint = p;
             }
@@ -853,21 +898,64 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 LogDebug($"{nameof(RefillWaypoints)}: Closest wayPoint: {mapClosestPoint}");
 
             navigation.SetWayPoints(stackalloc Vector3[1] { mapClosestPoint });
+            return;
+        }
+
+        // ------------------------------
+        // There-and-back: preserve direction across pauses/resumes.
+        // Do NOT choose by nearest endpoint every time.
+        // ------------------------------
+        if (pathSettings.PathThereAndBack)
+        {
+            // First time direction is unknown: infer from nearest endpoint.
+            // Near the start -> go forward, near the end -> go backward.
+            if (_pathTraversalDirection == 0)
+            {
+                _pathTraversalDirection = mapDistanceToFirst <= mapDistanceToLast ? 1 : -1;
+            }
+
+            // If we're actually at an endpoint, flip/lock direction appropriately.
+            if (closestIndex == 0)
+            {
+                _pathTraversalDirection = 1;
+            }
+            else if (closestIndex == pathMap.Length - 1)
+            {
+                _pathTraversalDirection = -1;
+            }
+
+            if (_pathTraversalDirection > 0)
+            {
+                Span<Vector3> points = pathMap[closestIndex..];
+                Log($"{nameof(RefillWaypoints)} - Set destination from forward resume point to end - with {points.Length} waypoints");
+                navigation.SetWayPoints(points);
+            }
+            else
+            {
+                Span<Vector3> points = stackalloc Vector3[closestIndex + 1];
+                for (int i = 0; i <= closestIndex; i++)
+                {
+                    points[i] = pathMap[closestIndex - i];
+                }
+
+                Log($"{nameof(RefillWaypoints)} - Set destination from backward resume point to start - with {points.Length} waypoints");
+                navigation.SetWayPoints(points);
+            }
 
             return;
         }
 
+        // ------------------------------
+        // One-way route behavior
+        // ------------------------------
         if (mapClosestPoint == pathMap[0] || mapClosestPoint == pathMap[^1])
         {
-            if (pathSettings.PathThereAndBack)
-            {
-                navigation.SetWayPoints(pathMap);
-            }
-            else
+            if (mapDistanceToLast < mapDistanceToFirst)
             {
                 pathMap.Reverse();
-                navigation.SetWayPoints(pathMap);
             }
+
+            navigation.SetWayPoints(pathMap);
         }
         else
         {
@@ -886,6 +974,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (mapRoute.SequenceEqual(oldMap))
         {
             this.mapRoute = newMap;
+            _pathTraversalDirection = 0;
         }
     }
 
