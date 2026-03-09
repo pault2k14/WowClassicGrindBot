@@ -73,6 +73,17 @@
         ]
       },
       {
+        "Name": "Execute",
+        "Key": "-",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 15",
+          "TargetHealth% < 20"
+        ]
+      },
+      {
         "Name": "Retaliation",
         "Key": "F9",
         "WhenUsable": true,
