@@ -5,6 +5,7 @@ using Game;
 
 using Microsoft.Extensions.Logging;
 
+using SharedLib;
 using SharedLib.Extensions;
 using SharedLib.NpcFinder;
 
@@ -52,11 +53,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
     private volatile bool _disposing;
-    private bool suppressNavigation;
-    private bool navStoppedForTarget;
-    private int _pauseNavRequested;   // set by worker thread
-    private int _resumeNavRequested;  // set by main thread when it wants nav back
-    private volatile bool _pausedByLocalLogic; // tracks if we paused nav due to target/local movement
+
+    // Fix #5/#6: removed dead fields suppressNavigation, navStoppedForTarget, _resumeNavRequested
+
+    private int _pauseNavRequested;             // set by worker thread
+    private volatile bool _pausedByLocalLogic;  // tracks if we paused nav due to target/local movement
 
     private Vector3[] mapRoute
     {
@@ -165,7 +166,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         this.chatReader = chatReader;
 
-        if(classConfig.Mode == Mode.PartyLeader)
+        if (classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.assistrequestreturnorisfollowing, true);
         }
@@ -246,10 +247,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Abort()
     {
-        
         if (!targetBlacklist.Is())
-            // Restored this to debug running off into distance
-            // after combat starts
             navigation.StopMovement();
 
         navigation.PausePathing();
@@ -269,7 +267,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 playerReader.WorldMapArea
             );
 
-            // Tune these as desired
             navigation.DetourMargin = 12f;
             navigation.MaxDetourAttemptsPerTarget = 6;
         }
@@ -286,7 +283,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             $"blacklistHash={(navigation.AreaBlacklist?.GetHashCode().ToString() ?? "null")} " +
             $"pos={playerReader.WorldPos} " +
             $"inside={(navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true)}");
-
 
         logger.LogInformation($"Player inside blacklist: {navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true}");
 
@@ -305,8 +301,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         sideActivityManualReset.Set();
 
         // If navigation already has progress, preserve it.
-        // This is critical when FollowRouteGoal is re-entered after temporary plans
-        // like Blacklist Target, combat interruptions, etc.
         if (navigation.HasWaypoint() || navigation.HasNext())
         {
             logger.LogInformation("[FRG] Resume - preserving existing navigation progress");
@@ -349,14 +343,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     {
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist is following again");
 
-                        // IMPORTANT:
-                        // If we were in assist-return mode, clear it first so Resume() does not
-                        // get pulled back into the stale assist-return waypoint path.
                         ClearAssistReturnState();
-
-                        // Clear any one-off nav state from the assist return move.
                         navigation.ClearAllRoutes();
-
                         Resume();
                     }
 
@@ -448,7 +436,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
         }
 
-        if (!chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn && classConfig.Mode == Mode.PartyLeader) 
+        if (!chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn && classConfig.Mode == Mode.PartyLeader)
         {
             logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
             Abort();
@@ -456,10 +444,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
         // 2) Determine whether we WANT navigation paused this tick
-        bool wantNavPaused = bits.Target() && bits.Target_Hostile() 
+        bool wantNavPaused = bits.Target() && bits.Target_Hostile()
             && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()
             && !targetBlacklist.Is();
-            // && playerReader.WithInPullRange() 
 
         // 3) If policy says pause, do it (main thread)
         if (wantNavPaused && !_pausedByLocalLogic)
@@ -483,27 +470,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             input.PressClearTarget();
             wait.Update();
 
-            // If we rejected the target, resume searching immediately.
-            // Otherwise the side thread can remain paused forever (sideActivityManualReset.Reset() happened on "Found target!").
-            targetFinder.Reset();          // safe even if already reset
-            sideActivityManualReset.Set(); // re-arm the scanning thread
+            targetFinder.Reset();
+            sideActivityManualReset.Set();
 
-            // If nav was paused due to prior target logic, resume it now.
-            // Don't just clear the flag, because that can strand nav in a paused state.
             if (_pausedByLocalLogic)
             {
                 navigation.Resume();
                 _pausedByLocalLogic = false;
             }
 
-            // Also clear any pending pause request that might be queued from earlier timing.
             Interlocked.Exchange(ref _pauseNavRequested, 0);
         }
 
         // 4) If policy says resume, request it and consume it (main thread)
         if (!wantNavPaused && _pausedByLocalLogic)
         {
-            // You can either call Resume() directly...
             navigation.Resume();
             _pausedByLocalLogic = false;
         }
@@ -511,10 +492,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // Assist return state machine: active-time timeout + rewind retry
         if (_assistReturnActive)
         {
-            // Tick active-time timeout (won't count time while paused/combat)
             TickAssistReturnTimeout(wantNavPaused);
 
-            // If TickAssistReturnTimeout aborted it, stop here
             if (!_assistReturnActive)
                 return;
 
@@ -522,7 +501,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             {
                 float distToAnchor = playerReader.WorldPos.WorldDistanceXYTo(_assistRewindAnchorW);
 
-                // When anchor is reached, retry assist target once
                 if (distToAnchor < 2.5f)
                 {
                     _assistRewindActive = false;
@@ -536,12 +514,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // Drive navigation only when not paused
         if (!wantNavPaused)
         {
-            //logger.LogInformation($"[FRG] Calling navigation.Update navHash={navigation.GetHashCode()}");
             navigation.Update(CancellationToken.None);
         }
 
-        // TODO moved from assistrequestreturn check and past the navigation resume checks
-        // test that this still works
         if (bits.Combat() && classConfig.Mode != Mode.AttendedGather) { return; }
 
         RandomJump();
@@ -597,7 +572,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Thread_LookingForTarget()
     {
-
         while (!sideActivityCts.IsCancellationRequested)
         {
             sideActivityManualReset.Wait();
@@ -605,13 +579,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             if (pathSettings.CanRunSideActivity() &&
                 targetFinder.Search(NpcNameToFind, bits.Target_NotDead, sideActivityCts.Token))
             {
-                if(bits.Target() && bits.TargetTarget_PlayerOrPet() 
-                    && playerReader.IsIgnored(playerReader.TargetGuid) 
-                    && (bits.Combat() || bits.Focus_Combat()) )
+                if (bits.Target() && bits.TargetTarget_PlayerOrPet()
+                    && playerReader.IsIgnored(playerReader.TargetGuid)
+                    && (bits.Combat() || bits.Focus_Combat()))
                 {
                     Log("Found target area blacklisted target, but they are targeting us and we are in combat!");
-                    sideActivityManualReset.Reset();   // pause searching
-                    targetFinder.Reset();              // optional
+                    sideActivityManualReset.Reset();
+                    targetFinder.Reset();
                     Interlocked.Exchange(ref _pauseNavRequested, 1);
                 }
                 else if (bits.Target() && targetBlacklist.Is())
@@ -630,8 +604,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 {
                     Log("Found target!");
 
-                    // Only pause searching if we actually intend to act on this target soon.
-                    // Otherwise keep searching and let Update() clear/ignore it naturally.
                     bool actionable =
                         bits.Target() &&
                         bits.Target_Hostile() &&
@@ -643,14 +615,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
                     if (actionable)
                     {
-                        sideActivityManualReset.Reset();   // pause searching
+                        sideActivityManualReset.Reset();
                         targetFinder.Reset();
                         Interlocked.Exchange(ref _pauseNavRequested, 1);
-                    }
-                    else
-                    {
-                        // Not actionable: keep searching and avoid deadlocking the scanner.
-                        // Optionally clear immediately here, but Update() already handles it.
                     }
                 }
             }
@@ -699,7 +666,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         var now = DateTime.UtcNow;
 
-        // Initialize the timer on first tick so we don't count a giant delta.
         if (!_assistReturnTimerInit)
         {
             _assistReturnTimerInit = true;
@@ -708,8 +674,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
         }
 
-        // Only count time when we are actually allowed to drive navigation.
-        // This prevents timeout while paused for combat/targets or other local logic.
         bool countActive =
             !wantNavPaused &&
             !_pausedByLocalLogic &&
@@ -739,9 +703,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         _assistAttempt = 0;
 
-        // Active-time timeout init
         _assistReturnActiveElapsed = TimeSpan.Zero;
-        _assistReturnTimerInit = false;          // will init on first TickAssistReturnTimeout
+        _assistReturnTimerInit = false;
         _assistReturnLastTickUtc = DateTime.UtcNow;
 
         logger.LogInformation($"[FRG] AssistReturn begin -> {assistTargetW}");
@@ -756,7 +719,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         ClearAssistReturnState();
 
-        // Clear only the local single-waypoint routing; the normal route logic will refill next.
         navigation.ClearAllRoutes();
     }
 
@@ -779,18 +741,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (!_assistReturnActive)
             return;
 
-        // Only react if the failed destination matches our assist target (within tolerance)
         if (endW.WorldDistanceXYTo(_assistReturnTargetW) > 3.0f)
             return;
 
-        // If we already tried rewind, abort (prevents ping-pong / runaway)
         if (_assistAttempt >= 1)
         {
             AbortAssistReturn("Path failed after rewind retry");
             return;
         }
 
-        // Need an anchor to rewind to
         if (!navigation.HasLastSafeAnchor)
         {
             AbortAssistReturn("No last safe anchor available for rewind");
@@ -799,7 +758,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         var anchor = navigation.LastSafeAnchorW;
 
-        // Safety: if anchor is inside blacklist, don't rewind into it
         if (navigation.AreaBlacklist != null && navigation.AreaBlacklist.ContainsWorld(anchor))
         {
             AbortAssistReturn("Last safe anchor is inside blacklist");
@@ -812,7 +770,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         logger.LogWarning($"[FRG] AssistReturn path failed. Rewind to anchor={anchor} then retry target={_assistReturnTargetW}");
 
-        // Override route to go to anchor first
         navigation.SetSingleWaypoint(anchor);
     }
 
@@ -852,14 +809,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
         }
 
-        // Guard: don't re-enter RefillWaypoints if we just called it recently
-        // for the same top point. This breaks the SetWayPoints -> OnDestinationReached loop.
-        if (IsDuplicateRecentRefill(_lastRefillTopMap, _lastRefillWaypointCount))
-        {
-            Log("[FRG] Navigation_OnDestinationReached - skipping duplicate refill");
-            return;
-        }
-
+        // Do NOT call ResetRefillWaypointsGuard() here.
+        // When OnDestinationReached fires, waypoints=0 and route=0, so canSkipDuplicateRefill=false
+        // in RefillWaypoints, meaning the duplicate guard is already bypassed — the reset was always
+        // redundant. Worse, resetting it also cleared the recorded refill from the PREVIOUS call,
+        // making it impossible for the guard to detect the tight-loop in any future path.
         RefillWaypoints(false);
         MountIfPossible();
     }
@@ -880,7 +834,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     {
         logger.LogInformation("FollowRouteGoal: GoToOneWaypoint!");
 
-        // If this is the PartyLeader responding to assist request, enable rewind/retry logic.
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
             if (!_assistReturnActive || _assistReturnTargetW.WorldDistanceXYTo(waypointToGoTo) > 1.0f)
@@ -888,7 +841,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else
         {
-            // If something else is forcing a one-off move, disable assist mode
             ClearAssistReturnState();
         }
 
@@ -897,45 +849,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         navigation.SetWayPoints(stackalloc Vector3[1] { waypointToGoTo });
     }
 
-    private static int ChooseForwardResumeIndex(ReadOnlySpan<Vector3> pathMap, Vector3 playerMap, int closestIndex)
-    {
-        if (pathMap.Length == 0)
-            return 0;
-
-        if (closestIndex < 0)
-            return 0;
-
-        if (closestIndex >= pathMap.Length - 1)
-            return closestIndex;
-
-        Vector3 a = pathMap[closestIndex];
-        Vector3 b = pathMap[closestIndex + 1];
-
-        float abX = b.X - a.X;
-        float abY = b.Y - a.Y;
-        float abLenSq = (abX * abX) + (abY * abY);
-
-        // Degenerate segment, keep closest
-        if (abLenSq <= 0.0001f)
-            return closestIndex;
-
-        float apX = playerMap.X - a.X;
-        float apY = playerMap.Y - a.Y;
-
-        // Projection of player onto segment A->B in map space
-        float t = ((apX * abX) + (apY * abY)) / abLenSq;
-
-        float dA = playerMap.MapDistanceXYTo(a);
-        float dB = playerMap.MapDistanceXYTo(b);
-
-        // Prefer the next point if:
-        // 1) player is already past the midpoint of the segment, or
-        // 2) next point is almost as close as the closest point
-        if (t >= 0.55f || dB <= dA + 0.75f)
-            return closestIndex + 1;
-
-        return closestIndex;
-    }
+    // Fix #4: ChooseForwardResumeIndex is removed — the inline logic in RefillWaypoints
+    // is the single authoritative implementation. Having both was a maintenance hazard.
 
     public void RefillWaypoints(bool onlyClosest)
     {
@@ -989,8 +904,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // Compute a forward-biased resume index once, and reuse it below.
         int resumeIndex = closestIndex;
 
-        // If we're extremely close to the current closest point and there is a next point,
-        // bias forward so we don't keep re-adding the point we just passed.
         if (resumeIndex < pathMap.Length - 1)
         {
             float dHere = playerMap.MapDistanceXYTo(pathMap[resumeIndex]);
@@ -1002,20 +915,34 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
         }
 
-        // ------------------------------
+
+        // Advance resumeIndex past any waypoints the player has already reached in world space.
+        // mapRoute points are world coords (same scale as playerReader.WorldPos), so compare directly.
+        // This prevents Navigation from immediately popping the first waypoint via
+        // wpAlreadyReached_pop and halting.
+        {
+            Vector3 playerW = playerReader.WorldPos;
+            while (resumeIndex < pathMap.Length - 1)
+            {
+                if (playerW.WorldDistanceXYTo(pathMap[resumeIndex]) < Navigation.POP_DIST)
+                {
+                    logger.LogWarning(
+                        $"[FRG] RefillWaypoints: skipping already-reached resumeIndex={resumeIndex} "
+                        + $"dist={playerW.WorldDistanceXYTo(pathMap[resumeIndex]):0.00} < POP_DIST={Navigation.POP_DIST:0.00}");
+                    resumeIndex++;
+                }
+                else
+                    break;
+            }
+        }
         // There-and-back: preserve direction across pauses/resumes.
-        // Do NOT choose by nearest endpoint every time.
-        // ------------------------------
         if (pathSettings.PathThereAndBack)
         {
-            // First time direction is unknown: infer from nearest endpoint.
-            // Near the start -> go forward, near the end -> go backward.
             if (_pathTraversalDirection == 0)
             {
                 _pathTraversalDirection = mapDistanceToFirst <= mapDistanceToLast ? 1 : -1;
             }
 
-            // If we're actually at an endpoint, flip/lock direction appropriately.
             if (closestIndex == 0)
             {
                 _pathTraversalDirection = 1;
@@ -1045,10 +972,23 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
             else
             {
-                Span<Vector3> backwardPoints = stackalloc Vector3[closestIndex + 1];
-                for (int i = 0; i <= closestIndex; i++)
+                // Advance backward start index past already-reached points (same logic as forward).
+                int backwardStartIndex = closestIndex;
                 {
-                    backwardPoints[i] = pathMap[closestIndex - i];
+                    Vector3 playerW = playerReader.WorldPos;
+                    while (backwardStartIndex > 0)
+                    {
+                        if (playerW.WorldDistanceXYTo(pathMap[backwardStartIndex]) < Navigation.POP_DIST)
+                            backwardStartIndex--;
+                        else
+                            break;
+                    }
+                }
+
+                Span<Vector3> backwardPoints = stackalloc Vector3[backwardStartIndex + 1];
+                for (int i = 0; i <= backwardStartIndex; i++)
+                {
+                    backwardPoints[i] = pathMap[backwardStartIndex - i];
                 }
 
                 if (backwardPoints.Length == 0)
@@ -1070,20 +1010,45 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
         // One-way route: always continue forward from the closest resume point.
-        // Never choose "nearest endpoint", because that can send us backwards after
-        // temporary interruptions.
         Span<Vector3> points = pathMap[resumeIndex..];
 
         if (points.Length == 0)
             return;
 
-        // NEW: if there's only one point left and we're already there, don't re-arm nav
+        // If the only remaining point is already within reach, wrap around to the start.
+        // Two cases both require wrap:
+        //   1. Only 1 point in the slice and player is close (caught by POP_DIST * 2 threshold).
+        //   2. Skip loop stopped at the last index because it can't go further, but the player
+        //      IS within POP_DIST of that last point — without this check the halt recurs.
         if (points.Length == 1)
         {
-            float distToOnly = playerMap.MapDistanceXYTo(points[0]);
-            if (distToOnly < 4.0f) // slightly above wpPopThreshold (3.55)
+            Vector3 playerW = playerReader.WorldPos;
+            float distToOnly = playerW.WorldDistanceXYTo(points[0]);
+            if (distToOnly < Navigation.POP_DIST * 2f)
             {
-                Log($"{nameof(RefillWaypoints)} - only remaining point is already reached, not re-arming nav");
+                Log($"{nameof(RefillWaypoints)} - last point reached, wrapping route to start");
+
+                // Always restart from index 0. DO NOT search for the "closest" point —
+                // the player just finished the route so the closest point is always the
+                // last one, which would give back the same single point and halt again.
+                // Instead walk forward from 0, skipping any points already within POP_DIST.
+                int wrapResumeIndex = 0;
+                while (wrapResumeIndex < pathMap.Length - 1 &&
+                       playerW.WorldDistanceXYTo(pathMap[wrapResumeIndex]) < Navigation.POP_DIST)
+                {
+                    wrapResumeIndex++;
+                }
+
+                Span<Vector3> wrapPoints = pathMap[wrapResumeIndex..];
+
+                if (wrapPoints.Length == 0)
+                    wrapPoints = pathMap;
+
+                // Wrap-around is always authoritative — never skip it via the duplicate guard.
+                // canSkipDuplicateRefill may be stale (true from the waypoint that was just popped).
+                RecordRefillWaypoints(wrapPoints[0], wrapPoints.Length);
+                Log($"{nameof(RefillWaypoints)} - Set destination from wrap-around index={wrapResumeIndex} - with {wrapPoints.Length} waypoints");
+                navigation.SetWayPoints(wrapPoints);
                 return;
             }
         }
@@ -1104,8 +1069,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public void ReceivePath(Vector3[] oldMap, Vector3[] newMap)
     {
-        // TODO: Cheap way to avoid override all FollowRouteGoal
-        // to the same path
         if (mapRoute.SequenceEqual(oldMap))
         {
             this.mapRoute = newMap;
