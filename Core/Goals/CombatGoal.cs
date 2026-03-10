@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Numerics;
 using System.Threading;
+using Vortice.Direct3D11;
 
 namespace Core.Goals;
 
@@ -35,6 +36,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private float lastMaxDistance;
     private int lastTargetGuid;
     private int consecutiveApproach;
+    private int consecutiveNoAction;
 
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
@@ -261,6 +263,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             consecutiveApproach = 0;
             logger.LogInformation("StuckDetector: Reset consecutiveApproach");
+        }
+
+        if(consecutiveNoAction >= 10 && combatLog.DamageDoneCount() == 0)
+        {
+            input.PressInteract();
+            wait.Update();
         }
 
         // If we have no target or our target is dead we should
@@ -574,6 +582,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 //logger.LogInformation("CombatGoals: Successful Cast");
                 successfulCast = true;
                 castOnTargetThisUpdate = true;
+                consecutiveNoAction = 0;
                 logger.LogInformation("castOnTargetThisUpdate: " + castOnTargetThisUpdate);
                 break;
             }
@@ -629,6 +638,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
             input.PressClearTarget();
             wait.Update();
+        }
+
+        if (!castOnTargetThisUpdate)
+        {
+            consecutiveNoAction = consecutiveNoAction + 1;
         }
 
         // TODO Could this be moved further down?

@@ -57,6 +57,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private int _pauseNavRequested;   // set by worker thread
     private int _resumeNavRequested;  // set by main thread when it wants nav back
     private bool _pausedByLocalLogic; // tracks if we paused nav due to target/local movement
+
     private Vector3[] mapRoute
     {
         get => pathSettings.Path;
@@ -64,6 +65,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     }
 
     private DateTime onEnterTime;
+    private DateTime _lastRefillWaypointsUtc = DateTime.MinValue;
+    private Vector3 _lastRefillTopMap = default;
+    private int _lastRefillWaypointCount = -1;
+
+    private const int RefillWaypointsDuplicateCooldownMs = 750;
 
     // Assist-return rewind logic
     private bool _assistReturnActive;
@@ -86,6 +92,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // +1 = move forward through mapRoute (index increasing)
     // -1 = move backward through mapRoute (index decreasing)
     private int _pathTraversalDirection;
+
+    private int _suppressedBlacklistedGuid;
+    private DateTime _suppressedBlacklistedUntilUtc;
+
 
     #region IRouteProvider
 
@@ -247,6 +257,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         sideActivityManualReset.Reset();
         targetFinder.Reset();
+        ResetRefillWaypointsGuard();
     }
 
     private void Resume()
@@ -286,6 +297,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
         onEnterTime = DateTime.UtcNow;
+        ResetRefillWaypointsGuard();
 
         if (sideActivityCts.IsCancellationRequested)
         {
@@ -293,15 +305,19 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         sideActivityManualReset.Set();
 
-        // PartyLeader assist-return handling:
-        // IMPORTANT: "AssistIsFollowing" wins over stale "AssistRequestReturn".
-        // Once the assist is following again, immediately clear assist-return mode
-        // and resume the normal route instead of re-issuing the one-off return waypoint.
-        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistIsFollowing)
+        // If navigation already has progress, preserve it.
+        // This is critical when FollowRouteGoal is re-entered after temporary plans
+        // like Blacklist Target, combat interruptions, etc.
+        if (navigation.HasWaypoint() || navigation.HasNext())
+        {
+            logger.LogInformation("[FRG] Resume - preserving existing navigation progress");
+            navigation.Resume();
+        }
+        else if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistIsFollowing)
         {
             ClearAssistReturnState();
             navigation.ClearAllRoutes();
-            RefillWaypoints(false);
+            RefillWaypoints(true);
         }
         else if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
@@ -309,15 +325,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
             GoToOneWaypoint(assistWaypoint);
         }
-        else if (!navigation.HasWaypoint())
-        {
-            // Normal resume should continue forward along the route,
-            // not snap to a single closest point.
-            RefillWaypoints(false);
-        }
         else
         {
-            navigation.Resume();
+            RefillWaypoints(false);
         }
 
         if (playerReader.Class != UnitClass.Druid)
@@ -431,6 +441,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             input.PressJump();
         }
 
+        if (IsSuppressedBlacklistedTarget())
+        {
+            Log("Suppressed recently-blacklisted target reacquired, clearing again");
+            input.PressClearTarget();
+            wait.Update();
+            return;
+        }
+
         if (!chatReader.AssistIsFollowing && !chatReader.AssistRequestReturn && classConfig.Mode == Mode.PartyLeader) 
         {
             logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
@@ -532,6 +550,52 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         wait.Update();
     }
 
+    private bool IsDuplicateRecentRefill(Vector3 topMapPoint, int waypointCount)
+    {
+        if (_lastRefillWaypointCount != waypointCount)
+            return false;
+
+        if (_lastRefillTopMap == default)
+            return false;
+
+        float d = _lastRefillTopMap.MapDistanceXYTo(topMapPoint);
+        if (d > 0.01f)
+            return false;
+
+        return (DateTime.UtcNow - _lastRefillWaypointsUtc).TotalMilliseconds < RefillWaypointsDuplicateCooldownMs;
+    }
+
+    private void RecordRefillWaypoints(Vector3 topMapPoint, int waypointCount)
+    {
+        _lastRefillTopMap = topMapPoint;
+        _lastRefillWaypointCount = waypointCount;
+        _lastRefillWaypointsUtc = DateTime.UtcNow;
+    }
+
+    private void ResetRefillWaypointsGuard()
+    {
+        _lastRefillTopMap = default;
+        _lastRefillWaypointCount = -1;
+        _lastRefillWaypointsUtc = DateTime.MinValue;
+    }
+
+    private void SuppressCurrentTargetBriefly()
+    {
+        if (!bits.Target())
+            return;
+
+        _suppressedBlacklistedGuid = playerReader.TargetGuid;
+        _suppressedBlacklistedUntilUtc = DateTime.UtcNow.AddMilliseconds(1200);
+    }
+
+    private bool IsSuppressedBlacklistedTarget()
+    {
+        return bits.Target() &&
+               playerReader.TargetGuid != 0 &&
+               playerReader.TargetGuid == _suppressedBlacklistedGuid &&
+               DateTime.UtcNow < _suppressedBlacklistedUntilUtc;
+    }
+
     private void Thread_LookingForTarget()
     {
 
@@ -554,8 +618,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 else if (bits.Target() && targetBlacklist.Is())
                 {
                     Log("Blacklisted target found, clearing target");
+
+                    SuppressCurrentTargetBriefly();
+
                     input.PressClearTarget();
                     wait.Update();
+
+                    targetFinder.Reset();
+                    sideActivityManualReset.Set();
                 }
                 else
                 {
@@ -818,6 +888,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             ClearAssistReturnState();
         }
 
+        ResetRefillWaypointsGuard();
+
         navigation.SetWayPoints(stackalloc Vector3[1] { waypointToGoTo });
     }
 
@@ -873,6 +945,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (pathMap.Length == 0)
             return;
 
+        bool canSkipDuplicateRefill = navigation.HasWaypoint() || navigation.HasNext();
+
         float mapDistanceToFirst = playerMap.MapDistanceXYTo(pathMap[0]);
         float mapDistanceToLast = playerMap.MapDistanceXYTo(pathMap[^1]);
 
@@ -897,8 +971,31 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             if (debug)
                 LogDebug($"{nameof(RefillWaypoints)}: Closest wayPoint: {mapClosestPoint}");
 
+            if (canSkipDuplicateRefill && IsDuplicateRecentRefill(mapClosestPoint, 1))
+            {
+                Log($"{nameof(RefillWaypoints)} - skipped duplicate recent closest refill");
+                return;
+            }
+
+            RecordRefillWaypoints(mapClosestPoint, 1);
             navigation.SetWayPoints(stackalloc Vector3[1] { mapClosestPoint });
             return;
+        }
+
+        // Compute a forward-biased resume index once, and reuse it below.
+        int resumeIndex = closestIndex;
+
+        // If we're extremely close to the current closest point and there is a next point,
+        // bias forward so we don't keep re-adding the point we just passed.
+        if (resumeIndex < pathMap.Length - 1)
+        {
+            float dHere = playerMap.MapDistanceXYTo(pathMap[resumeIndex]);
+            float dNext = playerMap.MapDistanceXYTo(pathMap[resumeIndex + 1]);
+
+            if (dHere < 1.5f || dNext <= dHere * 1.25f)
+            {
+                resumeIndex++;
+            }
         }
 
         // ------------------------------
@@ -926,43 +1023,66 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
             if (_pathTraversalDirection > 0)
             {
-                Span<Vector3> points = pathMap[closestIndex..];
-                Log($"{nameof(RefillWaypoints)} - Set destination from forward resume point to end - with {points.Length} waypoints");
-                navigation.SetWayPoints(points);
+                Span<Vector3> forwardPoints = pathMap[resumeIndex..];
+
+                if (forwardPoints.Length == 0)
+                    return;
+
+                if (canSkipDuplicateRefill && IsDuplicateRecentRefill(forwardPoints[0], forwardPoints.Length))
+                {
+                    Log($"{nameof(RefillWaypoints)} - skipped duplicate recent forward refill");
+                    return;
+                }
+
+                RecordRefillWaypoints(forwardPoints[0], forwardPoints.Length);
+
+                Log($"{nameof(RefillWaypoints)} - Set destination from forward resume point - with {forwardPoints.Length} waypoints");
+                navigation.SetWayPoints(forwardPoints);
             }
             else
             {
-                Span<Vector3> points = stackalloc Vector3[closestIndex + 1];
+                Span<Vector3> backwardPoints = stackalloc Vector3[closestIndex + 1];
                 for (int i = 0; i <= closestIndex; i++)
                 {
-                    points[i] = pathMap[closestIndex - i];
+                    backwardPoints[i] = pathMap[closestIndex - i];
                 }
 
-                Log($"{nameof(RefillWaypoints)} - Set destination from backward resume point to start - with {points.Length} waypoints");
-                navigation.SetWayPoints(points);
+                if (backwardPoints.Length == 0)
+                    return;
+
+                if (canSkipDuplicateRefill && IsDuplicateRecentRefill(backwardPoints[0], backwardPoints.Length))
+                {
+                    Log($"{nameof(RefillWaypoints)} - skipped duplicate recent backward refill");
+                    return;
+                }
+
+                RecordRefillWaypoints(backwardPoints[0], backwardPoints.Length);
+
+                Log($"{nameof(RefillWaypoints)} - Set destination from backward resume point to start - with {backwardPoints.Length} waypoints");
+                navigation.SetWayPoints(backwardPoints);
             }
 
             return;
         }
 
-        // ------------------------------
-        // One-way route behavior
-        // ------------------------------
-        if (mapClosestPoint == pathMap[0] || mapClosestPoint == pathMap[^1])
-        {
-            if (mapDistanceToLast < mapDistanceToFirst)
-            {
-                pathMap.Reverse();
-            }
+        // One-way route: always continue forward from the closest resume point.
+        // Never choose "nearest endpoint", because that can send us backwards after
+        // temporary interruptions.
+        Span<Vector3> points = pathMap[resumeIndex..];
 
-            navigation.SetWayPoints(pathMap);
-        }
-        else
+        if (points.Length == 0)
+            return;
+
+        if (canSkipDuplicateRefill && IsDuplicateRecentRefill(points[0], points.Length))
         {
-            Span<Vector3> points = pathMap[closestIndex..];
-            Log($"{nameof(RefillWaypoints)} - Set destination from closest to nearest endpoint - with {points.Length} waypoints");
-            navigation.SetWayPoints(points);
+            Log($"{nameof(RefillWaypoints)} - skipped duplicate recent forward refill");
+            return;
         }
+
+        RecordRefillWaypoints(points[0], points.Length);
+
+        Log($"{nameof(RefillWaypoints)} - Set destination from forward resume point - with {points.Length} waypoints");
+        navigation.SetWayPoints(points);
     }
 
     #endregion

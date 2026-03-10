@@ -1373,7 +1373,8 @@ public sealed partial class Navigation : IDisposable
 
                 if (wayPoints.Count == 0)
                 {
-                    CompleteDestinationReached();
+                    StopAndResetAtDestination();
+                    OnDestinationReached?.Invoke();
 
                     RefillExit("wpAlreadyReached_pop");
                     _phase = "exit_wpAlreadyReached_pop";
