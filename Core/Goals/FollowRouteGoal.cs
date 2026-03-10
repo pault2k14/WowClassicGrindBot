@@ -56,7 +56,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private bool navStoppedForTarget;
     private int _pauseNavRequested;   // set by worker thread
     private int _resumeNavRequested;  // set by main thread when it wants nav back
-    private bool _pausedByLocalLogic; // tracks if we paused nav due to target/local movement
+    private volatile bool _pausedByLocalLogic; // tracks if we paused nav due to target/local movement
 
     private Vector3[] mapRoute
     {
@@ -217,32 +217,31 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         try
         {
-            // Stop side thread first
+            // 1. Unsubscribe events FIRST so no callbacks fire during teardown
+            navigation.OnPathCalculated -= Navigation_OnPathCalculated;
+            navigation.OnDestinationReached -= Navigation_OnDestinationReached;
+            navigation.OnWayPointReached -= Navigation_OnWayPointReached;
+            navigation.OnPathFailed -= Navigation_OnPathFailed;
+            if (classConfig.Mode == Mode.AttendedGather)
+                navigation.OnAnyPointReached -= Navigation_OnWayPointReached;
+
+            // 2. Then stop the side thread
             sideActivityCts.Cancel();
             sideActivityManualReset.Set();
 
-            // Join thread so it cannot call into dependencies after disposal
             if (sideActivityThread is { IsAlive: true })
             {
                 if (!sideActivityThread.Join(millisecondsTimeout: 2000))
-                {
                     logger.LogWarning("FollowRouteGoal: sideActivityThread did not stop within timeout.");
-                    // You generally should not call Thread.Abort (not supported in .NET Core)
-                }
             }
 
             sideActivityCts.Dispose();
-
-            navigation.OnPathFailed -= Navigation_OnPathFailed;
-
-            // Now it’s safe to dispose other objects (or let DI do it)
             navigation.Dispose();
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "FollowRouteGoal.Dispose failed");
         }
-
     }
 
     private void Abort()
@@ -848,11 +847,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (classConfig.Mode == Mode.PartyLeader && (_assistReturnActive || _assistRewindActive))
         {
             logger.LogInformation("[FRG] AssistReturn destination reached.");
-
             ClearAssistReturnState();
-
-            // Intentionally idle until assist-following signal arrives
             navigation.PausePathing();
+            return;
+        }
+
+        // Guard: don't re-enter RefillWaypoints if we just called it recently
+        // for the same top point. This breaks the SetWayPoints -> OnDestinationReached loop.
+        if (IsDuplicateRecentRefill(_lastRefillTopMap, _lastRefillWaypointCount))
+        {
+            Log("[FRG] Navigation_OnDestinationReached - skipping duplicate refill");
             return;
         }
 
@@ -1072,6 +1076,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (points.Length == 0)
             return;
+
+        // NEW: if there's only one point left and we're already there, don't re-arm nav
+        if (points.Length == 1)
+        {
+            float distToOnly = playerMap.MapDistanceXYTo(points[0]);
+            if (distToOnly < 4.0f) // slightly above wpPopThreshold (3.55)
+            {
+                Log($"{nameof(RefillWaypoints)} - only remaining point is already reached, not re-arming nav");
+                return;
+            }
+        }
 
         if (canSkipDuplicateRefill && IsDuplicateRecentRefill(points[0], points.Length))
         {

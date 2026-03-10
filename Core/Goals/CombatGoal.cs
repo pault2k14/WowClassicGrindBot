@@ -265,7 +265,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("StuckDetector: Reset consecutiveApproach");
         }
 
-        if(consecutiveNoAction >= 10 && combatLog.DamageDoneCount() == 0)
+        if(consecutiveNoAction >= 20 && combatLog.DamageDoneCount() == 0)
         {
             input.PressInteract();
             wait.Update();
