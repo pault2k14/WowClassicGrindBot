@@ -5,7 +5,7 @@
   "Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/1-20/Troll.Orc/05-08_Durotar_big.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
@@ -52,6 +52,28 @@
           "Rage >= Cost_Heroic Strike"
         ],
         "AfterCastDelay": 25
+      },
+      {
+        "Name": "Bloodrage",
+        "Key": "8",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "Health% > 50"
+        ]
+      },
+      {
+        "Name": "Hamstring",
+        "Key": "7",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
+          "!Hamstring",
+          "TargetHealth% < 40"
+        ]
       },
       {
         "Name": "Thunder Clap",

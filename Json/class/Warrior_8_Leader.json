@@ -31,15 +31,6 @@
           "MaxRange < 26",
           "MinRange > 9"
         ]
-      },
-      {
-        "Name": "Charge",
-        "Key": "3",
-        "WhenUsable": true,
-        "Requirements": [
-          "MaxRange < 9"
-        ],
-        "AfterCastWaitMeleeRange": true
       }
     ]
   },

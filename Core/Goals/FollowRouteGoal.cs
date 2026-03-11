@@ -916,25 +916,30 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
 
-        // Advance resumeIndex past any waypoints the player has already reached in world space.
-        // mapRoute points are world coords (same scale as playerReader.WorldPos), so compare directly.
-        // This prevents Navigation from immediately popping the first waypoint via
-        // wpAlreadyReached_pop and halting.
+        // pathMap points are in map-space (route file coordinates, e.g. X=44, Y=40).
+        // playerReader.WorldPos is in world-space (e.g. X=370, Y=-4323).
+        // Navigation converts map->world internally via WorldMapAreaDB.ToWorld_FlipXY.
+        // For our distance comparisons here we must convert pathMap points to world-space
+        // before comparing against playerReader.WorldPos / Navigation.POP_DIST (world units).
+        var wma = playerReader.WorldMapArea;
+        Vector3 playerW = playerReader.WorldPos;
+        Vector3 ToWorldCoord(Vector3 mapPt) => WorldMapAreaDB.ToWorld_FlipXY(mapPt, wma);
+
+        // Advance resumeIndex past any waypoints the player has already reached.
+        while (resumeIndex < pathMap.Length - 1)
         {
-            Vector3 playerW = playerReader.WorldPos;
-            while (resumeIndex < pathMap.Length - 1)
+            if (playerW.WorldDistanceXYTo(ToWorldCoord(pathMap[resumeIndex])) < Navigation.POP_DIST)
             {
-                if (playerW.WorldDistanceXYTo(pathMap[resumeIndex]) < Navigation.POP_DIST)
-                {
-                    logger.LogWarning(
-                        $"[FRG] RefillWaypoints: skipping already-reached resumeIndex={resumeIndex} "
-                        + $"dist={playerW.WorldDistanceXYTo(pathMap[resumeIndex]):0.00} < POP_DIST={Navigation.POP_DIST:0.00}");
-                    resumeIndex++;
-                }
-                else
-                    break;
+                logger.LogWarning(
+                    $"[FRG] RefillWaypoints: skipping already-reached resumeIndex={resumeIndex} "
+                    + $"dist={playerW.WorldDistanceXYTo(ToWorldCoord(pathMap[resumeIndex])):0.00} < POP_DIST={Navigation.POP_DIST:0.00}");
+                resumeIndex++;
             }
+            else
+                break;
         }
+
+
         // There-and-back: preserve direction across pauses/resumes.
         if (pathSettings.PathThereAndBack)
         {
@@ -974,15 +979,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             {
                 // Advance backward start index past already-reached points (same logic as forward).
                 int backwardStartIndex = closestIndex;
+                while (backwardStartIndex > 0)
                 {
-                    Vector3 playerW = playerReader.WorldPos;
-                    while (backwardStartIndex > 0)
-                    {
-                        if (playerW.WorldDistanceXYTo(pathMap[backwardStartIndex]) < Navigation.POP_DIST)
-                            backwardStartIndex--;
-                        else
-                            break;
-                    }
+                    if (playerW.WorldDistanceXYTo(ToWorldCoord(pathMap[backwardStartIndex])) < Navigation.POP_DIST)
+                        backwardStartIndex--;
+                    else
+                        break;
                 }
 
                 Span<Vector3> backwardPoints = stackalloc Vector3[backwardStartIndex + 1];
@@ -1022,8 +1024,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         //      IS within POP_DIST of that last point — without this check the halt recurs.
         if (points.Length == 1)
         {
-            Vector3 playerW = playerReader.WorldPos;
-            float distToOnly = playerW.WorldDistanceXYTo(points[0]);
+            float distToOnly = playerW.WorldDistanceXYTo(ToWorldCoord(points[0]));
             if (distToOnly < Navigation.POP_DIST * 2f)
             {
                 Log($"{nameof(RefillWaypoints)} - last point reached, wrapping route to start");
@@ -1034,7 +1035,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 // Instead walk forward from 0, skipping any points already within POP_DIST.
                 int wrapResumeIndex = 0;
                 while (wrapResumeIndex < pathMap.Length - 1 &&
-                       playerW.WorldDistanceXYTo(pathMap[wrapResumeIndex]) < Navigation.POP_DIST)
+                       playerW.WorldDistanceXYTo(ToWorldCoord(pathMap[wrapResumeIndex])) < Navigation.POP_DIST)
                 {
                     wrapResumeIndex++;
                 }

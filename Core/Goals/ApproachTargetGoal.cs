@@ -79,6 +79,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             AddPrecondition(GoapKey.assistrequestreturn, false);
         }
 
+        // This might stop assistfocus from switching to
+        // approach target goal whenever party leader
+        // changes target.
+        if (classConfig.Mode == Mode.AssistFocus)
+        {
+            AddPrecondition(GoapKey.incombat, true);
+        }
+
         AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
