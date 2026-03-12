@@ -778,6 +778,7 @@ public sealed partial class Navigation : IDisposable
                     escapeNoProgressSinceUtc = DateTime.UtcNow;
                 }
                 else if ((DateTime.UtcNow - escapeNoProgressSinceUtc).TotalSeconds > 1.0 &&
+                         !escapeRouteInProgress &&
                          !waitingForPathResult &&
                          Volatile.Read(ref pathRequestPending) == 0)
                 {
@@ -1621,6 +1622,11 @@ public sealed partial class Navigation : IDisposable
             $"wpTop={(wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()).ToString() : "<none>")} " +
             $"player={playerReader.WorldPos}"
             );
+
+        // If this was an escape path, reset the no-progress timer so the watchdog
+        // gives the player a full second to start moving before it can re-trigger.
+        if (escapeRouteInProgress)
+            escapeNoProgressSinceUtc = DateTime.UtcNow;
 
         if (AreaBlacklist != null)
         {
