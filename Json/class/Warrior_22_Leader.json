@@ -7,7 +7,7 @@
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/20-30/Ashenvale/22-25 (mob level) Thistlefur Village v2.json",
-  "PathThereAndBack": false,
+  "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
