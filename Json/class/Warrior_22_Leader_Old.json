@@ -2,12 +2,11 @@
   "ClassName": "Warrior",
   "Mode": "PartyLeader",
   "Loot": true,
-  //"Skin": true,
+  "Skin": true,
   "KeyboardOnly": true,
-  "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/20-30/Ashenvale/22-25 (mob level) Thistlefur Village v2.json",
-  "PathThereAndBack": false,
+  "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
@@ -82,30 +81,8 @@
         "Requirements": [
           "InMeleeRange",
           "!TargetsMe",
-          "TargetHealth% > 10"
+          "Health% > 10"
         ]
-      },
-      {
-        "Name": "Overpower",
-        "Key": "0",
-        "BeforeCastFaceTarget": true,
-        "WhenUsable": true,
-        "Requirements": [
-          "InMeleeRange",
-          "Rage > 5"
-        ]
-      },
-      {
-        "Name": "Cleave",
-        "Key": "=",
-        "BeforeCastFaceTarget": true,
-        "Requirements": [
-          "InMeleeRange",
-          "Rage > 20",
-          "MobCount > 1",
-          "MainHandSwing > -400"
-        ],
-        "AfterCastWaitSwing": true
       },
       {
         "Name": "Hamstring",
@@ -131,14 +108,25 @@
         ]
       },
       {
-        "Name": "Rend",
-        "Key": "5",
+        "Name": "Cleave",
+        "Key": "=",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 10000,
         "Requirements": [
           "InMeleeRange",
-          "Rage > 10",
-          "!Rend"
+          "Rage > 20",
+          "MobCount > 1",
+          "MainHandSwing > -400"
+        ],
+        "AfterCastWaitSwing": true
+      },
+      {
+        "Name": "Overpower",
+        "Key": "0",
+        "BeforeCastFaceTarget": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 5"
         ]
       },
       {
@@ -152,6 +140,17 @@
           "MobCount < 2"
         ],
         "AfterCastWaitSwing": true
+      },
+      {
+        "Name": "Rend",
+        "Key": "5",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
+          "!Rend"
+        ]
       },
       {
         "Name": "AutoAttack",
