@@ -8,6 +8,15 @@
   "PathReduceSteps": false,
   "AssistPull": false,
   "AssistApproach": false,
+  "RaidIconsToSkipInCombat": [
+    5, // Moon
+    6, // Square
+    7 // Cross
+  ],
+  "RaidIconsToAttackWithoutFocus": [
+    2 // Circle
+  ],
+  // Diamond 3
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
@@ -18,8 +27,23 @@
   },
   "PartyMember1": {
     "Sequence": [
+      /*
       {
-        "Name": "Flash Heal Party1",
+        "Name": "Flash Heal",
+        "Key": "1",
+        "Cost": 1,
+        "Cooldown": 250,
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "Requirements": [
+          "PartyMember1Health% < 30",
+          "Mana > 125",
+          "TargetAlive"
+        ]
+      },
+      */
+      {
+        "Name": "Flash Heal",
         "Key": "3",
         "Cost": 2,
         "Cooldown": 500,
@@ -42,7 +66,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 105 ",
+          "Mana > 105",
           "TargetAlive"
         ]
       },
@@ -113,9 +137,21 @@
   "Combat": {
     "Sequence": [
       {
+        "Name": "Mana Potion",
+        "Key": "F9",
+        "Requirements": [
+          "Mana% < 15"
+        ]
+      },
+      {
         "Name": "HP Potion",
         "Key": "F10",
         "Requirement": "Health% < 20"
+      },
+      {
+        "Name": "Strong Anti-Venom",
+        "Key": "F8",
+        "Requirements": [ "Debuff_POISON > 1" ]
       },
       {
         "Name": "Flash Heal Party1",
@@ -148,16 +184,6 @@
         ]
       },
       {
-        "Name": "Fade",
-        "Key": "7",
-        "WhenUsable": true,
-        "Cooldown": 30000,
-        "Requirements": [
-          "Health% < 70",
-          "Mana > 75"
-        ]
-      },
-      {
         "Name": "Flash Heal",
         "Key": "3",
         "HasCastBar": true,
@@ -169,27 +195,24 @@
         ]
       },
       {
-        "Name": "Mind Blast",
-        "Key": "1",
-        "Cooldown": 8000,
-        "HasCastBar": true,
-        "Requirements": [
-          "MaxRange < 27",
-          "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > MIN_MANA_OFFENSIVE%"
-        ]
-      },
-      {
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
         "Cooldown": 12000,
         "Requirements": [
-          "MaxRange < 27",
           "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       },
-
+      {
+        "Name": "Fade",
+        "Key": "7",
+        "WhenUsable": true,
+        "Cooldown": 30000,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 75"
+        ]
+      },
       {
         "Name": "Power Word: Shield",
         "Key": "9",
@@ -199,6 +222,17 @@
           "Health% < 70",
           "Mana > 130",
           "!Shield"
+        ]
+      },
+      {
+        "Name": "Mind Blast",
+        "Key": "1",
+        "Cooldown": 7000,
+        "HasCastBar": true,
+        "Requirements": [
+          "MaxRange < 27",
+          "TargetHealth% > MIN_TARGET_HP%",
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {
@@ -227,8 +261,7 @@
         "Requirements": [
           //"!InMeleeRange"
           //"OutOfCombatRange"
-          //"MaxRange > 27"
-          "!SpellInRange:1"
+          "MaxRange > 27"
         ],
         "Log": true
       }
@@ -244,6 +277,14 @@
         "Requirements": [
           "Mana > 130",
           "!Shield"
+        ]
+      },
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Requirements": [
+          "Health% < 20",
+          "InCombat"
         ]
       },
       {
@@ -265,7 +306,6 @@
         "WhenUsable": true,
         "Cooldown": 30000,
         "Requirements": [
-          "Health% < 70",
           "Mana > 75"
         ]
       },
@@ -275,18 +315,8 @@
         "Cooldown": 1000,
         "HasCastBar": false,
         "Requirements": [
-          "Mana% > 20",
+          "Mana > 65",
           "!Inner Fire",
-          "!Food",
-          "!Drink"
-        ]
-      },
-      {
-        "Name": "HP Potion",
-        "Key": "F10",
-        "Requirements": [
-          "Health% < 20",
-          "InCombat"
         ]
       }
     ]
@@ -299,6 +329,14 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "Health% < 20",
+          "InCombat"
+        ]
+      },
+      {
+        "Name": "Mana Potion",
+        "Key": "F9",
+        "Requirements": [
+          "Mana% < 15",
           "InCombat"
         ]
       },
@@ -327,9 +365,7 @@
           "Health% < 30",
           "Mana > 105",
           "TargetAlive",
-          "!InCombat",
-          "!Food",
-          "!Drink"
+          "!InCombat"
         ]
       },
       {
@@ -342,9 +378,7 @@
           "Health% < 70",
           "Mana > 130",
           "!Shield",
-          "InCombat",
-          "!Food",
-          "!Drink"
+          "InCombat"
         ]
       },
       {
@@ -373,6 +407,7 @@
           "!Drink"
         ]
       }
+
     ]
   },
   "Parallel": {

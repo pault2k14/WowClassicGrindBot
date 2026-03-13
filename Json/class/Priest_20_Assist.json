@@ -174,7 +174,8 @@
         "Cooldown": 8000,
         "HasCastBar": true,
         "Requirements": [
-          "MaxRange < 27",
+          "InMeleeRange",
+          //"MaxRange < 27",
           "TargetHealth% > MIN_TARGET_HP%",
           "Mana% > MIN_MANA_OFFENSIVE%"
         ]
@@ -185,7 +186,8 @@
         "BeforeCastFaceTarget": true,
         "Cooldown": 12000,
         "Requirements": [
-          "MaxRange < 27",
+          "InMeleeRange",
+          //"MaxRange < 27",
           "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       },
@@ -206,7 +208,8 @@
         "Key": "2",
         "HasCastBar": true,
         "Requirements": [
-          "MaxRange < 27",
+          "InMeleeRange",
+          //"MaxRange < 27",
           "TargetHealth% > MIN_TARGET_HP%",
           "Mana% > 50"
         ]
@@ -216,19 +219,20 @@
         "Key": "4",
         "Item": true,
         "Requirements": [
+          "InMeleeRange",
           //"HasRangedWeapon",
           "TargetHealth% < MIN_TARGET_HP% || Mana% < MIN_MANA_OFFENSIVE%",
-          "!Shooting",
-          "SpellInRange:1"
+          "!Shooting"
+          //"SpellInRange:1"
         ]
       },
       {
         "Name": "Approach",
         "Requirements": [
-          //"!InMeleeRange"
+          "!InMeleeRange"
           //"OutOfCombatRange"
           //"MaxRange > 27"
-          "!SpellInRange:1"
+          //"!SpellInRange:1"
         ],
         "Log": true
       }
