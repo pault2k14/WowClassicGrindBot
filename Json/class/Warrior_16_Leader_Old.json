@@ -4,7 +4,6 @@
   "Loot": true,
   "Skin": true,
   "KeyboardOnly": true,
-  "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
   "PathThereAndBack": false,
@@ -16,9 +15,6 @@
     "Kolkar Invader",
     "Kolkar Stormseer"
   ],
-  "IntVariables": {
-    "Debuff_POISON": 136067
-  },
   "Pull": {
     "Sequence": [
       {
@@ -41,15 +37,9 @@
   "Combat": {
     "Sequence": [
       {
-        "Name": "HP Potion",
-        "Key": "F10",
-        "Requirement": "Health% < 20"
-      },
-      {
         "Name": "StopAttack",
         "BeforeCastDelay": 25,
         "Requirements": [
-          "InMeleeRange",
           "Battle Shout",
           "AutoAttacking",
           "TargetHealth% > 98",
@@ -74,19 +64,8 @@
         "BeforeCastFaceTarget": true,
         "Cooldown": 120000,
         "Requirements": [
-          "InMeleeRange",
           "!TargetsMe",
           "Health% > 10"
-        ]
-      },
-      {
-        "Name": "Overpower",
-        "Key": "0",
-        "BeforeCastFaceTarget": true,
-        "WhenUsable": true,
-        "Requirements": [
-          "InMeleeRange",
-          "Rage > 5"
         ]
       },
       {
@@ -113,14 +92,23 @@
         ]
       },
       {
+        "Name": "Overpower",
+        "Key": "0",
+        "BeforeCastFaceTarget": true,
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 5"
+        ]
+      },
+      {
         "Name": "Heroic Strike",
         "Key": "2",
         "BeforeCastFaceTarget": true,
         "Requirements": [
           "InMeleeRange",
           "Rage > 15",
-          "MainHandSwing > -400",
-          "MobCount < 2"
+          "MainHandSwing > -400"
         ],
         "AfterCastWaitSwing": true
       },
@@ -139,7 +127,6 @@
         "Name": "AutoAttack",
         "BeforeCastFaceTarget": true,
         "Requirements": [
-          "InMeleeRange",
           "!AutoAttacking"
         ]
       },
@@ -167,7 +154,7 @@
       },
       {
         "Name": "Swap Thrown",
-        "Key": "F8",
+        "Key": "-",
         "Requirements": [
           "!HasRangedWeapon"
         ]

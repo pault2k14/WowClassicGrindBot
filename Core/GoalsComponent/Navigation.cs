@@ -1017,6 +1017,11 @@ public sealed partial class Navigation : IDisposable
         return routeToNextWaypoint.Count != 0;
     }
 
+    // Diagnostic properties for logging - not for control flow
+    public bool Active => active;
+    public int WaypointCount => wayPoints.Count;
+    public int RouteCount => routeToNextWaypoint.Count;
+
     public Vector3 NextMapPoint()
     {
         return WorldMapAreaDB.ToMap_FlipXY(Nav2D(routeToNextWaypoint.Peek()), playerReader.WorldMapArea);

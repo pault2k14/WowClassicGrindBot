@@ -76,6 +76,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private bool _assistReturnActive;
     private Vector3 _assistReturnTargetW;
 
+    // True after reaching assist destination, paused waiting for "i'm following".
+    // Cleared in OnGoapEvent(assistisfollowing=true) or ClearAssistReturnState.
+    private bool _assistWaitingForFollowing;
+
     private bool _assistRewindActive;
     private Vector3 _assistRewindAnchorW;
 
@@ -300,6 +304,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         sideActivityManualReset.Set();
 
+        logger.LogInformation(
+            $"[FRG] Resume: HasWaypoint={navigation.HasWaypoint()} HasNext={navigation.HasNext()} " +
+            $"AssistIsFollowing={chatReader.AssistIsFollowing} AssistRequestReturn={chatReader.AssistRequestReturn} " +
+            $"navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
+
         // If navigation already has progress, preserve it.
         if (navigation.HasWaypoint() || navigation.HasNext())
         {
@@ -308,6 +317,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistIsFollowing)
         {
+            logger.LogInformation("[FRG] Resume - AssistIsFollowing branch -> RefillWaypoints");
             ClearAssistReturnState();
             navigation.ClearAllRoutes();
             RefillWaypoints(true);
@@ -320,8 +330,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else
         {
+            logger.LogInformation("[FRG] Resume - else branch -> RefillWaypoints");
             RefillWaypoints(false);
         }
+        
+        logger.LogInformation(
+            $"[FRG] Resume complete: navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
 
         if (playerReader.Class != UnitClass.Druid)
             MountIfPossible();
@@ -343,9 +357,27 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     {
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist is following again");
 
-                        ClearAssistReturnState();
+                        bool wasWaiting = _assistWaitingForFollowing;
+                        ClearAssistReturnState(); // also clears _assistWaitingForFollowing
+
+                        logger.LogInformation(
+                            $"[FRG] OnGoapEvent assistisfollowing=true: " +
+                            $"wasWaiting={wasWaiting} " +
+                            $"navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
+
+                        // Whether we were paused at destination waiting for confirmation, or
+                        // "i'm following" arrived early (while still en route), the action is
+                        // the same: clear routes and resume normal patrol.
+                        if (wasWaiting)
+                            logger.LogInformation("[FRG] Assist confirmed following - resuming patrol from pause.");
+                        // else: arrived early; Navigation_OnDestinationReached will see
+                        //       AssistIsFollowing=true and skip the pause automatically.
+
                         navigation.ClearAllRoutes();
                         Resume();
+                        logger.LogInformation(
+                            $"[FRG] OnGoapEvent assistisfollowing=true after Resume: " +
+                            $"navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
                     }
 
                     break;
@@ -726,6 +758,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     {
         _assistReturnActive = false;
         _assistRewindActive = false;
+        _assistWaitingForFollowing = false;
         _assistAttempt = 0;
 
         _assistReturnTargetW = default;
@@ -803,9 +836,31 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (classConfig.Mode == Mode.PartyLeader && (_assistReturnActive || _assistRewindActive))
         {
-            logger.LogInformation("[FRG] AssistReturn destination reached.");
+            logger.LogInformation(
+                $"[FRG] AssistReturn destination reached. " +
+                $"AssistIsFollowing={chatReader.AssistIsFollowing} " +
+                $"AssistRequestReturn={chatReader.AssistRequestReturn} " +
+                $"navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
+
             ClearAssistReturnState();
+
+            // If "i'm following" already arrived before we reached the destination,
+            // resume normal patrol immediately — no need to pause and wait.
+            if (chatReader.AssistIsFollowing)
+            {
+                logger.LogInformation("[FRG] AssistReturn destination reached - assist already following, resuming patrol.");
+                navigation.ClearAllRoutes();
+                Resume();
+                return;
+            }
+
+            // "i'm following" hasn't arrived yet. Pause and wait; OnGoapEvent(assistisfollowing=true)
+            // will call Resume() -> RefillWaypoints when it does.
+            _assistWaitingForFollowing = true;
             navigation.PausePathing();
+            logger.LogInformation(
+                $"[FRG] AssistReturn destination reached - pausing until assist confirms following. " +
+                $"navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
             return;
         }
 

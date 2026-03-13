@@ -2,41 +2,19 @@
   "ClassName": "Warrior",
   "Mode": "PartyLeader",
   "Loot": true,
-  "Skin": true,
+  //"Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
+  "PathFilename": "_pack/20-30/Stonetalon Mountains/17-21 Spiders v2.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    "Kolkar Wrangler",
-    "Kolkar Stormer",
-    "Kolkar Invader",
-    "Kolkar Stormseer"
+    
   ],
   "IntVariables": {
     "Debuff_POISON": 136067
-  },
-  "Pull": {
-    "Sequence": [
-      {
-        "Name": "Thrown",
-        "Key": "9",
-        "WhenUsable": true,
-        "BeforeCastStop": true,
-        "BeforeCastDelay": 500,
-        "AfterCastWaitMeleeRange": true,
-        "AfterCastDelay": 500,
-        "Requirements": [
-          "HasRangedWeapon && !Items Broken",
-          "!InMeleeRange",
-          "MaxRange < 26",
-          "MinRange > 9"
-        ]
-      }
-    ]
   },
   "Combat": {
     "Sequence": [
@@ -76,7 +54,7 @@
         "Requirements": [
           "InMeleeRange",
           "!TargetsMe",
-          "Health% > 10"
+          "TargetHealth% > 10"
         ]
       },
       {
