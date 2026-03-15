@@ -27,11 +27,6 @@ public sealed class FollowFocusGoal : GoapGoal
     private Action<CancellationToken> FocusTargetInput;
     private followMessage lastMessageSent = followMessage.None;
 
-    // Cooldown preventing "i'm following" from being sent more than once per interval,
-    // even if the goal is exited and re-entered by the GOAP planner.
-    private const double ImFollowingCooldownSec = 10.0;
-    private DateTime _lastImFollowingSentUtc = DateTime.MinValue;
-
     private enum followMessage
     {
         None,
@@ -227,17 +222,17 @@ public sealed class FollowFocusGoal : GoapGoal
     // -------------------------------------------------------------------------
     private void UpdateIdle()
     {
-        if (bits.AutoFollow())
+        if (bits.AutoFollow() && lastMessageSent == followMessage.ImFollowing)
         {
-            // Only send "i'm following" if we haven't sent it recently.
-            // This prevents spam when the GOAP planner cycles the goal in/out
-            // while AutoFollow() stays true.
-            double secSinceLastSent = (DateTime.UtcNow - _lastImFollowingSentUtc).TotalSeconds;
-            if (lastMessageSent != followMessage.ImFollowing ||
-                secSinceLastSent >= ImFollowingCooldownSec)
-            {
-                SendImFollowing();
-            }
+            // Already following — nothing to do.
+            return;
+        }
+
+        if (bits.AutoFollow() && lastMessageSent != followMessage.ImFollowing)
+        {
+            input.PressAssistIsFollowing();
+            lastMessageSent = followMessage.ImFollowing;
+            wait.Update();
             return;
         }
 
@@ -256,7 +251,9 @@ public sealed class FollowFocusGoal : GoapGoal
             // In range — try to follow normally.
             input.PressFollowTarget();
             wait.Update();
-            SendImFollowing();
+            input.PressAssistIsFollowing();
+            lastMessageSent = followMessage.ImFollowing;
+            wait.Update();
             chatReader.AssistRequestReturn = false;
             wait.Update();
             return;
@@ -413,7 +410,8 @@ public sealed class FollowFocusGoal : GoapGoal
             {
                 logger.LogInformation("[FFG] AutoFollow established while navigating to leader. Success.");
                 navigation.Stop();
-                SendImFollowing();
+                input.PressAssistIsFollowing();
+                lastMessageSent = followMessage.ImFollowing;
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
 
@@ -423,19 +421,6 @@ public sealed class FollowFocusGoal : GoapGoal
         }
 
         return false;
-    }
-
-    /// <summary>
-    /// Sends "i'm following" to party chat and records the time.
-    /// All callers must go through here to respect the send cooldown.
-    /// </summary>
-    private void SendImFollowing()
-    {
-        input.PressAssistIsFollowing();
-        lastMessageSent = followMessage.ImFollowing;
-        _lastImFollowingSentUtc = DateTime.UtcNow;
-        logger.LogInformation("[FFG] Sent AssistIsFollowing.");
-        wait.Update();
     }
 
     /// <summary>
