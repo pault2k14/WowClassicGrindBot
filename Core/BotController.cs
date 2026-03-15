@@ -330,6 +330,9 @@ public sealed partial class BotController : IBotController, IDisposable
             ClassConfig = ReadClassConfiguration(classFile);
             ClassConfig.Initialise(serviceProvider, pathFiles);
 
+            // Tell ChatReader which mode this bot is running so its message guards work.
+            serviceProvider.GetRequiredService<ChatReader>().BotMode = ClassConfig.Mode;
+
             LogProfileLoaded(logger, classFile, ClassConfig.PathFilename);
 
             CreateSession(ClassConfig);

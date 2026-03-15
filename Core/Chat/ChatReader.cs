@@ -25,13 +25,16 @@ public sealed class ChatReader : IReader
 {
     private const int cMsg = 98;
     private const int cMeta = 99;
-    private readonly IBotController botController;
-
-    // Reads Mode from the currently-loaded profile.
-    // Returns null if no profile is loaded yet — treated as "no mode match" in all guards.
-    private Mode? CurrentMode => botController.ClassConfig?.Mode;
-
+    
     private readonly ILogger<ChatReader> logger;
+
+    /// <summary>
+    /// Set by BotController.CreateSession() once a profile is loaded.
+    /// Guards on message handlers use this to avoid processing messages
+    /// intended only for a specific bot mode.
+    /// Defaults to null (no profile loaded) — all mode-guarded handlers are skipped.
+    /// </summary>
+    public Mode? BotMode { get; set; }
 
     private readonly StringBuilder sb = new(12 + 1 + 256);
 
@@ -97,9 +100,11 @@ public sealed class ChatReader : IReader
         return (msgId, number);
     }
 
-    public ChatReader(IBotController botController, ILogger<ChatReader> logger)
+    public ChatReader(
+        //IBotController botController, 
+        ILogger<ChatReader> logger)
     {
-        this.botController = botController;
+        //this.botController = botController;
         this.logger = logger;
     }
 
@@ -209,21 +214,21 @@ public sealed class ChatReader : IReader
             ForcedFollow = false;
         }
 
-        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm following"))
+        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm following"))
         {
             logger.LogInformation("Received i'm following");
             AssistIsFollowing = true;
             AssistRequestReturn = false;
         }
 
-        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm not following"))
+        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm not following"))
         {
             logger.LogInformation("Received i'm not following");
             AssistIsFollowing = false;
         }
 
         // "i tried following but you are too far away my position:x,y"
-        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
+        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
         {
             logger.LogInformation("Received: " + msg);
             var msgSubstrings = msg.Split(":");
@@ -252,7 +257,7 @@ public sealed class ChatReader : IReader
 
         // --- New: ASSIST side receives "position: x,y" from leader ---
         // Expected format: "position: x,y"
-        if ((CurrentMode == Mode.AssistFocus) && type == ChatMessageType.Party && msg.StartsWith("position: "))
+        if ((BotMode == Mode.AssistFocus) && type == ChatMessageType.Party && msg.StartsWith("position: "))
         {
             logger.LogInformation("[ChatReader] Received leader position: " + msg);
             string coords = msg["position: ".Length..];
@@ -273,7 +278,7 @@ public sealed class ChatReader : IReader
         }
 
         // --- New: LEADER side receives "leader what is your position?" from assist ---
-        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("leader what is your position?"))
+        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("leader what is your position?"))
         {
             logger.LogInformation("[ChatReader] Received position request from assist");
             AssistRequestedPosition = true;
