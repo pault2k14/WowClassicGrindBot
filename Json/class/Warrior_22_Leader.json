@@ -2,7 +2,7 @@
   "ClassName": "Warrior",
   "Mode": "PartyLeader",
   "Loot": true,
-  //"Skin": true,
+  "Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,

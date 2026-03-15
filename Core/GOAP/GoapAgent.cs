@@ -214,7 +214,7 @@ public sealed partial class GoapAgent : IDisposable
         bool previousAssistRequestReturn = false;
         bool previousInCombat = false;
         bool previousPartyInCombat = false;
-
+        
         manualReset.Wait();
 
         while (!cts.IsCancellationRequested)

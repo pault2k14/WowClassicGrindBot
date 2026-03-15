@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace Core;
 
@@ -31,15 +31,17 @@ public sealed partial class ConfigurableInput
     public KeyAction FollowTarget => classConfig.FollowTarget;
 
     public KeyAction AssistIsFollowing => classConfig.AssistIsFollowing;
-
     public KeyAction AssistCantFollow => classConfig.AssistCantFollow;
-    
-
     public KeyAction AssistIsNotFollowing => classConfig.AssistIsNotFollowing;
 
     public KeyAction EnableSoftInteract => classConfig.EnableSoftInteract;
     public KeyAction DisableSoftInteract => classConfig.DisableSoftInteract;
 
+    /// <summary>Assist presses this to ask the leader for their position.</summary>
+    public KeyAction AssistRequestLeaderPosition => classConfig.AssistRequestLeaderPosition;
+
+    /// <summary>Leader presses this to reply with their current map position.</summary>
+    public KeyAction LeaderReplyPosition => classConfig.LeaderReplyPosition;
 
     public KeyAction Mount => classConfig.Mount;
 }

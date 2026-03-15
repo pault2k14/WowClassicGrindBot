@@ -1,9 +1,10 @@
-﻿using Core.GOAP;
+using Core.GOAP;
+using Core.Goals;
 using Microsoft.Extensions.Logging;
-using Microsoft.VisualBasic;
+using SharedLib;
 using System;
+using System.Numerics;
 using System.Threading;
-
 
 namespace Core.Goals;
 
@@ -19,8 +20,9 @@ public sealed class FollowFocusGoal : GoapGoal
     private readonly ILogger<FollowFocusGoal> logger;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
-    private DateTime lastExecution = DateTime.MinValue;
-    private TimeSpan gateInterval = TimeSpan.FromSeconds(30);
+    private readonly Navigation navigation;
+
+    // --- Follow state ---
     private int focusTargetGuid;
     private Action<CancellationToken> FocusTargetInput;
     private followMessage lastMessageSent = followMessage.None;
@@ -33,6 +35,29 @@ public sealed class FollowFocusGoal : GoapGoal
         ICantFollow
     }
 
+    // --- Leader-navigation state machine ---
+    private enum NavState
+    {
+        Idle,
+        WaitingForPosition,
+        NavigatingToLeader,
+    }
+
+    private NavState _navState = NavState.Idle;
+
+    // How long to wait for the leader to reply with their position.
+    private const double WaitForPositionTimeoutSec = 5.0;
+
+    // How long the assist will actively navigate toward the leader before
+    // escalating to AssistCantFollow (the existing "too far away" flow).
+    private const double NavigationTimeoutSec = 30.0;
+
+    private DateTime _navStateEnteredUtc;
+
+    // Cooldown so we don't spam the position request if something goes wrong.
+    private const double RequestPositionCooldownSec = 35.0;
+    private DateTime _lastPositionRequestUtc = DateTime.MinValue;
+
     public FollowFocusGoal(ConfigurableInput input,
         PlayerReader playerReader,
         AddonBits bits,
@@ -40,7 +65,8 @@ public sealed class FollowFocusGoal : GoapGoal
         ClassConfiguration classConfig,
         ILogger<FollowFocusGoal> logger,
         RestHandler restHandler,
-        ChatReader chatReader
+        ChatReader chatReader,
+        Navigation navigation
         )
         : base(nameof(FollowFocusGoal))
     {
@@ -52,28 +78,16 @@ public sealed class FollowFocusGoal : GoapGoal
         this.logger = logger;
         this.restHandler = restHandler;
         this.chatReader = chatReader;
-        
+        this.navigation = navigation;
+
         if (classConfig.UnitToFollow == "focus")
         {
             AddPrecondition(GoapKey.hasfocus, true);
         }
 
-        /* TODO checking loot state currently not supported
-         * as it will require multiple additional states to differentiate
-         * what to do when assistreturnrequest is true, currently causes NO PLAN
-        if (classConfig.Loot)
-        {
-            AddPrecondition(GoapKey.producedcorpse, false);
-            AddPrecondition(GoapKey.consumecorpse, false);
-        }
-        */
-
         AddPrecondition(GoapKey.assistshouldfollow, true);
-        // TODO Trying to fix NO GOAL issue, Drinking seems to temporarily become true?
-        //AddPrecondition(GoapKey.eating, false);
-        //AddPrecondition(GoapKey.drinking, false);
 
-        switch(classConfig.UnitToFollow)
+        switch (classConfig.UnitToFollow)
         {
             case "focus":
                 focusTargetGuid = playerReader.FocusGuid;
@@ -100,6 +114,16 @@ public sealed class FollowFocusGoal : GoapGoal
                 FocusTargetInput = input.PressTargetFocus;
                 break;
         }
+
+        // Subscribe to destination-reached so we can attempt follow on arrival.
+        navigation.OnDestinationReached += Navigation_OnDestinationReached;
+    }
+
+    // Called when the goal is disposed or the agent shuts down.
+    // Unsubscribes the navigation event to prevent callbacks after teardown.
+    private void Cleanup()
+    {
+        navigation.OnDestinationReached -= Navigation_OnDestinationReached;
     }
 
     public override void OnEnter()
@@ -113,6 +137,14 @@ public sealed class FollowFocusGoal : GoapGoal
         {
             input.StopForward(true);
         }
+
+        // If we were navigating and got preempted (e.g. entered combat), stop nav cleanly.
+        if (_navState == NavState.NavigatingToLeader)
+        {
+            logger.LogInformation("[FFG] OnEnter: was NavigatingToLeader, stopping navigation.");
+            navigation.Stop();
+            _navState = NavState.Idle;
+        }
     }
 
     public override void OnExit()
@@ -124,20 +156,28 @@ public sealed class FollowFocusGoal : GoapGoal
         }
 
         input.StepBackwards();
-        
-        // Use Macro to say I'm not following in party chat
         input.PressAssistIsNotFollowing();
         lastMessageSent = followMessage.ImNotFollowing;
         wait.Update();
 
+        // Stop any in-progress navigation so it doesn't continue after we leave.
+        if (_navState == NavState.NavigatingToLeader)
+        {
+            logger.LogInformation("[FFG] OnExit: stopping navigation.");
+            navigation.Stop();
+        }
+
+        _navState = NavState.Idle;
+        // Clear the position flag in case it arrived while we were exiting.
+        chatReader.LeaderPositionReceived = false;
     }
 
     public override void Update()
     {
-        // Situation where we may have gotten stuck following focus
-        // and now focus is in combat. Let's try to acquire their target
-        // and approach it.
-        if(bits.Focus_Combat() && bits.FocusTarget())
+        // If focus is in combat, try to assist instead of following.
+        // ToDo Focus Target Alive check
+        //     and Focus Target Hostile check
+        if (bits.Focus_Combat() && bits.FocusTarget())
         {
             wait.Update();
             input.PressTargetFocus();
@@ -150,7 +190,7 @@ public sealed class FollowFocusGoal : GoapGoal
 
         while (restHandler.IsResting())
         {
-            logger.LogInformation("FollowFocusGoal: I'm waiting while resting.");
+            logger.LogInformation("[FFG] Waiting while resting.");
             wait.Update(1000);
         }
 
@@ -160,19 +200,45 @@ public sealed class FollowFocusGoal : GoapGoal
             return;
         }
 
-        if(bits.AutoFollow() && (lastMessageSent == followMessage.ImFollowing))
+        // --- Drive the leader-navigation state machine ---
+        switch (_navState)
         {
-            // We are already following we don't need to send another message
+            case NavState.Idle:
+                UpdateIdle();
+                break;
+
+            case NavState.WaitingForPosition:
+                UpdateWaitingForPosition();
+                break;
+
+            case NavState.NavigatingToLeader:
+                UpdateNavigatingToLeader();
+                break;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // State: Idle
+    // Normal follow behaviour. If the leader is too far to follow, request
+    // their position so we can navigate to them.
+    // -------------------------------------------------------------------------
+    private void UpdateIdle()
+    {
+        if (bits.AutoFollow() && lastMessageSent == followMessage.ImFollowing)
+        {
+            // Already following — nothing to do.
             return;
         }
-        else if(bits.AutoFollow() && (lastMessageSent != followMessage.ImFollowing)) {
-            
+
+        if (bits.AutoFollow() && lastMessageSent != followMessage.ImFollowing)
+        {
             input.PressAssistIsFollowing();
             lastMessageSent = followMessage.ImFollowing;
             wait.Update();
             return;
         }
 
+        // Target the unit we want to follow.
         if (playerReader.TargetGuid != focusTargetGuid)
         {
             FocusTargetInput(default);
@@ -184,38 +250,198 @@ public sealed class FollowFocusGoal : GoapGoal
             !bits.AutoFollow() &&
             !input.FollowTarget.OnCooldown())
         {
+            // In range — try to follow normally.
             input.PressFollowTarget();
-
             wait.Update();
-            // Use Macro to send i'm following in party chat
             input.PressAssistIsFollowing();
             lastMessageSent = followMessage.ImFollowing;
             wait.Update();
-
             chatReader.AssistRequestReturn = false;
-            wait.Update();
-        }
-        else if (!bits.AutoFollow() && !playerReader.SpellInRange.Focus_Inspect)
-        {
-            // I want to follow but the party member has gone too far
-            // let's tell them and give them our coordinates to find us at
-            // 1. Press Macro saying "i tried following but you are too far away my position:x,y"
-            // 2. Party leader will recieve the chatReader event, parse the map coordinates
-            // 3. Party leader will trigger a GoapEvent and BroadcastGoapEvent to trigger followRouteGoal to
-            //    move to the indicated Map Pos
-            if (DateTime.Now - lastExecution > gateInterval)
-            {
-                lastExecution = DateTime.Now;
-                input.StepBackwards();
-                wait.Update();
-                input.PressAssistCantFollow();
-                lastMessageSent = followMessage.ICantFollow;
-            }
-
             wait.Update();
             return;
         }
 
+        if (!bits.AutoFollow() && !playerReader.SpellInRange.Focus_Inspect)
+        {
+            // Leader is out of follow range.
+            // Request their position so we can navigate to them,
+            // but respect the cooldown to avoid spamming.
+            double secSinceLastRequest =
+                (DateTime.UtcNow - _lastPositionRequestUtc).TotalSeconds;
+
+            if (secSinceLastRequest >= RequestPositionCooldownSec)
+            {
+                logger.LogInformation("[FFG] Leader out of range — requesting position.");
+                _lastPositionRequestUtc = DateTime.UtcNow;
+
+                // Clear any stale position flag before requesting a fresh one.
+                chatReader.LeaderPositionReceived = false;
+
+                input.StepBackwards();
+                wait.Update();
+                input.PressAssistRequestLeaderPosition();
+                lastMessageSent = followMessage.ICantFollow;
+
+                EnterState(NavState.WaitingForPosition);
+            }
+            else
+            {
+                logger.LogInformation(
+                    $"[FFG] Leader out of range — position request on cooldown " +
+                    $"({secSinceLastRequest:0.0}s / {RequestPositionCooldownSec}s).");
+            }
+
+            wait.Update();
+        }
+
         wait.Update();
+    }
+
+    // -------------------------------------------------------------------------
+    // State: WaitingForPosition
+    // We sent the position request. Wait up to 5 seconds for the leader to reply.
+    // -------------------------------------------------------------------------
+    private void UpdateWaitingForPosition()
+    {
+        if (chatReader.LeaderPositionReceived)
+        {
+            float lx = chatReader.LeaderXPos;
+            float ly = chatReader.LeaderYPos;
+            chatReader.LeaderPositionReceived = false;
+
+            logger.LogInformation($"[FFG] Leader position received: X={lx} Y={ly}. Starting navigation.");
+
+            Vector3 leaderMapPos = new Vector3(lx, ly, playerReader.MapPos.Z);
+
+            // SetSingleWaypoint accepts map-space coords (0-100 range) and converts internally.
+            navigation.SetSingleWaypoint(leaderMapPos);
+            navigation.Resume();
+
+            EnterState(NavState.NavigatingToLeader);
+            return;
+        }
+
+        double elapsed = (DateTime.UtcNow - _navStateEnteredUtc).TotalSeconds;
+        if (elapsed >= WaitForPositionTimeoutSec)
+        {
+            logger.LogWarning(
+                $"[FFG] No position reply after {elapsed:0.0}s — " +
+                "escalating to AssistCantFollow.");
+            SendAssistCantFollow();
+            EnterState(NavState.Idle);
+        }
+
+        wait.Update();
+    }
+
+    // -------------------------------------------------------------------------
+    // State: NavigatingToLeader
+    // Drive navigation each tick. Try to re-establish follow whenever we can.
+    // -------------------------------------------------------------------------
+    private void UpdateNavigatingToLeader()
+    {
+        double elapsed = (DateTime.UtcNow - _navStateEnteredUtc).TotalSeconds;
+        if (elapsed >= NavigationTimeoutSec)
+        {
+            logger.LogWarning(
+                $"[FFG] Navigation timeout after {elapsed:0.0}s — " +
+                "escalating to AssistCantFollow.");
+            navigation.Stop();
+            SendAssistCantFollow();
+            EnterState(NavState.Idle);
+            return;
+        }
+
+        // Drive navigation this tick.
+        navigation.Update(CancellationToken.None);
+
+        // Opportunistically try to follow if we are now in range.
+        if (TryFollowIfInRange())
+            return;
+
+        wait.Update();
+    }
+
+    // -------------------------------------------------------------------------
+    // Navigation event: fires when we reach the leader's last known position.
+    // Make one final follow attempt; if still out of range, escalate.
+    // -------------------------------------------------------------------------
+    private void Navigation_OnDestinationReached()
+    {
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
+        logger.LogInformation("[FFG] Reached leader's last known position. Attempting follow.");
+
+        // Give the game a tick to settle before trying.
+        wait.Update();
+
+        if (TryFollowIfInRange())
+            return;
+
+        // Still can't follow — escalate.
+        logger.LogWarning("[FFG] Reached leader position but still out of follow range. Escalating to AssistCantFollow.");
+        SendAssistCantFollow();
+        EnterState(NavState.Idle);
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Targets the leader and attempts to follow. Returns true if AutoFollow
+    /// was established (success), false otherwise.
+    /// </summary>
+    private bool TryFollowIfInRange()
+    {
+        if (playerReader.TargetGuid != focusTargetGuid)
+        {
+            FocusTargetInput(default);
+            wait.Update();
+        }
+
+        if (playerReader.TargetGuid == focusTargetGuid &&
+            playerReader.SpellInRange.Focus_Inspect &&
+            !input.FollowTarget.OnCooldown())
+        {
+            input.PressFollowTarget();
+            wait.Update();
+
+            if (bits.AutoFollow())
+            {
+                logger.LogInformation("[FFG] AutoFollow established while navigating to leader. Success.");
+                navigation.Stop();
+                input.PressAssistIsFollowing();
+                lastMessageSent = followMessage.ImFollowing;
+                chatReader.AssistRequestReturn = false;
+                wait.Update();
+
+                EnterState(NavState.Idle);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Sends the "i tried following but you are too far away" message,
+    /// which triggers AssistRequestReturn on the leader side.
+    /// </summary>
+    private void SendAssistCantFollow()
+    {
+        input.StepBackwards();
+        wait.Update();
+        input.PressAssistCantFollow();
+        lastMessageSent = followMessage.ICantFollow;
+        logger.LogInformation("[FFG] Sent AssistCantFollow to leader.");
+    }
+
+    private void EnterState(NavState newState)
+    {
+        logger.LogInformation($"[FFG] NavState: {_navState} → {newState}");
+        _navState = newState;
+        _navStateEnteredUtc = DateTime.UtcNow;
     }
 }

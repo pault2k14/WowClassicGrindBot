@@ -195,6 +195,12 @@ public sealed partial class ConfigurableInput
 
     public void PressAssistIsNotFollowing(CancellationToken token = default) => PressRandom(AssistIsNotFollowing, token);
 
+    public void PressAssistRequestLeaderPosition(CancellationToken token = default)
+        => PressRandom(AssistRequestLeaderPosition, token);
+
+    public void PressLeaderReplyPosition(CancellationToken token = default)
+        => PressRandom(LeaderReplyPosition, token);
+
     public void PressEnableSoftInteract(CancellationToken token = default) => PressRandom(EnableSoftInteract, token);
 
     public void PressDisableSoftInteract(CancellationToken token = default) => PressRandom(DisableSoftInteract, token);

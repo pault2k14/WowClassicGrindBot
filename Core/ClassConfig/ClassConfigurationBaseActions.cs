@@ -1,4 +1,4 @@
-﻿using Game;
+using Game;
 
 namespace Core;
 
@@ -152,7 +152,7 @@ public sealed partial class ClassConfiguration
 
     public KeyAction AssistIsFollowing { get; } = new()
     {
-        Key = "F3",
+        Key = "N3",
         Name = nameof(AssistIsFollowing),
         Cooldown = 0,
         BaseAction = true,
@@ -160,7 +160,7 @@ public sealed partial class ClassConfiguration
 
     public KeyAction AssistIsNotFollowing { get; } = new()
     {
-        Key = "F4",
+        Key = "N4",
         Name = nameof(AssistIsNotFollowing),
         Cooldown = 0,
         BaseAction = true,
@@ -168,7 +168,7 @@ public sealed partial class ClassConfiguration
 
     public KeyAction AssistCantFollow { get; } = new()
     {
-        Key = "F5",
+        Key = "N5",
         Name = nameof(AssistCantFollow),
         Cooldown = 0,
         BaseAction = true,
@@ -176,7 +176,7 @@ public sealed partial class ClassConfiguration
 
     public KeyAction EnableSoftInteract { get; } = new()
     {
-        Key = "F6",
+        Key = "N6",
         Name = nameof(EnableSoftInteract),
         Cooldown = 0,
         BaseAction = true,
@@ -184,8 +184,32 @@ public sealed partial class ClassConfiguration
 
     public KeyAction DisableSoftInteract { get; } = new()
     {
-        Key = "F7",
+        Key = "N7",
         Name = nameof(DisableSoftInteract),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
+    /// <summary>
+    /// Assist presses this to ask the leader "leader what is your position?"
+    /// The in-game macro sends that text to party chat.
+    /// </summary>
+    public KeyAction AssistRequestLeaderPosition { get; } = new()
+    {
+        Key = "N8",
+        Name = nameof(AssistRequestLeaderPosition),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
+    /// <summary>
+    /// Leader presses this to reply "position: x,y" to party chat.
+    /// The in-game macro substitutes the leader's actual map coordinates.
+    /// </summary>
+    public KeyAction LeaderReplyPosition { get; } = new()
+    {
+        Key = "N9",
+        Name = nameof(LeaderReplyPosition),
         Cooldown = 0,
         BaseAction = true,
     };

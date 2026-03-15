@@ -1,5 +1,6 @@
-﻿using Core.Goals;
+using Core.Goals;
 using Core.GOAP;
+using Game;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
@@ -24,6 +25,8 @@ public sealed class ChatReader : IReader
 {
     private const int cMsg = 98;
     private const int cMeta = 99;
+    private readonly ClassConfiguration classConfig;
+    private readonly ConfigurableInput input;
 
     private readonly ILogger<ChatReader> logger;
 
@@ -31,11 +34,23 @@ public sealed class ChatReader : IReader
 
     public ObservableCollection<ChatMessageEntry> Messages { get; } = new();
     private const int MsgIdRadix = 1 << 20; // 1048576
+
+    // --- Leader/Assist state flags ---
+
     public bool ForcedFollow;
     public bool AssistIsFollowing;
     public bool AssistRequestReturn;
     public float AssistXPos;
     public float AssistYPos;
+
+    /// <summary>
+    /// Set on the ASSIST bot when the leader replies with "position: x,y".
+    /// FollowFocusGoal reads this to get the leader's map coordinates.
+    /// Reset by FollowFocusGoal after consuming the values.
+    /// </summary>
+    public bool LeaderPositionReceived;
+    public float LeaderXPos;
+    public float LeaderYPos;
 
     private static string DecodeChatPart(int number, int take)
     {
@@ -72,17 +87,19 @@ public sealed class ChatReader : IReader
         return (msgId, number);
     }
 
-    public ChatReader(ILogger<ChatReader> logger)
+    public ChatReader(ConfigurableInput input, ClassConfiguration classConfig, ILogger<ChatReader> logger)
     {
+        this.input = input;
+        this.classConfig = classConfig;
         this.logger = logger;
     }
 
     private int _currentMsgId = -1;
     private readonly HashSet<int> _seenHeads = new();
 
-    private long _lastProgressTicks = 0;     // last time we appended a valid chunk
-    private const int ResetAfterMs = 750;    // tune: 250-1000ms typical
-    private const int SilenceResetAfterMs = 2000; // if meta stays 0 for long, clear state
+    private long _lastProgressTicks = 0;
+    private const int ResetAfterMs = 750;
+    private const int SilenceResetAfterMs = 2000;
     private int _lastDbgMeta = -1;
     private int _lastDbgPacked = -1;
 
@@ -101,13 +118,8 @@ public sealed class ChatReader : IReader
         int meta = reader.GetInt(cMeta);
         int packed = reader.GetInt(cMsg);
 
-        // optional debug
         if (meta == _lastDbgMeta && packed == _lastDbgPacked)
-            return; // identical frame, ignore completely
-
-        //_lastDbgMeta = meta;
-        //_lastDbgPacked = packed;
-        //logger.LogDebug($"meta={meta} packed={packed}");
+            return;
 
         if (meta == 0 || packed == 0)
             return;
@@ -124,14 +136,11 @@ public sealed class ChatReader : IReader
         var (msgId, number) = UnpackMsg(packed);
         if ((uint)msgId > 15) return;
 
-        // timeout: if we're mid-assembly and stalled, drop it
         if (sb.Length > 0 && _lastProgressTicks != 0 && (now - _lastProgressTicks) > ResetAfterMs)
         {
             ResetAssembly();
         }
 
-        // HARD start rule:
-        // If we're idle and we see head=1, start a new message even if msgId repeats/wraps.
         if (sb.Length == 0 && head == 1)
         {
             _currentMsgId = msgId;
@@ -141,22 +150,18 @@ public sealed class ChatReader : IReader
         }
         else if (msgId != _currentMsgId)
         {
-            // msgId changed -> new message boundary
             _currentMsgId = msgId;
             _seenHeads.Clear();
             sb.Clear();
             _lastProgressTicks = 0;
         }
 
-        // If we are idle and not at head=1, ignore completely (DON'T poison _seenHeads)
         if (sb.Length == 0 && head != 1)
             return;
 
-        // Strict ordering once started
         if (sb.Length != head0)
             return;
 
-        // Deduplicate only AFTER ordering checks pass
         if (!_seenHeads.Add(head))
             return;
 
@@ -170,7 +175,6 @@ public sealed class ChatReader : IReader
         // Completed message
         string text = sb.ToString().ToLowerInvariant();
         sb.Clear();
-        // Keep _seenHeads until next head=1/msgId change to ignore held last chunk.
 
         int firstSpaceIdx = text.AsSpan().IndexOf(' ');
         if (firstSpaceIdx == -1)
@@ -182,7 +186,9 @@ public sealed class ChatReader : IReader
         string author = text[..firstSpaceIdx];
         string msg = text[(firstSpaceIdx + 1)..];
 
-        if(type == ChatMessageType.Party && msg.Equals("follow me"))
+        // --- Existing message handlers ---
+
+        if (type == ChatMessageType.Party && msg.Equals("follow me"))
         {
             logger.LogInformation("Received follow me");
             ForcedFollow = true;
@@ -194,55 +200,74 @@ public sealed class ChatReader : IReader
             ForcedFollow = false;
         }
 
-        if (type == ChatMessageType.Party && msg.Equals("i'm following"))
+        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm following"))
         {
             logger.LogInformation("Received i'm following");
             AssistIsFollowing = true;
             AssistRequestReturn = false;
         }
 
-        if (type == ChatMessageType.Party && msg.Equals("i'm not following"))
+        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm not following"))
         {
             logger.LogInformation("Received i'm not following");
             AssistIsFollowing = false;
         }
 
         // "i tried following but you are too far away my position:x,y"
-        if (type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
+        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
         {
             logger.LogInformation("Received: " + msg);
             var msgSubstrings = msg.Split(":");
-            if(msgSubstrings.Length != 2)
+            if (msgSubstrings.Length != 2)
             {
                 logger.LogInformation("msgSubstrings length is not 2, it is " + msgSubstrings.Length);
-
-                for(int i = 0; i < msgSubstrings.Length; i++)
-                {
+                for (int i = 0; i < msgSubstrings.Length; i++)
                     logger.LogInformation("msgSubstrings[" + i + "]: " + msgSubstrings[i]);
-                }
             }
             else
             {
                 logger.LogInformation("coordinate substring: " + msgSubstrings[1]);
                 var coordinateSubstrings = msgSubstrings[1].Split(",");
-
-                if(coordinateSubstrings.Length != 2)
+                if (coordinateSubstrings.Length != 2)
                 {
                     logger.LogInformation("coordinateSubstrings length is not 2, it is " + coordinateSubstrings.Length);
                 }
                 else
                 {
-                    for (int i = 0; i < coordinateSubstrings.Length; i++)
-                    {
-                        logger.LogInformation("i: " + i);
-                        logger.LogInformation("coordinateSubstrings[" + i + "]: " + coordinateSubstrings[i]);
-                    }
-
                     AssistRequestReturn = true;
                     AssistXPos = float.Parse(coordinateSubstrings[0]);
                     AssistYPos = float.Parse(coordinateSubstrings[1]);
                 }
             }
+        }
+
+        // --- New: ASSIST side receives "position: x,y" from leader ---
+        // Expected format: "position: x,y"
+        if ((classConfig.Mode == Mode.AssistFocus) && type == ChatMessageType.Party && msg.StartsWith("position: "))
+        {
+            logger.LogInformation("[ChatReader] Received leader position: " + msg);
+            string coords = msg["position: ".Length..];
+            var parts = coords.Split(",");
+            if (parts.Length == 2 &&
+                float.TryParse(parts[0].Trim(), out float lx) &&
+                float.TryParse(parts[1].Trim(), out float ly))
+            {
+                LeaderXPos = lx;
+                LeaderYPos = ly;
+                LeaderPositionReceived = true;
+                logger.LogInformation($"[ChatReader] Leader position parsed: X={lx} Y={ly}");
+            }
+            else
+            {
+                logger.LogWarning("[ChatReader] Failed to parse leader position from: " + msg);
+            }
+        }
+
+        // --- New: LEADER side receives "leader what is your position?" from assist ---
+        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("leader what is your position?"))
+        {
+            logger.LogInformation("[ChatReader] Received position request from assist");
+            input.PressLeaderReplyPosition();
         }
 
         Messages.Add(new ChatMessageEntry(DateTime.Now, type, author, msg));
