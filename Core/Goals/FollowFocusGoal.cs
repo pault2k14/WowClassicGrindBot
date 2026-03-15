@@ -51,11 +51,11 @@ public sealed class FollowFocusGoal : GoapGoal
     private NavState _navState = NavState.Idle;
 
     // How long to wait for the leader to reply with their position.
-    private const double WaitForPositionTimeoutSec = 5.0;
+    private const double WaitForPositionTimeoutSec = 12.0;
 
     // How long the assist will actively navigate toward the leader before
     // escalating to AssistCantFollow (the existing "too far away" flow).
-    private const double NavigationTimeoutSec = 30.0;
+    private const double NavigationTimeoutSec = 20.0;
 
     private DateTime _navStateEnteredUtc;
 
