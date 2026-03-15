@@ -177,6 +177,7 @@
           "Mana > 75"
         ]
       },
+/*
       {
         "Name": "Mind Blast",
         "Key": "1",
@@ -188,6 +189,7 @@
           "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
+      */
       {
         "Name": "Shadow Word: Pain",
         "Key": "5",

@@ -21,8 +21,8 @@
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 35,
-    "MIN_TARGET_HP%": 20,
+    "MIN_MANA_OFFENSIVE%": 40,
+    "MIN_TARGET_HP%": 10,
     "Debuff_POISON": 136067
   },
   "PartyMember1": {
@@ -204,7 +204,7 @@
         "Requirements": [
           "MaxRange < 27",
           "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > 50"
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {
@@ -223,7 +223,8 @@
         "Requirements": [
           //"!InMeleeRange"
           //"OutOfCombatRange"
-          "MaxRange > 27"
+          //"MaxRange > 27"
+          "!SpellInRange:1"
         ],
         "Log": true
       }
@@ -363,7 +364,7 @@
         "Key": "F11",
         "AfterCastMaxDelay": 3000,
         "Requirements": [
-          "Mana% < 40",
+          "Mana% < 30",
           "!InCombat",
           "!FocusCombat"
         ]

@@ -173,7 +173,8 @@
         "Requirements": [
           //"!InMeleeRange"
           //"OutOfCombatRange"
-          "MaxRange > 27"
+          //"MaxRange > 27"
+          "!SpellInRange:1"
         ],
         "Log": true
       }

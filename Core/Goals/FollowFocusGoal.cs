@@ -27,6 +27,11 @@ public sealed class FollowFocusGoal : GoapGoal
     private Action<CancellationToken> FocusTargetInput;
     private followMessage lastMessageSent = followMessage.None;
 
+    // Prevents pressing FollowTarget every single tick — gives the game time to
+    // confirm AutoFollow before we try again.
+    private const double FollowAttemptCooldownSec = 2.0;
+    private DateTime _lastFollowAttemptUtc = DateTime.MinValue;
+
     private enum followMessage
     {
         None,
@@ -222,17 +227,13 @@ public sealed class FollowFocusGoal : GoapGoal
     // -------------------------------------------------------------------------
     private void UpdateIdle()
     {
-        if (bits.AutoFollow() && lastMessageSent == followMessage.ImFollowing)
+        // If we've already sent "i'm following" and the leader is still in
+        // inspect range, we're following fine — do nothing.
+        // AutoFollow() drops while the character is running to catch up, so
+        // we cannot use it as an ongoing "still following" signal.
+        if (lastMessageSent == followMessage.ImFollowing &&
+            playerReader.SpellInRange.Focus_Inspect)
         {
-            // Already following — nothing to do.
-            return;
-        }
-
-        if (bits.AutoFollow() && lastMessageSent != followMessage.ImFollowing)
-        {
-            input.PressAssistIsFollowing();
-            lastMessageSent = followMessage.ImFollowing;
-            wait.Update();
             return;
         }
 
@@ -243,27 +244,23 @@ public sealed class FollowFocusGoal : GoapGoal
             wait.Update();
         }
 
+        // Leader is in range — press follow once and announce it.
         if (playerReader.TargetGuid == focusTargetGuid &&
             playerReader.SpellInRange.Focus_Inspect &&
-            !bits.AutoFollow() &&
-            !input.FollowTarget.OnCooldown())
+            (DateTime.UtcNow - _lastFollowAttemptUtc).TotalSeconds >= FollowAttemptCooldownSec)
         {
-            // In range — try to follow normally.
+            _lastFollowAttemptUtc = DateTime.UtcNow;
             input.PressFollowTarget();
             wait.Update();
-            input.PressAssistIsFollowing();
-            lastMessageSent = followMessage.ImFollowing;
             wait.Update();
             chatReader.AssistRequestReturn = false;
-            wait.Update();
+            SendImFollowing();
             return;
         }
 
-        if (!bits.AutoFollow() && !playerReader.SpellInRange.Focus_Inspect)
+        // Leader is out of inspect range — request their position to navigate back.
+        if (!playerReader.SpellInRange.Focus_Inspect)
         {
-            // Leader is out of follow range.
-            // Request their position so we can navigate to them,
-            // but respect the cooldown to avoid spamming.
             double secSinceLastRequest =
                 (DateTime.UtcNow - _lastPositionRequestUtc).TotalSeconds;
 
@@ -271,8 +268,6 @@ public sealed class FollowFocusGoal : GoapGoal
             {
                 logger.LogInformation("[FFG] Leader out of range — requesting position.");
                 _lastPositionRequestUtc = DateTime.UtcNow;
-
-                // Clear any stale position flag before requesting a fresh one.
                 chatReader.LeaderPositionReceived = false;
 
                 input.StepBackwards();
@@ -401,17 +396,26 @@ public sealed class FollowFocusGoal : GoapGoal
 
         if (playerReader.TargetGuid == focusTargetGuid &&
             playerReader.SpellInRange.Focus_Inspect &&
-            !input.FollowTarget.OnCooldown())
+            (DateTime.UtcNow - _lastFollowAttemptUtc).TotalSeconds >= FollowAttemptCooldownSec)
         {
+            _lastFollowAttemptUtc = DateTime.UtcNow;
+
+            // Stop moving before pressing follow so the character doesn't
+            // overshoot past the leader due to momentum from navigation.
+            navigation.Stop();
+            input.StopForward(true);
+            wait.Update();
+
             input.PressFollowTarget();
+            wait.Update();
+            wait.Update();
             wait.Update();
 
             if (bits.AutoFollow())
             {
                 logger.LogInformation("[FFG] AutoFollow established while navigating to leader. Success.");
-                navigation.Stop();
-                input.PressAssistIsFollowing();
-                lastMessageSent = followMessage.ImFollowing;
+                input.StopForward(true);
+                SendImFollowing();
                 chatReader.AssistRequestReturn = false;
                 wait.Update();
 
@@ -421,6 +425,18 @@ public sealed class FollowFocusGoal : GoapGoal
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Sends "i'm following" to party chat and records the time.
+    /// All callers must go through here to respect the send cooldown.
+    /// </summary>
+    private void SendImFollowing()
+    {
+        input.PressAssistIsFollowing();
+        lastMessageSent = followMessage.ImFollowing;
+        logger.LogInformation("[FFG] Sent AssistIsFollowing.");
+        wait.Update();
     }
 
     /// <summary>
