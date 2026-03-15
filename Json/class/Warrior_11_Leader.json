@@ -4,6 +4,7 @@
   "Loot": true,
   "Skin": true,
   "KeyboardOnly": true,
+  "NPCMaxLevels_Above": 2,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
   "PathThereAndBack": false,
