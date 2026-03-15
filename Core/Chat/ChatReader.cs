@@ -25,8 +25,11 @@ public sealed class ChatReader : IReader
 {
     private const int cMsg = 98;
     private const int cMeta = 99;
-    private readonly ClassConfiguration classConfig;
-    private readonly ConfigurableInput input;
+    private readonly IBotController botController;
+
+    // Reads Mode from the currently-loaded profile.
+    // Returns null if no profile is loaded yet — treated as "no mode match" in all guards.
+    private Mode? CurrentMode => botController.ClassConfig?.Mode;
 
     private readonly ILogger<ChatReader> logger;
 
@@ -34,6 +37,13 @@ public sealed class ChatReader : IReader
 
     public ObservableCollection<ChatMessageEntry> Messages { get; } = new();
     private const int MsgIdRadix = 1 << 20; // 1048576
+
+    // <summary>
+    /// Set on the LEADER bot when the assist sends "leader what is your position?"
+    /// GoapAgent polls this and fires the LeaderReplyPosition macro to reply.
+    /// Reset by GoapAgent immediately after firing the macro.
+    /// </summary>
+    public bool AssistRequestedPosition;
 
     // --- Leader/Assist state flags ---
 
@@ -87,10 +97,9 @@ public sealed class ChatReader : IReader
         return (msgId, number);
     }
 
-    public ChatReader(ConfigurableInput input, ClassConfiguration classConfig, ILogger<ChatReader> logger)
+    public ChatReader(IBotController botController, ILogger<ChatReader> logger)
     {
-        this.input = input;
-        this.classConfig = classConfig;
+        this.botController = botController;
         this.logger = logger;
     }
 
@@ -200,21 +209,21 @@ public sealed class ChatReader : IReader
             ForcedFollow = false;
         }
 
-        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm following"))
+        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm following"))
         {
             logger.LogInformation("Received i'm following");
             AssistIsFollowing = true;
             AssistRequestReturn = false;
         }
 
-        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm not following"))
+        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm not following"))
         {
             logger.LogInformation("Received i'm not following");
             AssistIsFollowing = false;
         }
 
         // "i tried following but you are too far away my position:x,y"
-        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
+        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
         {
             logger.LogInformation("Received: " + msg);
             var msgSubstrings = msg.Split(":");
@@ -243,7 +252,7 @@ public sealed class ChatReader : IReader
 
         // --- New: ASSIST side receives "position: x,y" from leader ---
         // Expected format: "position: x,y"
-        if ((classConfig.Mode == Mode.AssistFocus) && type == ChatMessageType.Party && msg.StartsWith("position: "))
+        if ((CurrentMode == Mode.AssistFocus) && type == ChatMessageType.Party && msg.StartsWith("position: "))
         {
             logger.LogInformation("[ChatReader] Received leader position: " + msg);
             string coords = msg["position: ".Length..];
@@ -264,10 +273,10 @@ public sealed class ChatReader : IReader
         }
 
         // --- New: LEADER side receives "leader what is your position?" from assist ---
-        if ((classConfig.Mode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("leader what is your position?"))
+        if ((CurrentMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("leader what is your position?"))
         {
             logger.LogInformation("[ChatReader] Received position request from assist");
-            input.PressLeaderReplyPosition();
+            AssistRequestedPosition = true;
         }
 
         Messages.Add(new ChatMessageEntry(DateTime.Now, type, author, msg));
