@@ -75,8 +75,43 @@ public sealed class ForcedFollowGoal : GoapGoal
         {
             for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
             {
+                bool validChangeToTarget = false;
 
                 KeyAction keyAction = Keys[i];
+
+                if (!string.IsNullOrEmpty(keyAction.ChangeTargetTo) && keyAction.CanRun())
+                {
+                    wait.Update();
+
+                    switch (keyAction.ChangeTargetTo)
+                    {
+                        case "focus":
+                            validChangeToTarget = true;
+                            input.PressTargetFocus();
+                            break;
+                        case "party1":
+                            validChangeToTarget = true;
+                            input.PressTargetFocus();
+                            break;
+                        case "party2":
+                            validChangeToTarget = true;
+                            input.PressTargetFocusPartyMemberTwo();
+                            break;
+                        case "party3":
+                            validChangeToTarget = true;
+                            input.PressTargetFocusPartyMemberThree();
+                            break;
+                        case "party4":
+                            validChangeToTarget = true;
+                            input.PressTargetFocusPartyMemberFour();
+                            break;
+                        default:
+                            logger.LogWarning("keyAction.ChangeTargetTo not a valid target: " + keyAction.ChangeTargetTo);
+                            break;
+                    }
+
+                    wait.Update();
+                }
 
                 if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
                 {
@@ -94,6 +129,32 @@ public sealed class ForcedFollowGoal : GoapGoal
                     : bits.Target_Alive))
                 {
                     break;
+                }
+
+                // After performing the action restore our previous target
+                if (validChangeToTarget)
+                {
+                    input.PressLastTarget();
+                    wait.Update();
+                }
+
+                // Safety valve - if we accidentally target a friendly member we should,
+                // clear target.
+                if ((!bits.Target_Hostile()
+                     || bits.Target_PlayerControlled()
+                     || bits.Target_Player()
+                     || playerReader.TargetGuid == playerReader.FocusGuid
+                     || playerReader.TargetGuid == playerReader.PartyMember1Guid
+                     || playerReader.TargetGuid == playerReader.PartyMember2Guid
+                     || playerReader.TargetGuid == playerReader.PartyMember3Guid
+                     || playerReader.TargetGuid == playerReader.PartyMember4Guid
+                    )
+                    && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
+                    && !validChangeToTarget)
+                {
+                    logger.LogWarning("We were still targeting a friendly target when KeyAction wasn't ChangeTargetTo");
+                    input.PressClearTarget();
+                    wait.Update();
                 }
             }
         }
@@ -170,6 +231,41 @@ public sealed class ForcedFollowGoal : GoapGoal
             {
 
                 KeyAction keyAction = Keys[i];
+                bool validChangeToTarget = false;
+
+                if (!string.IsNullOrEmpty(keyAction.ChangeTargetTo) && keyAction.CanRun())
+                {
+                    wait.Update();
+
+                    switch (keyAction.ChangeTargetTo)
+                    {
+                        case "focus":
+                            validChangeToTarget = true;
+                            input.PressTargetFocus();
+                            break;
+                        case "party1":
+                            validChangeToTarget = true;
+                            input.PressTargetFocus();
+                            break;
+                        case "party2":
+                            validChangeToTarget = true;
+                            input.PressTargetFocusPartyMemberTwo();
+                            break;
+                        case "party3":
+                            validChangeToTarget = true;
+                            input.PressTargetFocusPartyMemberThree();
+                            break;
+                        case "party4":
+                            validChangeToTarget = true;
+                            input.PressTargetFocusPartyMemberFour();
+                            break;
+                        default:
+                            logger.LogWarning("keyAction.ChangeTargetTo not a valid target: " + keyAction.ChangeTargetTo);
+                            break;
+                    }
+
+                    wait.Update();
+                }
 
                 if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
                 {
@@ -187,6 +283,32 @@ public sealed class ForcedFollowGoal : GoapGoal
                     : bits.Target_Alive))
                 {
                     break;
+                }
+
+                // After performing the action restore our previous target
+                if (validChangeToTarget)
+                {
+                    input.PressLastTarget();
+                    wait.Update();
+                }
+
+                // Safety valve - if we accidentally target a friendly member we should,
+                // clear target.
+                if ((!bits.Target_Hostile()
+                     || bits.Target_PlayerControlled()
+                     || bits.Target_Player()
+                     || playerReader.TargetGuid == playerReader.FocusGuid
+                     || playerReader.TargetGuid == playerReader.PartyMember1Guid
+                     || playerReader.TargetGuid == playerReader.PartyMember2Guid
+                     || playerReader.TargetGuid == playerReader.PartyMember3Guid
+                     || playerReader.TargetGuid == playerReader.PartyMember4Guid
+                    )
+                    && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
+                    && !validChangeToTarget)
+                {
+                    logger.LogWarning("We were still targeting a friendly target when KeyAction wasn't ChangeTargetTo");
+                    input.PressClearTarget();
+                    wait.Update();
                 }
             }
         }
