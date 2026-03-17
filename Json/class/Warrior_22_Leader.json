@@ -11,7 +11,12 @@
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-
+    "Thistlefur Avenger",
+    "Thistlefur Den Watcher",
+    "Thistlefur Den Watcher",
+    "Thistlefur Shaman",
+    "Thistlefur Totemic",
+    "Thistlefur Ursa"
   ],
   "IntVariables": {
     "Debuff_POISON": 136067
@@ -188,6 +193,24 @@
         "Key": "F8",
         "Requirements": [
           "!HasRangedWeapon"
+        ]
+      },
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "Cooldown": 20000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "Cooldown": 20000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
         ]
       }
     ]
