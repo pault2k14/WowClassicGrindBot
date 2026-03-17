@@ -181,7 +181,7 @@
       },
       {
         "Name": "Holy Fire",
-        "Key": "5",
+        "Key": "1",
         "BeforeCastFaceTarget": true,
         //"Cooldown": 12000,
         "Requirements": [
@@ -300,7 +300,7 @@
       },
       {
         "Name": "Dispel Magic",
-        "Key": "F9",
+        "Key": "F8",
         "Cost": 3,
         "Cooldown": 1000,
         "HasCastBar": false,
@@ -313,7 +313,7 @@
       },
       {
         "Name": "Dispel Magic",
-        "Key": "F9",
+        "Key": "F8",
         "Cost": 3,
         "Cooldown": 1000,
         "HasCastBar": false,
