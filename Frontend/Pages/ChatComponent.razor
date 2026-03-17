@@ -7,6 +7,14 @@
 
 
 <div class="col-sm" style="@(MaxHeight > 0 ? $"overflow: auto; max-height: {MaxHeight}px;" : string.Empty)">
+    
+    <div class="mb-1">
+        <button class="btn btn-sm @(_alertEnabled ? "btn-success" : "btn-secondary")"
+                @onclick="ToggleAlert">
+            🔔 Alert: @(_alertEnabled ? "On" : "Off")
+        </button>
+    </div>
+
     @foreach (var cme in reader.Messages.Reverse())
     {
         <p style="color:@(typeColor[(int)cme.Type])" class="mb-0">
@@ -23,6 +31,7 @@
 
     private DateTime _lastAlertTime = DateTime.MinValue;
     private readonly TimeSpan _alertCooldown = TimeSpan.FromSeconds(30);
+    private bool _alertEnabled = true;
 
     // Tracks message identity (author + time + content) → already alerted
     private readonly HashSet<string> _alertedMessages = new();
@@ -57,8 +66,16 @@
         base.InvokeAsync(StateHasChanged);
     }
 
+    private void ToggleAlert()
+    {
+        _alertEnabled = !_alertEnabled;
+    }
+
     private async Task TryPlayAlertAsync(ChatMessageEntry cme)
     {
+        if (!_alertEnabled)
+            return;
+
         // Only care about Say and Whisper types
         if (cme.Type != ChatMessageType.Say && cme.Type != ChatMessageType.Whisper && cme.Type != ChatMessageType.Emote)
             return;
