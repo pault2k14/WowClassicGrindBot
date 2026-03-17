@@ -60,7 +60,7 @@
     private async Task TryPlayAlertAsync(ChatMessageEntry cme)
     {
         // Only care about Say and Whisper types
-        if (cme.Type != ChatMessageType.Say && cme.Type != ChatMessageType.Whisper)
+        if (cme.Type != ChatMessageType.Say && cme.Type != ChatMessageType.Whisper && cme.Type != ChatMessageType.Emote)
             return;
 
         // Build a unique key for this message using its timestamp
