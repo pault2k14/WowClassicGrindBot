@@ -1,8 +1,10 @@
 ﻿@using System.Collections.Specialized
 
+@inject IJSRuntime JS
 @implements IDisposable
 
 @inject ChatReader reader
+
 
 <div class="col-sm" style="@(MaxHeight > 0 ? $"overflow: auto; max-height: {MaxHeight}px;" : string.Empty)">
     @foreach (var cme in reader.Messages.Reverse())
@@ -18,6 +20,12 @@
 @code {
     [Parameter]
     public int MaxHeight { get; set; } = 400;
+
+    private DateTime _lastAlertTime = DateTime.MinValue;
+    private readonly TimeSpan _alertCooldown = TimeSpan.FromSeconds(30);
+
+    // Tracks message identity (author + time + content) → already alerted
+    private readonly HashSet<string> _alertedMessages = new();
 
     private static readonly string[] typeColor = {
         "#FF80FF",   // ChatMessageType.Whisper
@@ -39,6 +47,35 @@
 
     private void Changed(object? s, NotifyCollectionChangedEventArgs e)
     {
+        if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems != null)
+        {
+            foreach (ChatMessageEntry cme in e.NewItems)
+            {
+                _ = TryPlayAlertAsync(cme);
+            }
+        }
         base.InvokeAsync(StateHasChanged);
+    }
+
+    private async Task TryPlayAlertAsync(ChatMessageEntry cme)
+    {
+        // Only care about Say and Whisper types
+        if (cme.Type != ChatMessageType.Say && cme.Type != ChatMessageType.Whisper)
+            return;
+
+        // Build a unique key for this message using its timestamp
+        var key = $"{cme.Time:HH:mm:ss.fff}|{cme.Author}|{cme.Message}";
+
+        // Only allow this specific message to trigger the alert once
+        if (!_alertedMessages.Add(key))
+            return;
+
+        // Enforce the 30-second cooldown
+        var now = DateTime.UtcNow;
+        if (now - _lastAlertTime < _alertCooldown)
+            return;
+
+        _lastAlertTime = now;
+        await JS.InvokeVoidAsync("playAlertSound", "/sounds/alertvoice.mp3");
     }
 }
