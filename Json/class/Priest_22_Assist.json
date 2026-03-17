@@ -9,6 +9,9 @@
   "AssistPull": false,
   "AssistApproach": false,
   "IntVariables": {
+    "Debuff_Entangling Roots": 136100,
+    //"P1_Debuff_Entangling Roots": 135987, // PW Fortitude Rank 2
+    "P1_Debuff_Entangling Roots": 136100,
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
@@ -105,6 +108,7 @@
         "Key": "5",
         "BeforeCastFaceTarget": true,
         "Requirements": [
+          "!T_Shadow Word: Pain",
           "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       }
@@ -175,30 +179,28 @@
           "Mana > 125"
         ]
       },
-      /*
       {
-        "Name": "Mind Blast",
-        "Key": "1",
-        "Cooldown": 8000,
-        "HasCastBar": true,
-        "Requirements": [
-          "MaxRange < 27",
-          "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > MIN_MANA_OFFENSIVE%"
-        ]
-      },
-      */
-      {
-        "Name": "Shadow Word: Pain",
+        "Name": "Holy Fire",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 12000,
+        //"Cooldown": 12000,
         "Requirements": [
+          "!Holy Fire",
           "MaxRange < 27",
           "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       },
-
+      {
+        "Name": "Shadow Word: Pain",
+        "Key": "5",
+        "BeforeCastFaceTarget": true,
+        //"Cooldown": 12000,
+        "Requirements": [
+          "!Shadow Word: Pain",
+          "MaxRange < 27",
+          "MIN_MANA_OFFENSIVE% < Mana%"
+        ]
+      },
       {
         "Name": "Power Word: Shield",
         "Key": "9",
@@ -250,9 +252,21 @@
         "Key": "9",
         "WhenUsable": true,
         "AfterCastWaitBuff": true,
+        "ChangeTargetTo": "self",
         "Requirements": [
           "Mana > 130",
           "!Shield"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield Party1",
+        "Key": "9",
+        "WhenUsable": true,
+        "AfterCastWaitBuff": true,
+        "ChangeTargetTo": "party1",
+        "Requirements": [
+          "Mana > 130",
+          "!P1_Shield"
         ]
       },
       {
@@ -262,10 +276,52 @@
         "Cooldown": 15000,
         "HasCastBar": false,
         "UseWithForcedFollow": true,
+        "ChangeTargetTo": "self",
         "Requirements": [
           "!Renew",
+          "Health% < 80",
+          "Mana > 105"
+        ]
+      },
+      {
+        "Name": "Renew Party1",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 10000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "ChangeTargetTo": "party1",
+        "Requirements": [
+          "!P1_Renew",
+          "PartyMember1Health% < 80",
           "Mana > 105",
           "TargetAlive"
+        ]
+      },
+      {
+        "Name": "Dispel Magic",
+        "Key": "F9",
+        "Cost": 3,
+        "Cooldown": 1000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "ChangeTargetTo": "self",
+        "Requirements": [
+          "Debuff_Entangling Roots > 1",
+          "Mana > 78"
+        ]
+      },
+      {
+        "Name": "Dispel Magic",
+        "Key": "F9",
+        "Cost": 3,
+        "Cooldown": 1000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "ChangeTargetTo": "party1",
+        "Requirements": [
+          "P1_Debuff_Entangling Roots > 1",
+          "Mana > 78"
         ]
       },
       {

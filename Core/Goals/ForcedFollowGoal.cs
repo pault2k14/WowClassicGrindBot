@@ -54,6 +54,8 @@ public sealed class ForcedFollowGoal : GoapGoal
 
     public override void OnEnter()
     {
+        logger.LogInformation("Enter OnEnter()");
+
         if (input.IsKeyDown(input.ForwardKey))
         {
             input.StopForward(true);
@@ -65,105 +67,13 @@ public sealed class ForcedFollowGoal : GoapGoal
 
         wait.Update();
 
-        if (!bits.Target() || (
-            playerReader.TargetGuid != playerReader.FocusGuid
-            && playerReader.TargetGuid != playerReader.PartyMember1Guid
-            && playerReader.TargetGuid != playerReader.PartyMember2Guid
-            && playerReader.TargetGuid != playerReader.PartyMember3Guid
-            && playerReader.TargetGuid != playerReader.PartyMember4Guid
-            ))
-        {
-            for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
-            {
-                bool validChangeToTarget = false;
-
-                KeyAction keyAction = Keys[i];
-
-                if (!string.IsNullOrEmpty(keyAction.ChangeTargetTo) && keyAction.CanRun())
-                {
-                    wait.Update();
-
-                    switch (keyAction.ChangeTargetTo)
-                    {
-                        case "focus":
-                            validChangeToTarget = true;
-                            input.PressTargetFocus();
-                            break;
-                        case "party1":
-                            validChangeToTarget = true;
-                            input.PressTargetFocus();
-                            break;
-                        case "party2":
-                            validChangeToTarget = true;
-                            input.PressTargetFocusPartyMemberTwo();
-                            break;
-                        case "party3":
-                            validChangeToTarget = true;
-                            input.PressTargetFocusPartyMemberThree();
-                            break;
-                        case "party4":
-                            validChangeToTarget = true;
-                            input.PressTargetFocusPartyMemberFour();
-                            break;
-                        default:
-                            logger.LogWarning("keyAction.ChangeTargetTo not a valid target: " + keyAction.ChangeTargetTo);
-                            break;
-                    }
-
-                    wait.Update();
-                }
-
-                if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
-                {
-                    continue;
-                }
-
-                if (keyAction.BeforeCastDismount && mountHandler.IsMounted())
-                {
-                    mountHandler.Dismount();
-                }
-
-                if (castingHandler.CastIfReady(keyAction,
-                    keyAction.Interrupts.Count > 0
-                    ? keyAction.CanBeInterrupted
-                    : bits.Target_Alive))
-                {
-                    break;
-                }
-
-                // After performing the action restore our previous target
-                if (validChangeToTarget)
-                {
-                    input.PressLastTarget();
-                    wait.Update();
-                }
-
-                // Safety valve - if we accidentally target a friendly member we should,
-                // clear target.
-                if ((!bits.Target_Hostile()
-                     || bits.Target_PlayerControlled()
-                     || bits.Target_Player()
-                     || playerReader.TargetGuid == playerReader.FocusGuid
-                     || playerReader.TargetGuid == playerReader.PartyMember1Guid
-                     || playerReader.TargetGuid == playerReader.PartyMember2Guid
-                     || playerReader.TargetGuid == playerReader.PartyMember3Guid
-                     || playerReader.TargetGuid == playerReader.PartyMember4Guid
-                    )
-                    && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                    && !validChangeToTarget)
-                {
-                    logger.LogWarning("We were still targeting a friendly target when KeyAction wasn't ChangeTargetTo");
-                    input.PressClearTarget();
-                    wait.Update();
-                }
-            }
-        }
-
-        wait.Update();
+        logger.LogInformation("Exit OnEnter()");
     }
 
     public override void OnExit()
     {
+        logger.LogInformation("Enter OnExit()");
+
         if (classConfig.UnitToFollow == "focus")
         {
             if (playerReader.TargetGuid == playerReader.FocusGuid)
@@ -206,10 +116,14 @@ public sealed class ForcedFollowGoal : GoapGoal
         }
 
         wait.Update();
+
+        logger.LogInformation("Exit OnExit()");
     }
 
     public override void Update()
     {
+        logger.LogInformation("Enter Update()");
+
         //logger.LogInformation("ForcedFollowGoal: Inside Update");
         // Removed check for playerReader.SpellInRange.PartyMember4_Inspect
         // As inpect can't be used in combat
@@ -219,6 +133,11 @@ public sealed class ForcedFollowGoal : GoapGoal
 
         wait.Update();
 
+        if(!bits.AutoFollow() && !input.FollowTarget.OnCooldown())
+        {
+            startFollowing();
+        }
+
         if (!bits.Target() || (
             playerReader.TargetGuid != playerReader.FocusGuid
             && playerReader.TargetGuid != playerReader.PartyMember1Guid
@@ -227,7 +146,7 @@ public sealed class ForcedFollowGoal : GoapGoal
             && playerReader.TargetGuid != playerReader.PartyMember4Guid
             ))
         {
-            for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
+            for (int i = 0; i < Keys.Length; i++)
             {
 
                 KeyAction keyAction = Keys[i];
@@ -259,6 +178,10 @@ public sealed class ForcedFollowGoal : GoapGoal
                             validChangeToTarget = true;
                             input.PressTargetFocusPartyMemberFour();
                             break;
+                        case "self":
+                            validChangeToTarget = true;
+                            input.PressClearTarget();
+                            break;
                         default:
                             logger.LogWarning("keyAction.ChangeTargetTo not a valid target: " + keyAction.ChangeTargetTo);
                             break;
@@ -284,43 +207,12 @@ public sealed class ForcedFollowGoal : GoapGoal
                 {
                     break;
                 }
-
-                // After performing the action restore our previous target
-                if (validChangeToTarget)
-                {
-                    input.PressLastTarget();
-                    wait.Update();
-                }
-
-                // Safety valve - if we accidentally target a friendly member we should,
-                // clear target.
-                if ((!bits.Target_Hostile()
-                     || bits.Target_PlayerControlled()
-                     || bits.Target_Player()
-                     || playerReader.TargetGuid == playerReader.FocusGuid
-                     || playerReader.TargetGuid == playerReader.PartyMember1Guid
-                     || playerReader.TargetGuid == playerReader.PartyMember2Guid
-                     || playerReader.TargetGuid == playerReader.PartyMember3Guid
-                     || playerReader.TargetGuid == playerReader.PartyMember4Guid
-                    )
-                    && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                    && !validChangeToTarget)
-                {
-                    logger.LogWarning("We were still targeting a friendly target when KeyAction wasn't ChangeTargetTo");
-                    input.PressClearTarget();
-                    wait.Update();
-                }
             }
         }
 
         wait.Update();
 
-        if(!bits.AutoFollow() && !input.FollowTarget.OnCooldown())
-        {
-            startFollowing();
-        }
-        
-        wait.Update();
+        logger.LogInformation("Exit Update()");
     }
 
     public void startFollowing()
