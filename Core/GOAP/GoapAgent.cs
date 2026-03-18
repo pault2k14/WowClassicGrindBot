@@ -214,7 +214,9 @@ public sealed partial class GoapAgent : IDisposable
         bool previousAssistRequestReturn = false;
         bool previousInCombat = false;
         bool previousPartyInCombat = false;
-        
+        bool previousAssistRequestedPosition = false;
+
+
         manualReset.Wait();
 
         while (!cts.IsCancellationRequested)
@@ -253,7 +255,11 @@ public sealed partial class GoapAgent : IDisposable
             {
                logger.LogInformation("[GoapAgent] Assist requested leader position — replying.");
                input.PressLeaderReplyPosition();
-               chatReader.AssistRequestedPosition = false;
+               previousAssistRequestedPosition = true;
+            }
+            else if ((classConfig.Mode == Mode.PartyLeader) && previousAssistRequestedPosition && !chatReader.AssistRequestedPosition)
+            {
+                previousAssistRequestedPosition = false;
             }
 
             if ((classConfig.Mode != Mode.PartyLeader || classConfig.Mode != Mode.AssistFocus) 

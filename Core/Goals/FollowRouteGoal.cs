@@ -80,6 +80,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // Cleared in OnGoapEvent(assistisfollowing=true) or ClearAssistReturnState.
     private bool _assistWaitingForFollowing;
 
+    // True after the leader replied to a position request.
+    // Leader pauses patrol and waits for the assist to either confirm following
+    // (AssistIsFollowing) or send AssistCantFollow (AssistRequestReturn).
+    private bool _waitingForAssistAfterPosition;
+    private DateTime _waitingForAssistAfterPositionStartUtc;
+
     private bool _assistRewindActive;
     private Vector3 _assistRewindAnchorW;
 
@@ -358,20 +364,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist is following again");
 
                         bool wasWaiting = _assistWaitingForFollowing;
+                        bool wasWaitingAfterPosition = _waitingForAssistAfterPosition;
+                        _waitingForAssistAfterPosition = false;
+
                         ClearAssistReturnState(); // also clears _assistWaitingForFollowing
 
                         logger.LogInformation(
                             $"[FRG] OnGoapEvent assistisfollowing=true: " +
-                            $"wasWaiting={wasWaiting} " +
+                            $"wasWaiting={wasWaiting} wasWaitingAfterPosition={wasWaitingAfterPosition} " +
                             $"navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
 
-                        // Whether we were paused at destination waiting for confirmation, or
-                        // "i'm following" arrived early (while still en route), the action is
-                        // the same: clear routes and resume normal patrol.
-                        if (wasWaiting)
+                        if (wasWaiting || wasWaitingAfterPosition)
                             logger.LogInformation("[FRG] Assist confirmed following - resuming patrol from pause.");
-                        // else: arrived early; Navigation_OnDestinationReached will see
-                        //       AssistIsFollowing=true and skip the pause automatically.
 
                         navigation.ClearAllRoutes();
                         Resume();
@@ -473,6 +477,43 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
             Abort();
             return;
+        }
+
+        // If the assist just asked for our position, pause patrol and wait for
+        // them to navigate here and confirm following. Timeout after 60s.
+        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestedPosition)
+        {
+            if (!_waitingForAssistAfterPosition)
+            {
+                logger.LogInformation("[FRG] Assist requested position — pausing patrol to wait for assist.");
+                _waitingForAssistAfterPosition = true;
+                _waitingForAssistAfterPositionStartUtc = DateTime.UtcNow;
+                navigation.PausePathing();
+            }
+            // Consume the flag now that we've acted on it.
+            chatReader.AssistRequestedPosition = false;
+        }
+
+        if (_waitingForAssistAfterPosition)
+        {
+            // Stay paused until the assist either confirms following or
+            // sends AssistCantFollow (which sets AssistRequestReturn).
+            // AssistIsFollowing is handled by OnGoapEvent which clears the flag and resumes.
+            // AssistRequestReturn is handled below via GoToOneWaypoint — clear the flag here
+            // so we don't block that flow.
+            if (chatReader.AssistRequestReturn)
+            {
+                double waited = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
+                logger.LogInformation($"[FRG] AssistRequestReturn received after waiting {waited:0.0}s — handing off to return flow.");
+                _waitingForAssistAfterPosition = false;
+                // Fall through — the existing AssistRequestReturn handling below will take over.
+            }
+            else
+            {
+                // Still waiting for the assist to arrive — hold position.
+                wait.Update();
+                return;
+            }
         }
 
         // 2) Determine whether we WANT navigation paused this tick
@@ -759,6 +800,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         _assistReturnActive = false;
         _assistRewindActive = false;
         _assistWaitingForFollowing = false;
+        _waitingForAssistAfterPosition = false;
         _assistAttempt = 0;
 
         _assistReturnTargetW = default;
