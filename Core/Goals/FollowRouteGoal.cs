@@ -269,12 +269,28 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Resume()
     {
-        // If we were waiting for the assist after a position reply, clear that state now.
-        // Resume() is the authoritative "start patrolling" entry point — any pending wait
-        // must be released when we are told to resume.
+        // If we were waiting for the assist after a position reply, only clear
+        // that state if the assist situation has actually been resolved.
+        // If neither AssistIsFollowing nor AssistRequestReturn is true, the assist
+        // is still navigating toward us — preserve the pause instead of resuming patrol.
         if (_waitingForAssistAfterPosition)
         {
-            logger.LogInformation("[FRG] Resume: clearing stale _waitingForAssistAfterPosition.");
+            if (classConfig.Mode == Mode.PartyLeader &&
+                !chatReader.AssistIsFollowing &&
+                !chatReader.AssistRequestReturn)
+            {
+                // Assist hasn't arrived yet. Re-apply the pause and return —
+                // don't resume patrol just because the GOAP planner cycled through another goal.
+                logger.LogInformation("[FRG] Resume: assist still navigating — re-applying position wait pause.");
+                if (sideActivityCts.IsCancellationRequested)
+                    sideActivityCts = new();
+                sideActivityManualReset.Set();
+                navigation.PausePathing();
+                return;
+            }
+
+            // Assist situation resolved — clear the flag and proceed with normal resume.
+            logger.LogInformation("[FRG] Resume: clearing _waitingForAssistAfterPosition (assist situation resolved).");
             _waitingForAssistAfterPosition = false;
         }
         // Apply per-route area blacklists (map rects -> world rects)

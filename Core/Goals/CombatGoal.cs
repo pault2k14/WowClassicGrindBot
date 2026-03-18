@@ -37,6 +37,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private int lastTargetGuid;
     private int consecutiveApproach;
     private int consecutiveNoAction;
+    private bool debug;
 
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
@@ -275,15 +276,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // try to figure out why we are still in combat
         if(!bits.Target() || !bits.Target_Alive())
         {
-            logger.LogInformation("No target or Target_Dead()");
-            logger.LogInformation("playerReader.TargetGuid: " + playerReader.TargetGuid);
-            logger.LogInformation("playerReader.FocusTargetGuid: " + playerReader.FocusTargetGuid);
-            logger.LogInformation("!bits.Target(): " + !bits.Target());
-            logger.LogInformation("!bits.Target_Alive(): " + !bits.Target_Alive());
-            logger.LogInformation("bits.FocusTarget(): " + bits.FocusTarget());
-            logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
-            logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
-            logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
+            if(debug)
+            {
+                logger.LogInformation("No target or Target_Dead()");
+                logger.LogInformation("playerReader.TargetGuid: " + playerReader.TargetGuid);
+                logger.LogInformation("playerReader.FocusTargetGuid: " + playerReader.FocusTargetGuid);
+                logger.LogInformation("!bits.Target(): " + !bits.Target());
+                logger.LogInformation("!bits.Target_Alive(): " + !bits.Target_Alive());
+                logger.LogInformation("bits.FocusTarget(): " + bits.FocusTarget());
+                logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
+                logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
+                logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
+            }
+            
 
             if (bits.FocusTarget() && bits.Focus_Combat()
                 && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile())
@@ -313,12 +318,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool successfulCast = false;
         bool currentTargetHasRaidIcon = classConfig.RaidIconsToSkipInCombat
                 .IndexOf(playerReader.TargetRaidIcon()) != -1;
-
-        logger.LogInformation("bits.Target_Alive(): " + bits.Target_Alive());
-        logger.LogInformation("Target Guids We Know of");
-        logger.LogInformation($"playerReader.TargetGuid: {playerReader.TargetGuid}");
-        logger.LogInformation($"playerReader.FocusTargetGuid: {playerReader.FocusTargetGuid}");
-        logger.LogInformation($"playerReader.PTCurrent (Rage): {playerReader.PTCurrent()}");
+        if (debug) {
+            logger.LogInformation("bits.Target_Alive(): " + bits.Target_Alive());
+            logger.LogInformation("Target Guids We Know of");
+            logger.LogInformation($"playerReader.TargetGuid: {playerReader.TargetGuid}");
+            logger.LogInformation($"playerReader.FocusTargetGuid: {playerReader.FocusTargetGuid}");
+            logger.LogInformation($"playerReader.PTCurrent (Rage): {playerReader.PTCurrent()}");
+        }
+        
         
         // Check to see if our target guid changed since the
         // last time we ran combat actions
@@ -335,9 +342,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
         {
-            logger.LogInformation("Inside KeyAction loop: span[" + i + "]");
+            if(debug)
+            {
+                logger.LogInformation("Inside KeyAction loop: span[" + i + "]");
+            }
 
-            if (playerReader.TargetGuid != playerReader.FocusTargetGuid)
+            if (debug && playerReader.TargetGuid != playerReader.FocusTargetGuid)
             {
                 logger.LogInformation("playerReader.TargetGuid != playerReader.FocusTargetGuid");
                 logger.LogInformation($"playerReader.TargetGuid: {playerReader.TargetGuid}");
@@ -406,7 +416,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                    )
                 )
             {
-                if (classConfig.Mode == Mode.AssistFocus)
+                if (debug && classConfig.Mode == Mode.AssistFocus)
                 {
                     logger.LogInformation("targetGuid not equal to FocusTargetGuid");
                     logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
@@ -418,7 +428,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     logger.LogInformation("!bits.Target_Combat(): " + !bits.Target_Combat());
                     logger.LogInformation("bits.Target_Tagged(): " + bits.Target_Tagged());
                 }
-                else if (classConfig.Mode == Mode.PartyLeader)
+                else if (debug && classConfig.Mode == Mode.PartyLeader)
                 {
                     logger.LogInformation("no target, but focus has target in combat, changing to that target");
                     logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
@@ -615,9 +625,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         }
 
-        logger.LogInformation("After combat actions loop");
-        logger.LogInformation("castOnTargetThisUpdate: " + castOnTargetThisUpdate);
-        logger.LogInformation("targetGuidChanged: " + targetGuidChanged);
+        if(debug)
+        {
+            logger.LogInformation("After combat actions loop");
+            logger.LogInformation("castOnTargetThisUpdate: " + castOnTargetThisUpdate);
+            logger.LogInformation("targetGuidChanged: " + targetGuidChanged);
+        }
+        
 
         /* DISABLE THIS FOR NOW TO SEE IF IT IS REALLY NEEDED
         if(bits.TargetTarget_PlayerOrPet() && !castOnTargetThisUpdate && !targetGuidChanged
