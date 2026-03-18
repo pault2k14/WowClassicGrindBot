@@ -251,11 +251,19 @@ public sealed partial class GoapAgent : IDisposable
 
             // Leader replies to assist's position request.
             // One-shot: fire the macro once and immediately reset — no "false" transition needed.
-            if ((classConfig.Mode == Mode.PartyLeader) && chatReader.AssistRequestedPosition)
+            if ((classConfig.Mode == Mode.PartyLeader) && !previousAssistRequestedPosition && chatReader.AssistRequestedPosition)
             {
-               logger.LogInformation("[GoapAgent] Assist requested leader position — replying.");
-               input.PressLeaderReplyPosition();
-               previousAssistRequestedPosition = true;
+                logger.LogInformation("[GoapAgent] Assist requested leader position — replying.");
+                input.PressLeaderReplyPosition();
+                // Reset immediately so GoapThread doesn't fire the macro again next iteration.
+                chatReader.AssistRequestedPosition = false;
+                previousAssistRequestedPosition = true;
+            
+                // Tell FollowRouteGoal to pause patrol and wait for the assist to arrive.
+                foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                {
+                    goal.PauseForAssistNavigation();
+                }
             }
             else if ((classConfig.Mode == Mode.PartyLeader) && previousAssistRequestedPosition && !chatReader.AssistRequestedPosition)
             {

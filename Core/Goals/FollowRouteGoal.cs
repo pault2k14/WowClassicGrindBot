@@ -437,6 +437,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public override void OnExit() => Abort();
 
+    /// <summary>
+    /// Called by GoapAgent immediately after pressing LeaderReplyPosition.
+    /// Pauses patrol and waits for the assist to confirm following or request return.
+    /// </summary>
+    public void PauseForAssistNavigation()
+    {
+        if (!_waitingForAssistAfterPosition)
+        {
+            logger.LogInformation("[FRG] Assist requested position — pausing patrol to wait for assist.");
+            _waitingForAssistAfterPosition = true;
+            _waitingForAssistAfterPositionStartUtc = DateTime.UtcNow;
+            navigation.PausePathing();
+        }
+    }
+
     public override void Update()
     {
         // 1) Consume pause requests (from side thread)
@@ -477,21 +492,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             logger.LogInformation("Assist Is NOT following AND Mode is PartyLeader");
             Abort();
             return;
-        }
-
-        // If the assist just asked for our position, pause patrol and wait for
-        // them to navigate here and confirm following. Timeout after 60s.
-        if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestedPosition)
-        {
-            if (!_waitingForAssistAfterPosition)
-            {
-                logger.LogInformation("[FRG] Assist requested position — pausing patrol to wait for assist.");
-                _waitingForAssistAfterPosition = true;
-                _waitingForAssistAfterPositionStartUtc = DateTime.UtcNow;
-                navigation.PausePathing();
-            }
-            // Consume the flag now that we've acted on it.
-            chatReader.AssistRequestedPosition = false;
         }
 
         if (_waitingForAssistAfterPosition)
