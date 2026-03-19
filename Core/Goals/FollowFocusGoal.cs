@@ -5,6 +5,7 @@ using SharedLib;
 using System;
 using System.Numerics;
 using System.Threading;
+using static System.MathF;
 
 namespace Core.Goals;
 
@@ -51,11 +52,11 @@ public sealed class FollowFocusGoal : GoapGoal
     private NavState _navState = NavState.Idle;
 
     // How long to wait for the leader to reply with their position.
-    private const double WaitForPositionTimeoutSec = 12.0;
+    private const double WaitForPositionTimeoutSec = 5.0;
 
     // How long the assist will actively navigate toward the leader before
     // escalating to AssistCantFollow (the existing "too far away" flow).
-    private const double NavigationTimeoutSec = 20.0;
+    private const double NavigationTimeoutSec = 30.0;
 
     private DateTime _navStateEnteredUtc;
 
@@ -305,9 +306,40 @@ public sealed class FollowFocusGoal : GoapGoal
             logger.LogInformation($"[FFG] Leader position received: X={lx} Y={ly}. Starting navigation.");
 
             Vector3 leaderMapPos = new Vector3(lx, ly, playerReader.MapPos.Z);
+            Vector3 myMapPos = playerReader.MapPos;
 
-            // SetSingleWaypoint accepts map-space coords (0-100 range) and converts internally.
-            navigation.SetSingleWaypoint(leaderMapPos);
+            // Build a dense chain of intermediate waypoints between our current
+            // position and the leader's position. Navigation is much more robust
+            // with many short segments (as in FRG's patrol route) than a single
+            // long waypoint — it gives the stuck detector, refill logic, and
+            // escape machinery many intermediate progress points to work with.
+            const float WaypointSpacingMap = 2.0f; // ~2 map units between each waypoint
+
+            float dx = lx - myMapPos.X;
+            float dy = ly - myMapPos.Y;
+            float dist = Sqrt(dx * dx + dy * dy);
+
+            int steps = Math.Max(1, (int)(dist / WaypointSpacingMap));
+            int totalPoints = steps + 1; // intermediate steps + leader endpoint
+
+            // Stack-allocate if small enough, heap-allocate for longer routes.
+            Vector3[] waypoints = new Vector3[totalPoints];
+            for (int i = 0; i < steps; i++)
+            {
+                float t = (float)(i + 1) / (steps + 1);
+                waypoints[i] = new Vector3(
+                    myMapPos.X + dx * t,
+                    myMapPos.Y + dy * t,
+                    myMapPos.Z
+                );
+            }
+            waypoints[steps] = leaderMapPos; // final point is leader's exact position
+
+            logger.LogInformation(
+                $"[FFG] Navigating to leader with {totalPoints} waypoints " +
+                $"(dist={dist:0.00} map units, spacing={WaypointSpacingMap}).");
+
+            navigation.SetWayPoints(waypoints.AsSpan());
             navigation.Resume();
 
             EnterState(NavState.NavigatingToLeader);

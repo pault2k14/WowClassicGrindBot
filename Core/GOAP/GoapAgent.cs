@@ -254,6 +254,12 @@ public sealed partial class GoapAgent : IDisposable
             if ((classConfig.Mode == Mode.PartyLeader) && !previousAssistRequestedPosition && chatReader.AssistRequestedPosition)
             {
                 logger.LogInformation("[GoapAgent] Assist requested leader position — replying.");
+                // Stop moving BEFORE pressing the reply macro so the position broadcast
+                // reflects where the leader is actually standing, not where they were
+                // heading. The assist will navigate to these coordinates, so even a few
+                // yards of drift can put the destination just outside follow range.
+                stopMoving.Stop();
+                input.StopForward(true);
                 input.PressLeaderReplyPosition();
                 // Reset immediately so GoapThread doesn't fire the macro again next iteration.
                 chatReader.AssistRequestedPosition = false;

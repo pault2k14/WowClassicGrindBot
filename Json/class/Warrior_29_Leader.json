@@ -7,12 +7,11 @@
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/20-30/Ashenvale/29-30 Felfire Hill.json",
-  "PathThereAndBack": true,
+  "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    "Shadethicket Bark Ripper",
-    "Shadethicket Stone Mover"
+    
   ],
   "IntVariables": {
     "Debuff_POISON": 136067
