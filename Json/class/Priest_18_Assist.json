@@ -12,8 +12,8 @@
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 35,
-    "MIN_TARGET_HP%": 20,
+    "MIN_MANA_OFFENSIVE%": 50,
+    "MIN_TARGET_HP%": 10,
     "Debuff_POISON": 136067
   },
   "PartyMember1": {
@@ -166,18 +166,6 @@
         "Requirements": [
           "Health% < 70",
           "Mana > 75"
-        ]
-      },
-      {
-        "Name": "Mind Blast",
-        "Key": "1",
-        "Cooldown": 8000,
-        "HasCastBar": true,
-        "Requirements": [
-          "InMeleeRange",
-          //"MaxRange < 27",
-          "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {
@@ -385,6 +373,7 @@
         "Name": "Food",
         "Key": "F12",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 24000,
         "Requirements": [
           "Health% < 50",
           "!InCombat",
@@ -395,6 +384,7 @@
         "Name": "Drink",
         "Key": "F11",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 24000,
         "Requirements": [
           "Mana% < 40",
           "!InCombat",

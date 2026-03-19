@@ -72,7 +72,7 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "PartyMember1Health% < 20",
-          "Mana > 130",
+          "Mana > 175",
           "InCombat",
           "!P1_Shield",
           "!Food",
@@ -125,7 +125,8 @@
         "Name": "Mana Potion",
         "Key": "F9",
         "Requirements": [
-          "Mana% < 15"
+          "Mana% < 15",
+          "MobCount > 1"
         ]
       },
       {
@@ -207,7 +208,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 130",
+          "Mana > 175",
           "!Shield"
         ]
       },
@@ -253,7 +254,7 @@
         "AfterCastWaitBuff": true,
         "ChangeTargetTo": "self",
         "Requirements": [
-          "Mana > 130",
+          "Mana > 175",
           "!Shield"
         ]
       },
@@ -264,7 +265,7 @@
         "AfterCastWaitBuff": true,
         "ChangeTargetTo": "party1",
         "Requirements": [
-          "Mana > 130",
+          "Mana > 175",
           "!P1_Shield"
         ]
       },
@@ -411,7 +412,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 130",
+          "Mana > 175",
           "!Shield",
           "InCombat",
           "!Food",

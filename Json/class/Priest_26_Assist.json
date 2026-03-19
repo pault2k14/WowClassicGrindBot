@@ -31,7 +31,7 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
-          "Mana > 125",
+          "Mana > 155",
           "TargetAlive"
         ]
       },
@@ -45,7 +45,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 105 ",
+          "Mana > 140",
           "TargetAlive"
         ]
       },
@@ -72,7 +72,7 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "PartyMember1Health% < 20",
-          "Mana > 130",
+          "Mana > 175",
           "InCombat",
           "!P1_Shield",
           "!Food",
@@ -125,7 +125,8 @@
         "Name": "Mana Potion",
         "Key": "F9",
         "Requirements": [
-          "Mana% < 15"
+          "Mana% < 15",
+          "MobCount > 1"
         ]
       },
       {
@@ -139,7 +140,7 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
-          "Mana > 125",
+          "Mana > 155",
           "TargetAlive"
         ]
       },
@@ -154,7 +155,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 105",
+          "Mana > 140",
           "TargetAlive"
         ]
       },
@@ -176,7 +177,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 125"
+          "Mana > 155"
         ]
       },
       {
@@ -207,7 +208,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 130",
+          "Mana > 175",
           "!Shield"
         ]
       },
@@ -253,7 +254,7 @@
         "AfterCastWaitBuff": true,
         "ChangeTargetTo": "self",
         "Requirements": [
-          "Mana > 130",
+          "Mana > 175",
           "!Shield"
         ]
       },
@@ -264,7 +265,7 @@
         "AfterCastWaitBuff": true,
         "ChangeTargetTo": "party1",
         "Requirements": [
-          "Mana > 130",
+          "Mana > 175",
           "!P1_Shield"
         ]
       },
@@ -279,7 +280,7 @@
         "Requirements": [
           "!Renew",
           "Health% < 80",
-          "Mana > 105"
+          "Mana > 140"
         ]
       },
       {
@@ -293,7 +294,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 80",
-          "Mana > 105",
+          "Mana > 140",
           "TargetAlive"
         ]
       },
@@ -381,7 +382,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 65",
-          "Mana > 125",
+          "Mana > 155",
           "!Food",
           "!Drink"
         ]
@@ -396,7 +397,7 @@
         "Requirements": [
           "!Renew",
           "Health% < 30",
-          "Mana > 105",
+          "Mana > 140",
           "TargetAlive",
           "!InCombat",
           "!Food",
@@ -411,7 +412,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 130",
+          "Mana > 175",
           "!Shield",
           "InCombat",
           "!Food",
