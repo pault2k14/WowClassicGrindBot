@@ -218,8 +218,8 @@
         "HasCastBar": true,
         "Requirements": [
           "MaxRange < 27",
-          //"TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > 35"
+          "TargetHealth% > MIN_TARGET_HP%",
+          "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       },
       {
