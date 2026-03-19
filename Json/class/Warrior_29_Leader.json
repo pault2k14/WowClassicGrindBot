@@ -6,15 +6,13 @@
   "KeyboardOnly": true,
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
-  "PathThereAndBack": false,
+  "PathFilename": "_pack/20-30/Ashenvale/29-30 Felfire Hill.json",
+  "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    "Kolkar Wrangler",
-    "Kolkar Stormer",
-    "Kolkar Invader",
-    "Kolkar Stormseer"
+    "Shadethicket Bark Ripper",
+    "Shadethicket Stone Mover"
   ],
   "IntVariables": {
     "Debuff_POISON": 136067
@@ -68,6 +66,38 @@
         ]
       },
       {
+        "Name": "Retaliation",
+        "Key": "F9",
+        "WhenUsable": true,
+        "Requirements": [
+          "InMeleeRange",
+          "TargetElite || TargetRareElite"
+        ]
+      },
+      {
+        "Name": "Execute",
+        "Key": "-",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 15",
+          "TargetHealth% < 20"
+        ]
+      },
+      {
+        "Name": "Mocking Blow",
+        "Key": "1",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 120000,
+        "Requirements": [
+          "InMeleeRange",
+          "!TargetsMe",
+          "TargetHealth% > 10"
+        ]
+      },
+      {
         "Name": "Overpower",
         "Key": "0",
         "BeforeCastFaceTarget": true,
@@ -76,6 +106,18 @@
           "InMeleeRange",
           "Rage > 5"
         ]
+      },
+      {
+        "Name": "Cleave",
+        "Key": "=",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 20",
+          "MobCount > 1",
+          "MainHandSwing > -400"
+        ],
+        "AfterCastWaitSwing": true
       },
       {
         "Name": "Hamstring",
@@ -101,6 +143,17 @@
         ]
       },
       {
+        "Name": "Rend",
+        "Key": "5",
+        "BeforeCastFaceTarget": true,
+        "Cooldown": 10000,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 10",
+          "!Rend"
+        ]
+      },
+      {
         "Name": "Heroic Strike",
         "Key": "2",
         "BeforeCastFaceTarget": true,
@@ -111,17 +164,6 @@
           "MobCount < 2"
         ],
         "AfterCastWaitSwing": true
-      },
-      {
-        "Name": "Rend",
-        "Key": "5",
-        "BeforeCastFaceTarget": true,
-        "Cooldown": 10000,
-        "Requirements": [
-          "InMeleeRange",
-          "Rage > 10",
-          "!Rend"
-        ]
       },
       {
         "Name": "AutoAttack",
