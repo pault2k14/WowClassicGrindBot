@@ -465,12 +465,23 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     /// Called by GoapAgent immediately after pressing LeaderReplyPosition.
     /// Pauses patrol and waits for the assist to confirm following or request return.
     /// No-op if the assist is already following — the position request was stale.
+    /// If AssistRequestReturn is already true, navigates to assist immediately.
     /// </summary>
     public void PauseForAssistNavigation()
     {
         if (chatReader.AssistIsFollowing)
         {
             logger.LogInformation("[FRG] PauseForAssistNavigation: assist already following — ignoring stale position request.");
+            return;
+        }
+
+        // If the assist already sent "i can't follow", navigate to them immediately
+        // rather than entering the wait state (which would just fall through anyway).
+        if (chatReader.AssistRequestReturn)
+        {
+            logger.LogInformation("[FRG] PauseForAssistNavigation: AssistRequestReturn already set — navigating to assist directly.");
+            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+            GoToOneWaypoint(assistWaypoint);
             return;
         }
 
@@ -530,14 +541,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             // Stay paused until the assist either confirms following or
             // sends AssistCantFollow (which sets AssistRequestReturn).
             // AssistIsFollowing is handled by OnGoapEvent which clears the flag and resumes.
-            // AssistRequestReturn is handled below via GoToOneWaypoint — clear the flag here
-            // so we don't block that flow.
+            // AssistRequestReturn should have been handled in PauseForAssistNavigation,
+            // but handle it here as a safety net in case of a race condition.
             if (chatReader.AssistRequestReturn)
             {
                 double waited = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
-                logger.LogInformation($"[FRG] AssistRequestReturn received after waiting {waited:0.0}s — handing off to return flow.");
+                logger.LogWarning($"[FRG] AssistRequestReturn received in Update after waiting {waited:0.0}s — handing off to return flow (unexpected path).");
                 _waitingForAssistAfterPosition = false;
-                // Fall through — the existing AssistRequestReturn handling below will take over.
+                Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+                GoToOneWaypoint(assistWaypoint);
+                return;
             }
             else
             {
