@@ -1,19 +1,17 @@
 {
   "ClassName": "Druid",
-  "Mode": "PartyLeader",
-  "Loot": true,
-  "Skin": true,
+  "Mode": "AssistFocus",
+  "Loot": false,
   "KeyboardOnly": true,
+  "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
   "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
+  "AssistPull": false,
+  "AssistApproach": false,
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    "Kolkar Wrangler",
-    "Kolkar Stormer",
-    "Kolkar Invader",
-    "Kolkar Stormseer"
   ],
   "Form": {
     "Sequence": [
@@ -36,11 +34,11 @@
         "Name": "Healing Touch Party1",
         "Key": "3",
         "HasCastBar": true,
-        "Cooldown": 500,
+        "Cooldown": 2000,
         "AfterCastWaitCastbar": true,
-        "AfterCastDelay": 500,
+        "AfterCastDelay": 1000,
         "Requirements": [
-          "PartyMember1Health% < 65",
+          "PartyMember1Health% < 60",
           "Mana > 110",
           "TargetAlive"
         ],
@@ -49,7 +47,8 @@
       {
         "Name": "Mark of the Wild Party1",
         "Key": "4",
-        "Cooldown": 500,
+        "Cooldown": 2000,
+        "AfterCastDelay": 1000,
         "Requirements": [
           "!P1_Mark of the Wild",
           "!InCombat",
@@ -63,6 +62,7 @@
       }
     ]
   },
+/*
   "Pull": {
     "Sequence": [
       {
@@ -89,6 +89,7 @@
       }
     ]
   },
+  */
   "Combat": {
     "Sequence": [
       {
@@ -97,7 +98,7 @@
         "HasCastBar": true,
         "AfterCastWaitCastbar": true,
         "AfterCastDelay": 500,
-        "Cooldown":  500,
+        "Cooldown": 500,
         "Requirements": [
           "Health% < 30",
           "Mana > 110"
@@ -196,24 +197,6 @@
         "Cooldown": 20000,
         "Requirement": "Mana% < 40",
         "Form": "None"
-      },
-      {
-        "Name": "Destroy Junk 1",
-        "Key": "N0",
-        "Cooldown": 20000,
-        "BeforeCastDelay": 500,
-        "Requirements": [
-          "!InCombat"
-        ]
-      },
-      {
-        "Name": "Destroy Junk 2",
-        "Key": "N0",
-        "Cooldown": 20000,
-        "BeforeCastDelay": 500,
-        "Requirements": [
-          "!InCombat"
-        ]
       }
     ]
   }
