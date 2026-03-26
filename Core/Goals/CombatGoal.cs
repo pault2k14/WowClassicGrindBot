@@ -715,8 +715,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     private void FindPossibleThreats()
     {
-
-        if (bits.Pet_Defensive())
+        // if (bits.Pet_Defensive())
+        // Pet can still get attacked even if they are passive
+        // so maybe this should jsut check if there is a pet at all?
+        if (bits.Pet())
         {
             float elapsedPetFoundTarget = wait.Until(CastingHandler.GCD,
                 () => playerReader.PetTarget() && bits.PetTarget_Alive());

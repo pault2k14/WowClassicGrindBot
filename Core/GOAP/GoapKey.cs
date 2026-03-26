@@ -46,6 +46,7 @@ public enum GoapKey
     party2connected,
     party3connected,
     party4connected,
+    leaderWaitingForAssist,
     LENGTH
 }
 
@@ -97,6 +98,7 @@ public static class GoapKey_Extension
         GoapKey.party2connected => "party member 2 connected",
         GoapKey.party3connected => "party member 3 connected",
         GoapKey.party4connected => "party member 4 connected",
+        GoapKey.leaderWaitingForAssist => "leader waiting for assist",
         _ => unknown
     };
 
@@ -144,6 +146,7 @@ public static class GoapKey_Extension
         GoapKey.party2connected => "!party member 2 connected",
         GoapKey.party3connected => "!party member 3 connected",
         GoapKey.party4connected => "!party member 4 connected",
+        GoapKey.leaderWaitingForAssist => "!leader waiting for assist",
         _ => unknown
     };
 

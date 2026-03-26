@@ -86,6 +86,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private bool _waitingForAssistAfterPosition;
     private DateTime _waitingForAssistAfterPositionStartUtc;
 
+    public bool WaitingForAssist =>
+    _waitingForAssistAfterPosition || _assistReturnActive || _assistWaitingForFollowing;
+
     private bool _assistRewindActive;
     private Vector3 _assistRewindAnchorW;
 
@@ -480,6 +483,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (chatReader.AssistRequestReturn)
         {
             logger.LogInformation("[FRG] PauseForAssistNavigation: AssistRequestReturn already set — navigating to assist directly.");
+            navigation.StopMovement();
             Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
             GoToOneWaypoint(assistWaypoint);
             return;
@@ -977,8 +981,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
-            if (!_assistReturnActive || _assistReturnTargetW.WorldDistanceXYTo(waypointToGoTo) > 1.0f)
-                BeginAssistReturn(waypointToGoTo);
+            // Always begin/reset the assist return — this resets the active-time
+            // timer so stale elapsed time from a previous attempt doesn't cause
+            // an immediate timeout abort on the very first Update() tick.
+            BeginAssistReturn(waypointToGoTo);
         }
         else
         {

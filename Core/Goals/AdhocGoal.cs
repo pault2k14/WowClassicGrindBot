@@ -53,6 +53,7 @@ public sealed class AdhocGoal : GoapGoal
             combatMatters = result;
         }
 
+        AddPrecondition(GoapKey.leaderWaitingForAssist, false);
         //AddPrecondition(GoapKey.forcedfollow, false);
         Keys = [key];
     }

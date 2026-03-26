@@ -1,21 +1,16 @@
 {
   "ClassName": "Warlock",
-  "Mode": "AssistFocus",
-  "UnitToFollow": "party1",
-  "PathFilename": "5_Gnome.json",
-  "Loot": false,
+  "Mode": "PartyLeader",
+  "Loot": true,
+  //"Skin": true,
+  "KeyboardOnly": true,
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/20-30/Stonetalon Mountains/17-21 Spiders v2.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
-  "AssistPull": false,
-  "AssistApproach": false,
   "Blacklist": [
-    "Kolkar Wrangler",
-    "Kolkar Stormer",
-    "Kolkar Invader",
-    "Kolkar Stormseer"
   ],
   "IntVariables": {
     "DOT_MIN_HEALTH%": 35,
@@ -24,7 +19,6 @@
     "Item_Soul_Shard": 6265,
     "Item_Healthstone": 5512
   },
-/*
   "Pull": {
     "Sequence": [
       {
@@ -39,7 +33,6 @@
       }
     ]
   },
-  */
   "Combat": {
     "Sequence": [
       {
@@ -57,6 +50,13 @@
         "Requirement": "Health% < 15"
       },
       {
+        "Name": "Pet Attack",
+        "Key": "=",
+        "Requirements": [
+          "Has Pet"
+        ]
+      },
+      {
         "Name": "Drain Soul",
         "Key": "7",
         "HasCastBar": true,
@@ -72,17 +72,16 @@
         ]
       },
       {
-        "Name": "Immolate",
-        "Key": "1",
+        "Name": "Health Funnel",
+        "Key": "F8",
         "HasCastBar": true,
-        "BeforeCastStop": true,
-        "BeforeCastDelay": 500,
-        "Cooldown": 2000,
         "Requirements": [
-          "MaxRange < 25",
-          "TargetHealth% > DOT_MIN_HEALTH%",
-          "!Immolate"
-        ]
+          "PetHealth% < 50",
+          "PetHealth% > 5",
+          "Health% > 20",
+          "Has Pet"
+        ],
+        "AfterCastWaitCastbar": true
       },
       {
         "Name": "Curse of Agony",
@@ -136,14 +135,36 @@
         ]
       },
       {
+        "Name": "Immolate",
+        "Key": "1",
+        "HasCastBar": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 1500,
+        "Cooldown": 2000,
+        "Requirements": [
+          "MaxRange < 25",
+          "TargetHealth% > DOT_MIN_HEALTH%",
+          "!Immolate"
+        ]
+      },
+      {
+        "Name": "Life Tap",
+        "Key": "6",
+        "Charge": 2,
+        "Requirements": [
+          "Health% > 65",
+          "Mana% < 90"
+        ]
+      },
+      {
         "Name": "Approach",
         "Requirements": [
           //"!InMeleeRange"
           //"OutOfCombatRange"
-          //"MaxRange > 27"
+          "MaxRange > 10"
           //"!SpellInRange:1"
-          "!Casting",
-          "MaxRange > 7"
+          //"!Casting",
+          //"MaxRange > 7"
         ],
         "Log": true
       }
@@ -172,8 +193,9 @@
         "Key": "F8",
         "HasCastBar": true,
         "Requirements": [
-          "PetHealth% < 35",
-          "Health% > 50",
+          "PetHealth% < 80",
+          "PetHealth% > 1",
+          "Health% > 20",
           "Has Pet"
         ],
         "AfterCastWaitCastbar": true
@@ -184,11 +206,13 @@
         "Requirement": "!Demon Skin"
       },
       {
-        "Name": "Summon Imp",
+        "Name": "Summon Voidwalker",
         "Key": "0",
         "HasCastBar": true,
         "AfterCastDelay": 2000,
         "Requirements": [
+          "Mana% > 30",
+          "BagItem:Item_Soul_Shard",
           "!Has Pet"
         ],
         "AfterCastWaitCastbar": true,
@@ -199,8 +223,8 @@
         "Key": "6",
         "Charge": 2,
         "Requirements": [
-          "Health% > 70",
-          "Mana% < 60"
+          "Health% > 65",
+          "Mana% < 90"
         ]
       },
       {
@@ -213,6 +237,24 @@
         ],
         "AfterCastWaitCastbar": true,
         "AfterCastWaitBag": true
+      },
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "Cooldown": 20000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "Cooldown": 20000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
+        ]
       }
     ]
   }

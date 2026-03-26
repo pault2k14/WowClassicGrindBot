@@ -391,6 +391,11 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.party2connected: " + bits.Party2_Connected());
         logger.LogInformation("GoapKey.party3connected: " + bits.Party3_Connected());
         logger.LogInformation("GoapKey.party4connected: " + bits.Party4_Connected());
+        logger.LogInformation("GoapKey.leaderWaitingForAssist: " +
+                         (classConfig.Mode == Mode.PartyLeader &&
+                           (chatReader.AssistRequestReturn ||
+                            AvailableGoals.OfType<FollowRouteGoal>().Any(g => g.WaitingForAssist)
+                           )));
     }
 
     private GoapGoal? NextGoal()
@@ -471,6 +476,10 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.party2connected] = bits.Party2_Connected();
         WorldState[GoapKey.party3connected] = bits.Party3_Connected();
         WorldState[GoapKey.party4connected] = bits.Party4_Connected();
+        WorldState[GoapKey.leaderWaitingForAssist] =
+                         classConfig.Mode == Mode.PartyLeader &&
+                         (chatReader.AssistRequestReturn ||
+                          AvailableGoals.OfType<FollowRouteGoal>().Any(g => g.WaitingForAssist));
     }
 
     public bool PartyInCombat()
