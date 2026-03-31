@@ -2,26 +2,19 @@
   "ClassName": "Warrior",
   "Mode": "PartyLeader",
   "Loot": true,
-  "Skin": true,
+  //"Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/20-30/Ashenvale/22-25 (mob level) Thistlefur Village v2.json",
-  "PathThereAndBack": true,
+  "PathFilename": "_pack/20-30/Ashenvale/29-30 Felfire Hill.json",
+  "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    "Thistlefur Avenger",
-    "Thistlefur Den Watcher",
-    "Thistlefur Den Watcher",
-    "Thistlefur Shaman",
-    "Thistlefur Totemic",
-    "Thistlefur Ursa"
+    
   ],
   "IntVariables": {
-    "Debuff_POISON": 136067,
-    "Item_Heavy_Throwing_Dagger": 3108,
-    "Item_Balanced_Throwing_Dagger": 2946
+    "Debuff_POISON": 136067
   },
   "Pull": {
     "Sequence": [
@@ -78,6 +71,17 @@
         "Requirements": [
           "InMeleeRange",
           "TargetElite || TargetRareElite"
+        ]
+      },
+      {
+        "Name": "Execute",
+        "Key": "-",
+        "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 15",
+          "TargetHealth% < 20"
         ]
       },
       {
@@ -194,7 +198,6 @@
         "Name": "Swap Thrown",
         "Key": "F8",
         "Requirements": [
-          "BagItem:Item_Balanced_Throwing_Dagger",
           "!HasRangedWeapon"
         ]
       },

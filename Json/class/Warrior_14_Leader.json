@@ -17,7 +17,9 @@
     "Kolkar Stormseer"
   ],
   "IntVariables": {
-    "Debuff_POISON": 136067
+    "Debuff_POISON": 136067,
+    "Item_Heavy_Throwing_Dagger": 3108,
+    "Item_Balanced_Throwing_Dagger": 2946
   },
   "Pull": {
     "Sequence": [
@@ -157,6 +159,7 @@
         "Name": "Swap Thrown",
         "Key": "F8",
         "Requirements": [
+          "BagItem:Item_Balanced_Throwing_Dagger",
           "!HasRangedWeapon"
         ]
       },

@@ -14,7 +14,9 @@
 
   ],
   "IntVariables": {
-    "Debuff_POISON": 136067
+    "Debuff_POISON": 136067,
+    "Item_Heavy_Throwing_Dagger": 3108,
+    "Item_Balanced_Throwing_Dagger": 2946
   },
   "Pull": {
     "Sequence": [
@@ -144,7 +146,26 @@
         "Name": "Swap Thrown",
         "Key": "F8",
         "Requirements": [
+          "BagItem:Item_Balanced_Throwing_Dagger",
           "!HasRangedWeapon"
+        ]
+      },
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "Cooldown": 35000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "Cooldown": 35000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
         ]
       }
     ]
