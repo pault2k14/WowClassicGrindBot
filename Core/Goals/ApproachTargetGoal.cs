@@ -131,6 +131,11 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
+        if (bits.Drowning())
+        {
+            input.PressJump();
+        }
+
         if (navigation.IsInBlacklistArea())
         {
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");

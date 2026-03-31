@@ -180,6 +180,18 @@ public sealed class FollowFocusGoal : GoapGoal
 
     public override void Update()
     {
+        if (bits.Drowning())
+        {
+            input.PressJump();
+        }
+
+        /*
+        if (bits.Swimming() && !bits.AutoFollow())
+        {
+            input.PressJump();
+        }
+        */
+
         // If focus is in combat, try to assist instead of following.
         if (bits.Focus_Combat() && bits.FocusTarget())
         {
@@ -192,16 +204,16 @@ public sealed class FollowFocusGoal : GoapGoal
             return;
         }
 
-        while (restHandler.IsResting())
-        {
-            logger.LogInformation("[FFG] Waiting while resting.");
-            wait.Update(1000);
-        }
-
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
             return;
+        }
+
+        while (restHandler.IsResting())
+        {
+            logger.LogInformation("[FFG] Waiting while resting.");
+            wait.Update(1000);
         }
 
         // --- Drive the leader-navigation state machine ---

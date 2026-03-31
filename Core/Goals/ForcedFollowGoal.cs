@@ -124,6 +124,11 @@ public sealed class ForcedFollowGoal : GoapGoal
     {
         logger.LogInformation("Enter Update()");
 
+        if (bits.Drowning())
+        {
+            input.PressJump();
+        }
+
         //logger.LogInformation("ForcedFollowGoal: Inside Update");
         // Removed check for playerReader.SpellInRange.PartyMember4_Inspect
         // As inpect can't be used in combat

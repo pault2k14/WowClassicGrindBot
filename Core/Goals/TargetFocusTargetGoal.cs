@@ -61,6 +61,11 @@ public sealed class TargetFocusTargetGoal : GoapGoal
 
     public override void Update()
     {
+        if (bits.Drowning())
+        {
+            input.PressJump();
+        }
+
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);

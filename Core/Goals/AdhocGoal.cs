@@ -84,6 +84,12 @@ public sealed class AdhocGoal : GoapGoal
         }
         */
 
+        if (bits.Drowning())
+        {
+            input.PressJump();
+            return;
+        }
+
         if (!CanRun() || castingHandler.SpellInQueue())
             return;
 

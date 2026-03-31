@@ -167,7 +167,12 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
 
-        if(chatReader.ForcedFollow)
+        if (bits.Drowning())
+        {
+            input.PressJump();
+        }
+
+        if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
             return;

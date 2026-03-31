@@ -90,6 +90,12 @@ public sealed class PartyMember4Goal : GoapGoal
     {
         wait.Update();
 
+        if (bits.Drowning())
+        {
+            input.PressJump();
+            return;
+        }
+
         for (int i = 0; bits.Target_Alive() && i < Keys.Length; i++)
         {
             if (chatReader.ForcedFollow)
