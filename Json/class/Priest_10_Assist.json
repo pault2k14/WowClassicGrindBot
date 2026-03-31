@@ -21,7 +21,7 @@
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 40,
+    "MIN_MANA_OFFENSIVE%": 45,
     "MIN_TARGET_HP%": 10,
     "Debuff_POISON": 136067
   },
@@ -183,7 +183,7 @@
         "BeforeCastFaceTarget": true,
         "Cooldown": 12000,
         "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%"
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
 
@@ -205,7 +205,7 @@
         "Requirements": [
           "MaxRange < 27",
           "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > 50"
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {

@@ -8,11 +8,17 @@
   "PathReduceSteps": false,
   "AssistPull": false,
   "AssistApproach": false,
+  "Blacklist": [
+    "Kolkar Wrangler",
+    "Kolkar Stormer",
+    "Kolkar Invader",
+    "Kolkar Stormseer"
+  ],
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 50,
+    "MIN_MANA_OFFENSIVE%": 45,
     "MIN_TARGET_HP%": 10,
     "Debuff_POISON": 136067
   },
@@ -96,7 +102,7 @@
         "WhenUsable": true,
         "AfterCastWaitBuff": true,
         "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%",
+          "Mana% > MIN_MANA_OFFENSIVE%",
           "!Shield"
         ]
       },
@@ -105,7 +111,7 @@
         "Key": "5",
         "BeforeCastFaceTarget": true,
         "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%"
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       }
     ]
@@ -174,7 +180,7 @@
         "BeforeCastFaceTarget": true,
         "Cooldown": 12000,
         "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%"
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
 
@@ -195,8 +201,8 @@
         "HasCastBar": true,
         "Requirements": [
           "MaxRange < 27",
-          "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > 40"
+          "Mana% > MIN_MANA_OFFENSIVE%",
+          "TargetHealth% > MIN_TARGET_HP%"
         ]
       },
       {

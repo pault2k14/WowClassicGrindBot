@@ -12,7 +12,7 @@
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 35,
+    "MIN_MANA_OFFENSIVE%": 45,
     "MIN_TARGET_HP%": 20,
     "Debuff_POISON": 136067
   },
@@ -184,10 +184,11 @@
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 12000,
+        "Cooldown": 1500,
         "Requirements": [
           "InMeleeRange",
           //"MaxRange < 27",
+          "!Shadow Word: Pain",
           "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       },

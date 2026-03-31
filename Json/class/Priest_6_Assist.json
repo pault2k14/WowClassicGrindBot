@@ -8,14 +8,6 @@
   "PathReduceSteps": false,
   "AssistPull": false,
   "AssistApproach": false,
-  "RaidIconsToSkipInCombat": [
-    5, // Moon
-    6, // Square
-    7 // Cross
-  ],
-  "RaidIconsToAttackWithoutFocus": [
-    2 // Circle
-  ],
   // Diamond 3
   "IntVariables": {
     "MIN_WATER%": 20,
@@ -171,10 +163,11 @@
       {
         "Name": "Approach",
         "Requirements": [
-          //"!InMeleeRange"
+          "!InMeleeRange",
+          "!Casting"
           //"OutOfCombatRange"
           //"MaxRange > 27"
-          "!SpellInRange:1"
+          //"!SpellInRange:1"
         ],
         "Log": true
       }

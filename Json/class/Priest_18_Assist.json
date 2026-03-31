@@ -172,11 +172,11 @@
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 12000,
+        "Cooldown": 1500,
         "Requirements": [
           "InMeleeRange",
           //"MaxRange < 27",
-          "MIN_MANA_OFFENSIVE% < Mana%"
+          "Mana% > MIN_MANA_OFFENSIVE%",
         ]
       },
 
@@ -198,8 +198,8 @@
         "Requirements": [
           "InMeleeRange",
           //"MaxRange < 27",
-          "TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > 50"
+          "Mana% > MIN_MANA_OFFENSIVE%",
+          "TargetHealth% > MIN_TARGET_HP%"
         ]
       },
       {
@@ -386,7 +386,7 @@
         "AfterCastMaxDelay": 3000,
         "Cooldown": 24000,
         "Requirements": [
-          "Mana% < 40",
+          "Mana% < 35",
           "!InCombat",
           "!FocusCombat"
         ]

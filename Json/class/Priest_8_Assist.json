@@ -8,20 +8,11 @@
   "PathReduceSteps": false,
   "AssistPull": false,
   "AssistApproach": false,
-  "RaidIconsToSkipInCombat": [
-    5, // Moon
-    6, // Square
-    7 // Cross
-  ],
-  "RaidIconsToAttackWithoutFocus": [
-    2 // Circle
-  ],
-  // Diamond 3
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 40,
+    "MIN_MANA_OFFENSIVE%": 45,
     "MIN_TARGET_HP%": 10,
     "Debuff_POISON": 136067
   },
@@ -183,7 +174,8 @@
         "BeforeCastFaceTarget": true,
         "Cooldown": 12000,
         "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%"
+          "MaxRange < 27",
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {
@@ -353,6 +345,7 @@
         "Name": "Food",
         "Key": "F12",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 20000,
         "Requirements": [
           "Health% < 50",
           "!InCombat",
@@ -363,6 +356,7 @@
         "Name": "Drink",
         "Key": "F11",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 20000,
         "Requirements": [
           "Mana% < 30",
           "!InCombat",
