@@ -86,8 +86,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private bool _waitingForAssistAfterPosition;
     private DateTime _waitingForAssistAfterPositionStartUtc;
 
+    /// <summary>
+    /// True whenever the leader is in any "busy with assist" state:
+    /// waiting after a position reply, actively navigating back to the assist,
+    /// or paused at the destination waiting for "i'm following".
+    /// Used by GoapAgent to suppress housekeeping goals (Adhoc etc.) during this window.
+    /// </summary>
     public bool WaitingForAssist =>
-    _waitingForAssistAfterPosition || _assistReturnActive || _assistWaitingForFollowing;
+        _waitingForAssistAfterPosition || _assistReturnActive || _assistWaitingForFollowing;
 
     private bool _assistRewindActive;
     private Vector3 _assistRewindAnchorW;
@@ -421,6 +427,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                             + " Y: "
                             + chatReader.AssistYPos);
 
+                        // If we're already actively navigating back to the assist, don't restart.
+                        // The assist position has drifted because they are now moving toward us —
+                        // chasing their updated position creates a crossing-paths loop where both
+                        // bots walk past each other indefinitely.
+                        if (_assistReturnActive)
+                        {
+                            logger.LogInformation(
+                                "[FRG] OnGoapEvent assistrequestreturn: AssistReturn already active — " +
+                                "ignoring updated position to avoid crossing-paths loop.");
+                            break;
+                        }
+
                         Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - Calling GoToOneWaypoint of " + assistWaypoint);
                         GoToOneWaypoint(assistWaypoint);
@@ -482,6 +500,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // rather than entering the wait state (which would just fall through anyway).
         if (chatReader.AssistRequestReturn)
         {
+            // If we're already actively navigating back to the assist, don't restart
+            // the navigation — the assist is probably moving toward us at the same time
+            // and restarting would cause both bots to chase each other's moving positions.
+            // Stay the course and let the existing return navigation complete.
+            if (_assistReturnActive)
+            {
+                logger.LogInformation(
+                    "[FRG] PauseForAssistNavigation: AssistRequestReturn set but AssistReturn already active — " +
+                    "ignoring position request to avoid crossing-paths loop.");
+                return;
+            }
+
             logger.LogInformation("[FRG] PauseForAssistNavigation: AssistRequestReturn already set — navigating to assist directly.");
             navigation.StopMovement();
             Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
