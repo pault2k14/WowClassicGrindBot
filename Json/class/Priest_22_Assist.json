@@ -15,7 +15,7 @@
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 55,
+    "MIN_MANA_OFFENSIVE%": 50,
     "MIN_TARGET_HP%": 10,
     "Debuff_POISON": 136067
   },
@@ -99,7 +99,7 @@
         "WhenUsable": true,
         "AfterCastWaitBuff": true,
         "Requirements": [
-          "MIN_MANA_OFFENSIVE% < Mana%",
+          "Mana% > MIN_MANA_OFFENSIVE%",
           "!Shield"
         ]
       },
@@ -108,7 +108,6 @@
         "Key": "5",
         "BeforeCastFaceTarget": true,
         "Requirements": [
-          "!T_Shadow Word: Pain",
           "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       }
@@ -183,10 +182,11 @@
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 12000,
+        "Cooldown": 1500,
         "Requirements": [
+          "!Shadow Word: Pain",
           "MaxRange < 27",
-          "MIN_MANA_OFFENSIVE% < Mana%"
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {
@@ -194,10 +194,11 @@
         "Key": "1",
         "AfterCastWaitCastbar": true,
         "HasCastBar": true,
-        "Cooldown": 10000,
+        "Cooldown": 5000,
         "Requirements": [
-          "MaxRange < 27",
-          "MIN_MANA_OFFENSIVE% < Mana%"
+          "Mana% > MIN_MANA_OFFENSIVE%",
+          "!Holy Fire",
+          "MaxRange < 27"
         ]
       },
       {
@@ -218,7 +219,7 @@
         "Requirements": [
           "MaxRange < 27",
           //"TargetHealth% > MIN_TARGET_HP%",
-          "Mana% > 35"
+          "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
       {
@@ -465,7 +466,7 @@
         "AfterCastDelay": 3000,
         "Cooldown": 24000,
         "Requirements": [
-          "Mana% < 40",
+          "Mana% < 35",
           "!InCombat",
           "!FocusCombat"
         ]
