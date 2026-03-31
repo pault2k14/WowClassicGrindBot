@@ -484,9 +484,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     /// <summary>
     /// Called by GoapAgent immediately after pressing LeaderReplyPosition.
-    /// Pauses patrol and waits for the assist to confirm following or request return.
-    /// No-op if the assist is already following — the position request was stale.
-    /// If AssistRequestReturn is already true, navigates to assist immediately.
+    /// The assist has just asked "where are you?" meaning they are about to navigate TO the leader.
+    /// The leader must stop moving and wait — navigating toward the assist here would cause both
+    /// bots to walk toward each other's last-known positions (crossing-paths loop).
+    /// 
+    /// Navigation toward the assist only happens via OnGoapEvent(assistrequestreturn), which fires
+    /// when the assist has given up following and needs the leader to come to them instead.
     /// </summary>
     public void PauseForAssistNavigation()
     {
@@ -496,35 +499,25 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
         }
 
-        // If the assist already sent "i can't follow", navigate to them immediately
-        // rather than entering the wait state (which would just fall through anyway).
-        if (chatReader.AssistRequestReturn)
+        // The assist sent "leader what is your position?" — they are about to navigate TO us.
+        // Stop moving and wait for them to arrive regardless of any prior AssistRequestReturn state.
+        // Do NOT navigate toward the assist here — that would create a crossing-paths loop.
+        if (_assistReturnActive)
         {
-            // If we're already actively navigating back to the assist, don't restart
-            // the navigation — the assist is probably moving toward us at the same time
-            // and restarting would cause both bots to chase each other's moving positions.
-            // Stay the course and let the existing return navigation complete.
-            if (_assistReturnActive)
-            {
-                logger.LogInformation(
-                    "[FRG] PauseForAssistNavigation: AssistRequestReturn set but AssistReturn already active — " +
-                    "ignoring position request to avoid crossing-paths loop.");
-                return;
-            }
-
-            logger.LogInformation("[FRG] PauseForAssistNavigation: AssistRequestReturn already set — navigating to assist directly.");
+            // We were navigating to the assist, but now they're navigating to us instead.
+            // Cancel our return and hold position.
+            logger.LogInformation("[FRG] PauseForAssistNavigation: cancelling in-progress AssistReturn — assist is now navigating to us.");
             navigation.StopMovement();
-            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
-            GoToOneWaypoint(assistWaypoint);
-            return;
+            ClearAssistReturnState();
         }
+
+        navigation.PausePathing();
 
         if (!_waitingForAssistAfterPosition)
         {
-            logger.LogInformation("[FRG] Assist requested position — pausing patrol to wait for assist.");
+            logger.LogInformation("[FRG] PauseForAssistNavigation: assist requested position — stopping and waiting for assist to arrive.");
             _waitingForAssistAfterPosition = true;
             _waitingForAssistAfterPositionStartUtc = DateTime.UtcNow;
-            navigation.PausePathing();
         }
     }
 
@@ -575,23 +568,32 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             // Stay paused until the assist either confirms following or
             // sends AssistCantFollow (which sets AssistRequestReturn).
             // AssistIsFollowing is handled by OnGoapEvent which clears the flag and resumes.
-            // AssistRequestReturn should have been handled in PauseForAssistNavigation,
-            // but handle it here as a safety net in case of a race condition.
             if (chatReader.AssistRequestReturn)
             {
+                // Assist gave up navigating to us and wants us to come to them instead.
                 double waited = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
-                logger.LogWarning($"[FRG] AssistRequestReturn received in Update after waiting {waited:0.0}s — handing off to return flow (unexpected path).");
+                logger.LogInformation($"[FRG] AssistRequestReturn received while waiting for assist after position reply ({waited:0.0}s) — navigating to assist.");
                 _waitingForAssistAfterPosition = false;
                 Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
                 GoToOneWaypoint(assistWaypoint);
                 return;
             }
-            else
+
+            // Timeout: if the assist still hasn't arrived after ASSIST_RETURN_TIMEOUT_ACTIVE_SEC,
+            // give up waiting and resume patrol. The assist will re-request if needed.
+            double waitedSec = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
+            if (waitedSec >= ASSIST_RETURN_TIMEOUT_ACTIVE_SEC)
             {
-                // Still waiting for the assist to arrive — hold position.
-                wait.Update();
+                logger.LogWarning($"[FRG] Timed out waiting for assist to arrive after position reply ({waitedSec:0.0}s). Resuming patrol.");
+                _waitingForAssistAfterPosition = false;
+                // Don't resume patrol here — let the normal GOAP cycle re-evaluate.
+                // The precondition check at the top of Update() will handle the rest.
                 return;
             }
+
+            // Still waiting for the assist to arrive — hold position.
+            wait.Update();
+            return;
         }
 
         // 2) Determine whether we WANT navigation paused this tick
