@@ -86,6 +86,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private bool _waitingForAssistAfterPosition;
     private DateTime _waitingForAssistAfterPositionStartUtc;
 
+
+
     /// <summary>
     /// True whenever the leader is in any "busy with assist" state:
     /// waiting after a position reply, actively navigating back to the assist,
@@ -566,13 +568,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (_waitingForAssistAfterPosition)
         {
             // Stay paused until the assist either confirms following or
-            // sends AssistCantFollow (which sets AssistRequestReturn).
+            // sends a fresh AssistCantFollow (which sets AssistRequestReturn).
             // AssistIsFollowing is handled by OnGoapEvent which clears the flag and resumes.
+            //
+            // Note: ChatReader clears AssistRequestReturn when "leader what is your position?"
+            // arrives, so any AssistRequestReturn seen here is genuinely fresh — the assist
+            // gave up navigating to us and wants us to come to them instead.
             if (chatReader.AssistRequestReturn)
             {
-                // Assist gave up navigating to us and wants us to come to them instead.
                 double waited = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
-                logger.LogInformation($"[FRG] AssistRequestReturn received while waiting for assist after position reply ({waited:0.0}s) — navigating to assist.");
+                logger.LogInformation($"[FRG] AssistRequestReturn received while waiting after position reply ({waited:0.0}s) — navigating to assist.");
                 _waitingForAssistAfterPosition = false;
                 Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
                 GoToOneWaypoint(assistWaypoint);
@@ -580,14 +585,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
 
             // Timeout: if the assist still hasn't arrived after ASSIST_RETURN_TIMEOUT_ACTIVE_SEC,
-            // give up waiting and resume patrol. The assist will re-request if needed.
+            // give up waiting and let the GOAP cycle re-evaluate.
             double waitedSec = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
             if (waitedSec >= ASSIST_RETURN_TIMEOUT_ACTIVE_SEC)
             {
                 logger.LogWarning($"[FRG] Timed out waiting for assist to arrive after position reply ({waitedSec:0.0}s). Resuming patrol.");
                 _waitingForAssistAfterPosition = false;
-                // Don't resume patrol here — let the normal GOAP cycle re-evaluate.
-                // The precondition check at the top of Update() will handle the rest.
                 return;
             }
 

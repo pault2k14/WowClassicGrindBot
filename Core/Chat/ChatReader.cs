@@ -1,6 +1,5 @@
 using Core.Goals;
 using Core.GOAP;
-using Game;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
@@ -25,7 +24,7 @@ public sealed class ChatReader : IReader
 {
     private const int cMsg = 98;
     private const int cMeta = 99;
-    
+
     private readonly ILogger<ChatReader> logger;
 
     /// <summary>
@@ -41,13 +40,6 @@ public sealed class ChatReader : IReader
     public ObservableCollection<ChatMessageEntry> Messages { get; } = new();
     private const int MsgIdRadix = 1 << 20; // 1048576
 
-    // <summary>
-    /// Set on the LEADER bot when the assist sends "leader what is your position?"
-    /// GoapAgent polls this and fires the LeaderReplyPosition macro to reply.
-    /// Reset by GoapAgent immediately after firing the macro.
-    /// </summary>
-    public bool AssistRequestedPosition;
-
     // --- Leader/Assist state flags ---
 
     public bool ForcedFollow;
@@ -55,6 +47,13 @@ public sealed class ChatReader : IReader
     public bool AssistRequestReturn;
     public float AssistXPos;
     public float AssistYPos;
+
+    /// <summary>
+    /// Set on the LEADER bot when the assist sends "leader what is your position?"
+    /// GoapAgent polls this and fires the LeaderReplyPosition macro to reply.
+    /// Reset by GoapAgent immediately after firing the macro.
+    /// </summary>
+    public bool AssistRequestedPosition;
 
     /// <summary>
     /// Set on the ASSIST bot when the leader replies with "position: x,y".
@@ -100,11 +99,8 @@ public sealed class ChatReader : IReader
         return (msgId, number);
     }
 
-    public ChatReader(
-        //IBotController botController, 
-        ILogger<ChatReader> logger)
+    public ChatReader(ILogger<ChatReader> logger)
     {
-        //this.botController = botController;
         this.logger = logger;
     }
 
@@ -214,21 +210,21 @@ public sealed class ChatReader : IReader
             ForcedFollow = false;
         }
 
-        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm following"))
+        if (BotMode == Mode.PartyLeader && type == ChatMessageType.Party && msg.Equals("i'm following"))
         {
             logger.LogInformation("Received i'm following");
             AssistIsFollowing = true;
             AssistRequestReturn = false;
         }
 
-        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("i'm not following"))
+        if (BotMode == Mode.PartyLeader && type == ChatMessageType.Party && msg.Equals("i'm not following"))
         {
             logger.LogInformation("Received i'm not following");
             AssistIsFollowing = false;
         }
 
         // "i tried following but you are too far away my position:x,y"
-        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
+        if (BotMode == Mode.PartyLeader && type == ChatMessageType.Party && msg.Contains("i tried following but you are too far away my position:"))
         {
             logger.LogInformation("Received: " + msg);
             var msgSubstrings = msg.Split(":");
@@ -257,7 +253,7 @@ public sealed class ChatReader : IReader
 
         // --- New: ASSIST side receives "position: x,y" from leader ---
         // Expected format: "position: x,y"
-        if ((BotMode == Mode.AssistFocus) && type == ChatMessageType.Party && msg.StartsWith("position: "))
+        if (BotMode == Mode.AssistFocus && type == ChatMessageType.Party && msg.StartsWith("position: "))
         {
             logger.LogInformation("[ChatReader] Received leader position: " + msg);
             string coords = msg["position: ".Length..];
@@ -278,10 +274,21 @@ public sealed class ChatReader : IReader
         }
 
         // --- New: LEADER side receives "leader what is your position?" from assist ---
-        if ((BotMode == Mode.PartyLeader) && type == ChatMessageType.Party && msg.Equals("leader what is your position?"))
+        // Sets a flag; GoapAgent polls this and fires the reply macro.
+        if (BotMode == Mode.PartyLeader && type == ChatMessageType.Party && msg.Equals("leader what is your position?"))
         {
             logger.LogInformation("[ChatReader] Received position request from assist");
             AssistRequestedPosition = true;
+
+            // The assist is actively trying to navigate TO the leader — they are no longer
+            // in the "gave up / send me back" state. Clear AssistRequestReturn so that
+            // FRG's _waitingForAssistAfterPosition hold is not immediately short-circuited
+            // by a stale AssistRequestReturn flag from the previous cycle.
+            if (AssistRequestReturn)
+            {
+                logger.LogInformation("[ChatReader] Clearing stale AssistRequestReturn — assist is navigating to leader.");
+                AssistRequestReturn = false;
+            }
         }
 
         Messages.Add(new ChatMessageEntry(DateTime.Now, type, author, msg));
