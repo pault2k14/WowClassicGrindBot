@@ -55,6 +55,7 @@ public sealed partial class RequirementFactory
     private const char SEP2 = ',';
 
     private const string Swimming = "Swimming";
+    private const string Drowning = "Drowning";
     private const string Falling = "Falling";
     private const string Flying = "Flying";
 
@@ -207,6 +208,7 @@ public sealed partial class RequirementFactory
 
             // Player Affected
             { Swimming, bits.Swimming },
+            { Drowning, bits.Drowning },
             { Falling, bits.Falling },
             { Flying, bits.Flying },
             { "Dead", bits.Dead },
