@@ -1,4 +1,4 @@
-﻿using Core.GOAP;
+using Core.GOAP;
 
 using Game;
 
@@ -39,6 +39,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private int consecutiveNoAction;
     private bool debug;
 
+    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
+    // Checked at the top of Update() to force an immediate exit so the
+    // planner can re-evaluate — without this, a goal already running
+    // would not exit until its own Update() returned normally.
+    private bool _evadeRecoveryActive;
+
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
         ClassConfiguration classConfiguration, ClassConfiguration classConfig,
@@ -66,11 +72,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             AddPrecondition(GoapKey.partymembercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
+            // Lock out combat during evade recovery so assist doesn't re-engage.
+            AddPrecondition(GoapKey.evadeRecovery, false);
         }
         else if(classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.partyleadercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
+            // Lock out combat during evade recovery so leader doesn't re-engage.
+            AddPrecondition(GoapKey.evadeRecovery, false);
         }
         else
         {
@@ -81,6 +91,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             AddPrecondition(GoapKey.targethostile, true);
             //AddPrecondition(GoapKey.targettargetsus, true);
             AddPrecondition(GoapKey.incombatrange, true);
+            AddPrecondition(GoapKey.evadeRecovery, false);
         }
 
         // Removed this due to if getting attack in combat while
@@ -105,12 +116,22 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     public void OnGoapEvent(GoapEventArgs e)
     {
-        if (e is GoapStateEvent s && s.Key == GoapKey.producedcorpse)
+        if (e is GoapStateEvent s)
         {
-            // have to check range
-            // ex. target died far away have to consider the range and approximate
-            float distance = (lastMaxDistance + lastMinDistance) / 2f;
-            SendGoapEvent(new CorpseEvent(GetCorpseLocation(distance), distance, playerReader.Direction));
+            if (s.Key == GoapKey.producedcorpse)
+            {
+                // have to check range
+                // ex. target died far away have to consider the range and approximate
+                float distance = (lastMaxDistance + lastMinDistance) / 2f;
+                SendGoapEvent(new CorpseEvent(GetCorpseLocation(distance), distance, playerReader.Direction));
+            }
+            else if (s.Key == GoapKey.evadeRecovery)
+            {
+                // GoapAgent broadcasts this when an evading mob is detected.
+                // We set a flag so Update() can exit immediately on the next tick,
+                // allowing the planner to re-evaluate and avoid re-selecting this goal.
+                _evadeRecoveryActive = s.Value;
+            }
         }
     }
 
@@ -211,6 +232,64 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // If an evading mob was detected via GoapEvent broadcast, exit immediately.
+        if (_evadeRecoveryActive)
+        {
+            logger.LogInformation("[CombatGoal] Evade recovery active — exiting combat goal.");
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.Stop();
+            return;
+        }
+
+        // Primary in-combat evade detection: check if the current target has been
+        // flagged as evading by the combat log. This covers the case where a mob
+        // starts evading while we are already inside CombatGoal — none of the other
+        // goals are running at this point so we must catch it here.
+        // Firing EvadeBlacklistEvent causes GoapAgent to set _evadeRecoveryUntilUtc,
+        // broadcast evadeRecovery=true to all goals (including back to us via OnGoapEvent),
+        // stop movement, press N2 to notify the assist, and suppress the target finder.
+        if (classConfig.Mode == Mode.PartyLeader
+            && bits.Target()
+            && playerReader.TargetGuid != 0
+            && combatLog.EvadeMobs.Contains(playerReader.TargetGuid))
+        {
+            logger.LogInformation($"[CombatGoal] Target guid={playerReader.TargetGuid} is evading — broadcasting and exiting.");
+            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
+            playerReader.IgnoreTarget(playerReader.TargetGuid);
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.Stop();
+            return;
+        }
+
+        // Assist-side evade handling: the leader pressed N2 and ChatReader parsed
+        // "blacklist target: {guid}". FollowFocusGoal handles this when the assist is
+        // following, but if the assist is mid-combat in CombatGoal, FollowFocusGoal
+        // is not running. Check the flag here so the assist also exits cleanly.
+        if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
+        {
+            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
+            chatReader.LeaderBlacklistTarget = false;
+            chatReader.LeaderBlacklistTargetId = 0;
+
+            if (blacklistGuid != 0)
+            {
+                logger.LogInformation($"[CombatGoal] Leader blacklisted guid={blacklistGuid} while in combat — ignoring and exiting.");
+                playerReader.IgnoreTarget(blacklistGuid);
+            }
+
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.Stop();
+            return;
+        }
 
         if (classConfig.Loot && !chatReader.AssistRequestReturn)
         {

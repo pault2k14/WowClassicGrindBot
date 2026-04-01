@@ -64,6 +64,21 @@ public sealed class ChatReader : IReader
     public float LeaderXPos;
     public float LeaderYPos;
 
+    /// <summary>
+    /// Set on the ASSIST bot when the leader broadcasts "blacklist target: {guid}".
+    /// The assist should call playerReader.IgnoreTarget(LeaderBlacklistTargetId),
+    /// stop attacking, and clear target.
+    /// Reset by FollowFocusGoal after consuming the value.
+    /// </summary>
+    public bool LeaderBlacklistTarget;
+    public int LeaderBlacklistTargetId;
+
+    /// <summary>
+    /// Set on the LEADER bot when the leader broadcasts "blacklist target: {guid}"
+    /// to itself (so GoapAgent/FRG know to suppress the target finder briefly).
+    /// </summary>
+    public bool LeaderSentBlacklist;
+
     private static string DecodeChatPart(int number, int take)
     {
         // number is n1*10000 + n2*100 + n3 (each 0..100)
@@ -289,6 +304,28 @@ public sealed class ChatReader : IReader
                 logger.LogInformation("[ChatReader] Clearing stale AssistRequestReturn — assist is navigating to leader.");
                 AssistRequestReturn = false;
             }
+        }
+
+        // --- ASSIST side receives "blacklist target: {guid}" from leader ---
+        if (BotMode == Mode.AssistFocus && type == ChatMessageType.Party && msg.StartsWith("blacklist target: "))
+        {
+            string guidStr = msg["blacklist target: ".Length..].Trim();
+            if (int.TryParse(guidStr, out int targetGuid))
+            {
+                logger.LogInformation($"[ChatReader] Leader requests blacklist target guid={targetGuid}");
+                LeaderBlacklistTargetId = targetGuid;
+                LeaderBlacklistTarget = true;
+            }
+            else
+            {
+                logger.LogWarning($"[ChatReader] Failed to parse blacklist target guid from: {msg}");
+            }
+        }
+
+        // --- LEADER side confirmation that it sent a blacklist broadcast ---
+        if (BotMode == Mode.PartyLeader && type == ChatMessageType.Party && msg.StartsWith("blacklist target: "))
+        {
+            LeaderSentBlacklist = true;
         }
 
         Messages.Add(new ChatMessageEntry(DateTime.Now, type, author, msg));

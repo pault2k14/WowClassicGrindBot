@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace Core.GOAP;
 
@@ -47,6 +47,16 @@ public enum GoapKey
     party3connected,
     party4connected,
     leaderWaitingForAssist,
+
+    /// <summary>
+    /// True for ~10 seconds after an evading mob is detected.
+    /// CombatGoal and ApproachTargetGoal both require this to be false,
+    /// preventing both bots from re-entering combat while navigating away.
+    /// Set by GoapAgent when it handles EvadeBlacklistEvent.
+    /// Automatically cleared after the recovery timer elapses.
+    /// </summary>
+    evadeRecovery,
+
     LENGTH
 }
 
@@ -99,6 +109,7 @@ public static class GoapKey_Extension
         GoapKey.party3connected => "party member 3 connected",
         GoapKey.party4connected => "party member 4 connected",
         GoapKey.leaderWaitingForAssist => "leader waiting for assist",
+        GoapKey.evadeRecovery => "evade recovery",
         _ => unknown
     };
 
@@ -147,6 +158,7 @@ public static class GoapKey_Extension
         GoapKey.party3connected => "!party member 3 connected",
         GoapKey.party4connected => "!party member 4 connected",
         GoapKey.leaderWaitingForAssist => "!leader waiting for assist",
+        GoapKey.evadeRecovery => "!evade recovery",
         _ => unknown
     };
 

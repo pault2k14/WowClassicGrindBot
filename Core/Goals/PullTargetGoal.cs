@@ -41,6 +41,10 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     private long pullStart;
 
+    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
+    // Checked at the top of Update() to force an immediate exit.
+    private bool _evadeRecoveryActive;
+
     private double PullDurationMs => GetElapsedTime(pullStart).TotalMilliseconds;
 
     public PullTargetGoal(ILogger<PullTargetGoal> logger, ConfigurableInput input,
@@ -103,6 +107,9 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.withinpullrange, true);
         AddPrecondition(GoapKey.inblacklistarea, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
+        // Lock out pull during evade recovery so the leader doesn't immediately
+        // pull a new mob while both bots are still navigating away.
+        AddPrecondition(GoapKey.evadeRecovery, false);
 
         AddEffect(GoapKey.pulled, true);
         this.chatReader = chatReader;
@@ -161,6 +168,10 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         {
             pullStart = GetTimestamp();
         }
+        else if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
+        {
+            _evadeRecoveryActive = s.Value;
+        }
     }
 
     public override void Update()
@@ -178,10 +189,47 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // If an evading mob was detected, abort the pull immediately so the
+        // planner re-evaluates. The evadeRecovery precondition prevents re-selection.
+        if (_evadeRecoveryActive)
+        {
+            logger.LogInformation("[PullTargetGoal] Evade recovery active — aborting pull.");
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.Stop();
+            return;
+        }
+
+        // Assist-side evade handling while mid-pull.
+        if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
+        {
+            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
+            chatReader.LeaderBlacklistTarget = false;
+            chatReader.LeaderBlacklistTargetId = 0;
+
+            if (blacklistGuid != 0)
+            {
+                logger.LogInformation($"[PullTargetGoal] Leader blacklisted guid={blacklistGuid} while pulling — ignoring and exiting.");
+                playerReader.IgnoreTarget(blacklistGuid);
+            }
+
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.Stop();
+            return;
+        }
+
         if (bits.Target() && !bits.Combat() 
             && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
         {
             Log("PullTargetGoal: Mob in blacklist area trying not to pull");
+            // Broadcast to assist so they also ignore + clear this mob.
+            if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
             playerReader.IgnoreTarget(playerReader.TargetGuid);
             input.PressStopAttack();
             input.PressClearTarget();
@@ -197,14 +245,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("PullTargetGoal: Not pulling due to assist not following");
             return;
         }
-
-        /* Probably can remove now that we are using classConfig.AssistPull 
-        if (classConfig.Mode == Mode.AssistFocus)
-        {
-            logger.LogInformation("PullTargetGoal: AssistFocus skipping PullTargetGoal");
-            return;
-        }
-        */
 
         if (PullDurationMs > MAX_PULL_DURATION)
         {
@@ -278,6 +318,12 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         {
             Log("Evading mob");
 
+            // Broadcast to assist so they also ignore + clear this evading mob.
+            // This is the primary evade detection point — EvadeMobs is explicitly
+            // populated by CombatLog when the server sends the UNIT_EVADED event.
+            if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
+            playerReader.IgnoreTarget(playerReader.TargetGuid);
             input.PressStopAttack();
             input.PressClearTarget();
             wait.Update();

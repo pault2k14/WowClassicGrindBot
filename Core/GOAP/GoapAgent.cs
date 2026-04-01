@@ -1,4 +1,4 @@
-﻿using Core.AreaBlacklist;
+using Core.AreaBlacklist;
 using Core.Goals;
 using Core.Session;
 
@@ -47,6 +47,11 @@ public sealed partial class GoapAgent : IDisposable
     private readonly IScreenCapture screenCapture;
     private readonly IBagChangeTracker bagChangeTracker;
     private readonly Navigation navigation;
+
+    // Evade recovery: blocks CombatGoal and ApproachTargetGoal for a fixed window
+    // after an evading mob is detected, giving both bots time to navigate away.
+    private DateTime _evadeRecoveryUntilUtc = DateTime.MinValue;
+    private const double EvadeRecoveryDurationSec = 10.0;
 
     private bool active;
     public bool Active
@@ -215,7 +220,7 @@ public sealed partial class GoapAgent : IDisposable
         bool previousInCombat = false;
         bool previousPartyInCombat = false;
         bool previousAssistRequestedPosition = false;
-
+        bool previousEvadeRecovery = false;
 
         manualReset.Wait();
 
@@ -275,6 +280,20 @@ public sealed partial class GoapAgent : IDisposable
             {
                 previousAssistRequestedPosition = false;
             }
+
+            // ── Evade recovery world state ──────────────────────────────────────────
+            // Drive the evade recovery timer here rather than purely in UpdateWorldState()
+            // so we broadcast a GoapStateEvent at the exact moment the state changes,
+            // letting goal listeners react immediately without waiting for the next Plan().
+            bool evadeRecoveryActive = DateTime.UtcNow < _evadeRecoveryUntilUtc;
+            if (evadeRecoveryActive != previousEvadeRecovery)
+            {
+                previousEvadeRecovery = evadeRecoveryActive;
+                BroadcastGoapEvent(GoapKey.evadeRecovery, evadeRecoveryActive);
+                if (!evadeRecoveryActive)
+                    logger.LogInformation("[GoapAgent] Evade recovery window elapsed — resuming normal combat.");
+            }
+            // ───────────────────────────────────────────────────────────────────────
 
             if ((classConfig.Mode != Mode.PartyLeader || classConfig.Mode != Mode.AssistFocus) 
                 && (previousInCombat != bits.Combat()))
@@ -396,6 +415,7 @@ public sealed partial class GoapAgent : IDisposable
                            (chatReader.AssistRequestReturn ||
                             AvailableGoals.OfType<FollowRouteGoal>().Any(g => g.WaitingForAssist)
                            )));
+        logger.LogInformation("GoapKey.evadeRecovery: " + (DateTime.UtcNow < _evadeRecoveryUntilUtc));
     }
 
     private GoapGoal? NextGoal()
@@ -480,6 +500,10 @@ public sealed partial class GoapAgent : IDisposable
                          classConfig.Mode == Mode.PartyLeader &&
                          (chatReader.AssistRequestReturn ||
                           AvailableGoals.OfType<FollowRouteGoal>().Any(g => g.WaitingForAssist));
+
+        // True for EvadeRecoveryDurationSec after an evading mob is detected.
+        // Blocks CombatGoal and ApproachTargetGoal so both bots navigate away cleanly.
+        WorldState[GoapKey.evadeRecovery] = DateTime.UtcNow < _evadeRecoveryUntilUtc;
     }
 
     public bool PartyInCombat()
@@ -557,6 +581,37 @@ public sealed partial class GoapAgent : IDisposable
         else if (e is ScreenCaptureEvent)
         {
             screenCapture.Request();
+        }
+        else if (e is EvadeBlacklistEvent evade)
+        {
+            // Only the leader broadcasts the evade command. The assist handles its own
+            // cleanup via the "blacklist target: {guid}" party chat message parsed by ChatReader.
+            if (classConfig.Mode == Mode.PartyLeader && evade.TargetGuid != 0)
+            {
+                logger.LogInformation(
+                    $"[GoapAgent] Evade blacklist event guid={evade.TargetGuid} — " +
+                    $"starting {EvadeRecoveryDurationSec}s recovery window.");
+
+                // Start the recovery timer. UpdateWorldState() sets WorldState[evadeRecovery]=true,
+                // which blocks CombatGoal and ApproachTargetGoal from being selected by the planner.
+                _evadeRecoveryUntilUtc = DateTime.UtcNow.AddSeconds(EvadeRecoveryDurationSec);
+
+                // Stop movement immediately so neither bot keeps walking into the evading mob.
+                stopMoving.Stop();
+                input.StopForward(true);
+
+                // Press N2 macro → party chat "blacklist target: {guid}".
+                // ChatReader on the assist parses this → LeaderBlacklistTarget=true.
+                // FollowFocusGoal consumes it: IgnoreTarget + stop attack + clear target.
+                input.PressLeaderBlacklistTarget();
+
+                // Suppress the leader's NPC name-scanner for the same duration so it
+                // doesn't immediately find a new target during the recovery window.
+                foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                {
+                    goal.SuppressTargetFinderBriefly((int)(EvadeRecoveryDurationSec * 1000));
+                }
+            }
         }
     }
 

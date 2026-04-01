@@ -150,6 +150,19 @@ public sealed partial class ClassConfiguration
         BaseAction = true,
     };
 
+    /// <summary>
+    /// Leader presses this to broadcast "blacklist target: {guid}" to party chat.
+    /// The in-game macro sends the current target's GUID so the assist can
+    /// also ignore the evading mob and clear their target.
+    /// </summary>
+    public KeyAction LeaderBlacklistTarget { get; } = new()
+    {
+        Key = "N2",
+        Name = nameof(LeaderBlacklistTarget),
+        Cooldown = 0,
+        BaseAction = true,
+    };
+
     public KeyAction AssistIsFollowing { get; } = new()
     {
         Key = "N3",

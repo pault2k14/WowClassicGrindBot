@@ -185,12 +185,26 @@ public sealed class FollowFocusGoal : GoapGoal
             input.PressJump();
         }
 
-        /*
-        if (bits.Swimming() && !bits.AutoFollow())
+        // --- Assist-side evade blacklist handling ---
+        // If the leader has broadcast "blacklist target: {guid}", the assist must
+        // immediately stop attacking, ignore that target, and clear it. This ensures
+        // both bots disengage from evading mobs simultaneously.
+        if (chatReader.LeaderBlacklistTarget)
         {
-            input.PressJump();
+            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
+            chatReader.LeaderBlacklistTarget = false;
+            chatReader.LeaderBlacklistTargetId = 0;
+
+            if (blacklistGuid != 0)
+            {
+                logger.LogInformation($"[FFG] Leader blacklisted target guid={blacklistGuid} — stopping attack and ignoring.");
+                input.PressStopAttack();
+                wait.Update();
+                playerReader.IgnoreTarget(blacklistGuid);
+                input.PressClearTarget();
+                wait.Update();
+            }
         }
-        */
 
         // If focus is in combat, try to assist instead of following.
         if (bits.Focus_Combat() && bits.FocusTarget())

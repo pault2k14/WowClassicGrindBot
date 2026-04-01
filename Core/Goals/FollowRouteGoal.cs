@@ -118,6 +118,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private int _suppressedBlacklistedGuid;
     private DateTime _suppressedBlacklistedUntilUtc;
 
+    // Target finder suppression after leader broadcasts evade-blacklist
+    private DateTime _suppressTargetFinderUntilUtc = DateTime.MinValue;
+
 
     #region IRouteProvider
 
@@ -599,6 +602,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
         }
 
+        // Re-enable target finder after evade-blacklist suppression window elapses
+        if (_suppressTargetFinderUntilUtc != DateTime.MinValue &&
+            DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
+        {
+            _suppressTargetFinderUntilUtc = DateTime.MinValue;
+            logger.LogInformation("[FRG] Target finder suppression window elapsed — resuming normal target search.");
+            sideActivityManualReset.Set();
+        }
+
         // 2) Determine whether we WANT navigation paused this tick
         bool wantNavPaused = bits.Target() && bits.Target_Hostile()
             && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()
@@ -716,6 +728,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         _suppressedBlacklistedGuid = playerReader.TargetGuid;
         _suppressedBlacklistedUntilUtc = DateTime.UtcNow.AddMilliseconds(1200);
+    }
+
+    /// <summary>
+    /// Called by GoapAgent when the leader broadcasts a blacklist-target command.
+    /// Pauses the side-activity (target-finder) thread for the specified duration
+    /// so the leader doesn't immediately re-acquire the evading mob or another
+    /// nearby target while repositioning.
+    /// </summary>
+    public void SuppressTargetFinderBriefly(int durationMs)
+    {
+        _suppressTargetFinderUntilUtc = DateTime.UtcNow.AddMilliseconds(durationMs);
+        // Pause the side-activity thread — it will be re-enabled automatically once
+        // sideActivityManualReset.Set() is called after the suppression window elapses.
+        sideActivityManualReset.Reset();
+        logger.LogInformation($"[FRG] Target finder suppressed for {durationMs}ms after evade-blacklist broadcast.");
     }
 
     private bool IsSuppressedBlacklistedTarget()

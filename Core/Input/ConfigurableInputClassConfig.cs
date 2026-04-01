@@ -37,11 +37,18 @@ public sealed partial class ConfigurableInput
     public KeyAction EnableSoftInteract => classConfig.EnableSoftInteract;
     public KeyAction DisableSoftInteract => classConfig.DisableSoftInteract;
 
-    /// <summary>Assist presses this to ask the leader for their position.</summary>
+    /// <summary>Assist presses N8 to ask the leader for their position.</summary>
     public KeyAction AssistRequestLeaderPosition => classConfig.AssistRequestLeaderPosition;
 
-    /// <summary>Leader presses this to reply with their current map position.</summary>
+    /// <summary>Leader presses N9 to reply with their current map position.</summary>
     public KeyAction LeaderReplyPosition => classConfig.LeaderReplyPosition;
+
+    /// <summary>
+    /// Leader presses N2 to broadcast "blacklist target: {guid}" to party chat.
+    /// The in-game macro sends the current target's numeric GUID so the assist
+    /// can also ignore the evading mob, stop attacking, and clear target.
+    /// </summary>
+    public KeyAction LeaderBlacklistTarget => classConfig.LeaderBlacklistTarget;
 
     public KeyAction Mount => classConfig.Mount;
 }

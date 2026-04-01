@@ -64,18 +64,9 @@ public sealed partial class ConfigurableInput
 
     public void StepBackwards()
     {
-        /*
-        int pressDurationMs = playerReader.GCD.Value != 0
-        ? playerReader.GCD.Value 
-        : MIN_GCD - playerReader.SpellQueueTimeMs;
-        */
-
         int pressDurationMs = 100;
 
         StartBackward(true);
-
-        //if (Random.Shared.Next(3) == 0)
-        //    PressJump();
 
         float elapsedMs = wait.Until(pressDurationMs, () => false);
 
@@ -200,6 +191,13 @@ public sealed partial class ConfigurableInput
 
     public void PressLeaderReplyPosition(CancellationToken token = default)
         => PressRandom(LeaderReplyPosition, token);
+
+    /// <summary>
+    /// Leader presses N2 macro → party chat "blacklist target: {guid}".
+    /// ChatReader on the assist parses this and FollowFocusGoal ignores + clears the target.
+    /// </summary>
+    public void PressLeaderBlacklistTarget(CancellationToken token = default)
+        => PressRandom(LeaderBlacklistTarget, token);
 
     public void PressEnableSoftInteract(CancellationToken token = default) => PressRandom(EnableSoftInteract, token);
 

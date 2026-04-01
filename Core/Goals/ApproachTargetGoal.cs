@@ -1,4 +1,4 @@
-﻿using Core.GOAP;
+using Core.GOAP;
 
 using Microsoft.Extensions.Logging;
 
@@ -39,6 +39,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
     private int initialTargetGuid;
     private float initialMinRange;
+
+    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
+    // Checked at the top of Update() to force an immediate exit.
+    private bool _evadeRecoveryActive;
 
     private double ApproachDurationMs => GetElapsedTime(approachStart).TotalMilliseconds;
 
@@ -93,7 +97,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.targethostile, true);
         AddPrecondition(GoapKey.incombatrange, false);
         AddPrecondition(GoapKey.inblacklistarea, false);
-        
+        // Lock out approach during evade recovery so neither bot re-engages
+        // while navigating away from the evading mob.
+        AddPrecondition(GoapKey.evadeRecovery, false);
 
         AddEffect(GoapKey.incombatrange, true);
     }
@@ -103,6 +109,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if (e.GetType() == typeof(ResumeEvent))
         {
             approachStart = GetTimestamp();
+        }
+        else if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
+        {
+            _evadeRecoveryActive = s.Value;
         }
     }
 
@@ -136,9 +146,46 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             input.PressJump();
         }
 
+        // If an evading mob was detected, exit immediately so the planner
+        // re-evaluates. The evadeRecovery precondition prevents re-selection.
+        if (_evadeRecoveryActive)
+        {
+            logger.LogInformation("[ApproachTargetGoal] Evade recovery active — aborting approach.");
+            input.StopForward(false);
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            return;
+        }
+
+        // Assist-side evade handling while mid-approach.
+        if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
+        {
+            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
+            chatReader.LeaderBlacklistTarget = false;
+            chatReader.LeaderBlacklistTargetId = 0;
+
+            if (blacklistGuid != 0)
+            {
+                logger.LogInformation($"[ApproachTargetGoal] Leader blacklisted guid={blacklistGuid} while approaching — ignoring and exiting.");
+                playerReader.IgnoreTarget(blacklistGuid);
+            }
+
+            input.StopForward(false);
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            return;
+        }
+
         if (navigation.IsInBlacklistArea())
         {
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
+            // Broadcast to assist so they also ignore + clear this evading mob.
+            if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
             playerReader.IgnoreTarget(playerReader.TargetGuid);
             input.PressStopAttack();
             input.PressClearTarget();
@@ -159,11 +206,13 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if(!bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
         {
-
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
 
             if (navigation.IsInBlacklistArea())
             {
+                // Broadcast to assist so they also ignore + clear this evading mob.
+                if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
+                    SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
                 playerReader.IgnoreTarget(playerReader.TargetGuid);
             }
 
@@ -268,6 +317,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     logger.LogWarning($"Losing the target due blacklist!");
                     if (navigation.IsInBlacklistArea())
                     {
+                        // Broadcast to assist so they also ignore + clear this evading mob.
+                        if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
+                            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
                         playerReader.IgnoreTarget(playerReader.TargetGuid);
                     }
 
@@ -370,6 +422,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
                     if (navigation.IsInBlacklistArea())
                     {
+                        // Broadcast to assist so they also ignore + clear this evading mob.
+                        if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
+                            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
                         playerReader.IgnoreTarget(playerReader.TargetGuid);
                     }
 
