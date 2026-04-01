@@ -6,25 +6,39 @@ F2
 Stop following me macro
 /p stop following me
 
-F3
+N2
+Blacklist
+/run local t=UnitGUID("target") SendChatMessage(format("blacklist target: %s", t),"PARTY")
+
+N3
 Following Macro
 /p i'm following
 
-F4
+N4
 I'm not following Macro
 /p i'm not following
 
-F5
+N5
 Map Pos Macro
 /run local c=C_Map.GetBestMapForUnit("player") local p=C_Map.GetPlayerMapPosition(c,"player") SendChatMessage(format("i tried following but you are too far away my position:%0.6f,%0.6f",p.x*100,p.y*100),"PARTY")
 
-F6
+N6
 Enable EIK
 /run SetCVar('SoftTargetInteract', 3)
 
-F7
+N7
 Disable EIK
 /run SetCVar('SoftTargetInteract', 0)
+
+N8
+Request leader pos
+/run SendChatMessage('leader what is your position?', "PARTY")
+
+N9
+Leader positon
+/run local c=C_Map.GetBestMapForUnit("player") local p=C_Map.GetPlayerMapPosition(c,"player") SendChatMessage(format("position: %0.6f,%0.6f",p.x*100,p.y*100),"PARTY")
+
+N0
 
 
 
