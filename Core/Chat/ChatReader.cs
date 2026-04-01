@@ -295,6 +295,16 @@ public sealed class ChatReader : IReader
             logger.LogInformation("[ChatReader] Received position request from assist");
             AssistRequestedPosition = true;
 
+            // An assist that is still following would never ask for the leader's position.
+            // Receiving this message is unambiguous proof they lost follow — clear the
+            // stale AssistIsFollowing flag so PauseForAssistNavigation() does not
+            // short-circuit on it and incorrectly let the leader keep patrolling.
+            if (AssistIsFollowing)
+            {
+                logger.LogInformation("[ChatReader] Clearing stale AssistIsFollowing — assist lost follow and is requesting position.");
+                AssistIsFollowing = false;
+            }
+
             // The assist is actively trying to navigate TO the leader — they are no longer
             // in the "gave up / send me back" state. Clear AssistRequestReturn so that
             // FRG's _waitingForAssistAfterPosition hold is not immediately short-circuited
