@@ -592,12 +592,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             {
                 double waited = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
 
-                // If AssistReturn is already active the assist sent a redundant N5 while
-                // still navigating toward us. Don't restart navigation — both bots moving
-                // toward each other's moving position causes a crossing-paths loop.
+                // If _assistReturnActive is already true, OnGoapEvent already called
+                // GoToOneWaypoint when N5 arrived — the leader is already navigating to
+                // the assist. Just clear the waiting flag and let the return proceed.
+                // Do NOT call navigation.PausePathing() here — that would stop the
+                // navigation that OnGoapEvent correctly started.
                 if (_assistReturnActive)
                 {
-                    logger.LogInformation($"[FRG] AssistRequestReturn while waiting ({waited:0.0}s) but AssistReturn already active — holding position.");
+                    logger.LogInformation($"[FRG] AssistRequestReturn while waiting ({waited:0.0}s) — AssistReturn already active, clearing wait state.");
+                    _waitingForAssistAfterPosition = false;
                     return;
                 }
 

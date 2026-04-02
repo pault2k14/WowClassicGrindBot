@@ -56,6 +56,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
     private NavState _navState = NavState.Idle;
 
+    // True after SendAssistCantFollow fires — the assist has given up navigating to
+    // the leader and asked the leader to come to them instead.
+    // While true, UpdateIdle does NOT send position requests (N8) — the leader is
+    // (or should be) on their way. Cleared when follow is successfully established.
+    // Falls back to allowing position requests after WantsLeaderToReturnTimeoutSec
+    // in case the leader never arrives (e.g. also stuck, or timed out returning).
+    private bool _wantsLeaderToReturn;
+    private DateTime _wantsLeaderToReturnSinceUtc;
+    private const double WantsLeaderToReturnTimeoutSec = 60.0;
+
     // How long to wait for the leader to reply with their position.
     private const double WaitForPositionTimeoutSec = 5.0;
 
@@ -190,6 +200,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             input.PressJump();
         }
 
+
         // --- Assist-side evade blacklist handling ---
         // If the leader has broadcast "blacklist target: {guid}", the assist must
         // immediately stop attacking, ignore that target, and clear it. This ensures
@@ -312,6 +323,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             wait.Update();
             wait.Update();
             chatReader.AssistRequestReturn = false;
+            _wantsLeaderToReturn = false;
             SendImFollowing();
             return;
         }
@@ -319,16 +331,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Leader is out of inspect range — request their position to navigate back.
         if (!playerReader.SpellInRange.Focus_Inspect)
         {
-            // If AssistRequestReturn is still true the leader just received our N5 and
-            // is starting to navigate to us. Don't immediately send a position request —
-            // that would cause the leader to cancel their return and hold position instead,
-            // then we'd both start moving toward each other's stale positions.
-            // Wait until AssistRequestReturn is cleared (leader arrives or times out).
-            if (chatReader.AssistRequestReturn)
+            // If the assist already gave up navigating and asked the leader to come back
+            // (_wantsLeaderToReturn=true), do NOT send position requests (N8) again —
+            // the leader should be on their way and we must stay put and wait.
+            // Allow a fallback after WantsLeaderToReturnTimeoutSec in case the leader
+            // never arrives (stuck, timed out, etc.).
+            if (_wantsLeaderToReturn)
             {
-                logger.LogInformation("[FFG] Out of range but AssistRequestReturn=true — leader is returning, holding off on position request.");
-                wait.Update();
-                return;
+                double waitedSec = (DateTime.UtcNow - _wantsLeaderToReturnSinceUtc).TotalSeconds;
+                if (waitedSec < WantsLeaderToReturnTimeoutSec)
+                {
+                    logger.LogInformation(
+                        $"[FFG] Waiting for leader to return ({waitedSec:0.0}s / {WantsLeaderToReturnTimeoutSec}s) — suppressing position request.");
+                    wait.Update();
+                    return;
+                }
+
+                // Timeout: leader hasn't arrived. Reset and allow position request as fallback.
+                logger.LogWarning(
+                    $"[FFG] Leader did not return after {waitedSec:0.0}s — resetting to allow position request.");
+                _wantsLeaderToReturn = false;
             }
 
             double secSinceLastRequest =
@@ -518,6 +540,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 input.StopForward(true);
                 SendImFollowing();
                 chatReader.AssistRequestReturn = false;
+                _wantsLeaderToReturn = false;
                 wait.Update();
 
                 EnterState(NavState.Idle);
@@ -551,6 +574,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         input.PressAssistCantFollow();
         lastMessageSent = followMessage.ICantFollow;
         logger.LogInformation("[FFG] Sent AssistCantFollow to leader.");
+
+        // Switch to 'wants leader to return' mode. UpdateIdle will not send further
+        // position requests (N8) while this is true — the leader should now be moving
+        // toward us and we should wait. Cleared when follow is established.
+        _wantsLeaderToReturn = true;
+        _wantsLeaderToReturnSinceUtc = DateTime.UtcNow;
 
         // Reset the position request cooldown from NOW, not from the original request.
         // Without this, if NavigatingToLeader took ~30s and RequestPositionCooldownSec
