@@ -368,9 +368,20 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
         {
-            Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
-            logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
-            GoToOneWaypoint(assistWaypoint);
+            // If the assist is already navigating toward us (NavigatingToLeader state),
+            // going to them would create a crossing-paths loop — both bots walking
+            // toward each other's stale positions. Hold position and let them arrive.
+            if (_assistReturnActive)
+            {
+                logger.LogInformation("[FRG] Resume: AssistRequestReturn=true but AssistReturn already active — holding position, assist is navigating to us.");
+                navigation.PausePathing();
+            }
+            else
+            {
+                Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);
+                logger.LogInformation("FollowRouteGoal: Resume - Calling GoToOneWaypoint of " + assistWaypoint);
+                GoToOneWaypoint(assistWaypoint);
+            }
         }
         else
         {
@@ -580,6 +591,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             if (chatReader.AssistRequestReturn)
             {
                 double waited = (DateTime.UtcNow - _waitingForAssistAfterPositionStartUtc).TotalSeconds;
+
+                // If AssistReturn is already active the assist sent a redundant N5 while
+                // still navigating toward us. Don't restart navigation — both bots moving
+                // toward each other's moving position causes a crossing-paths loop.
+                if (_assistReturnActive)
+                {
+                    logger.LogInformation($"[FRG] AssistRequestReturn while waiting ({waited:0.0}s) but AssistReturn already active — holding position.");
+                    return;
+                }
+
                 logger.LogInformation($"[FRG] AssistRequestReturn received while waiting after position reply ({waited:0.0}s) — navigating to assist.");
                 _waitingForAssistAfterPosition = false;
                 Vector3 assistWaypoint = new Vector3(chatReader.AssistXPos, chatReader.AssistYPos, playerReader.MapPos.Z);

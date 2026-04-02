@@ -319,6 +319,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Leader is out of inspect range — request their position to navigate back.
         if (!playerReader.SpellInRange.Focus_Inspect)
         {
+            // If AssistRequestReturn is still true the leader just received our N5 and
+            // is starting to navigate to us. Don't immediately send a position request —
+            // that would cause the leader to cancel their return and hold position instead,
+            // then we'd both start moving toward each other's stale positions.
+            // Wait until AssistRequestReturn is cleared (leader arrives or times out).
+            if (chatReader.AssistRequestReturn)
+            {
+                logger.LogInformation("[FFG] Out of range but AssistRequestReturn=true — leader is returning, holding off on position request.");
+                wait.Update();
+                return;
+            }
+
             double secSinceLastRequest =
                 (DateTime.UtcNow - _lastPositionRequestUtc).TotalSeconds;
 
@@ -539,6 +551,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         input.PressAssistCantFollow();
         lastMessageSent = followMessage.ICantFollow;
         logger.LogInformation("[FFG] Sent AssistCantFollow to leader.");
+
+        // Reset the position request cooldown from NOW, not from the original request.
+        // Without this, if NavigatingToLeader took ~30s and RequestPositionCooldownSec
+        // is 35s, the assist would fire another position request only 5s after sending N5 —
+        // before the leader has even processed the N5 and started returning.
+        // That creates a crossing-paths loop: leader starts returning, assist immediately
+        // asks for position again, leader cancels return, both confused.
+        _lastPositionRequestUtc = DateTime.UtcNow;
     }
 
     private void EnterState(NavState newState)
