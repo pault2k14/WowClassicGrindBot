@@ -202,12 +202,28 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
             if (blacklistGuid != 0)
             {
-                logger.LogInformation($"[FFG] Leader blacklisted target guid={blacklistGuid} — stopping attack and ignoring.");
+                logger.LogInformation($"[FFG] Leader blacklisted target guid={blacklistGuid} — stopping attack, ignoring and starting evade recovery.");
                 input.PressStopAttack();
                 wait.Update();
                 playerReader.IgnoreTarget(blacklistGuid);
                 input.PressClearTarget();
                 wait.Update();
+
+                // Fire EvadeBlacklistEvent so the assist's own GoapAgent starts its
+                // evadeRecovery timer. Without this, _evadeRecoveryActive stays false
+                // and the Focus_Combat block below immediately re-engages the mob.
+                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
+
+                // Set AssistRequestReturn=true immediately on the assist side so
+                // FollowFocusGoal is selectable right now — no ~1.5s wait for the
+                // chat message to echo back. The N5 press below delivers real position
+                // coordinates to the leader; the local flag just bridges the gap.
+                chatReader.AssistRequestReturn = true;
+
+                // Press N5 (AssistCantFollow) — sends real position coordinates to the
+                // leader, setting AssistRequestReturn=true on the leader side with
+                // AssistXPos/AssistYPos populated for PauseForAssistNavigation.
+                input.PressAssistCantFollow();
             }
         }
 
@@ -225,7 +241,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);

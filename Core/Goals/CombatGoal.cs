@@ -295,6 +295,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if (blacklistGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
 
+            // Set AssistRequestReturn=true immediately so FollowFocusGoal is
+            // selectable right now, without waiting ~1.5s for the N5 chat echo.
+            // The N5 press delivers real coordinates to the leader.
+            chatReader.AssistRequestReturn = true;
             // Press N5 (AssistCantFollow) — sends "i tried following but you are too far
             // away my position:x,y" to party chat. This sets AssistRequestReturn=true on
             // BOTH bots (ChatReader parses it on both sides), giving the leader real
@@ -858,6 +862,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             && bits.Focus_Combat() && bits.FocusTarget() 
             && bits.FocusTarget_Hostile()
             && bits.FocusTarget_Alive()
+            // Do NOT re-acquire via focus if the focus's target is an evading mob.
+            // This is the path that caused the infinite evade loop in FindPossibleThreats.
+            && !combatLog.EvadeMobs.Contains(playerReader.FocusTargetGuid)
+            && !playerReader.IsIgnored(playerReader.FocusTargetGuid)
             )
         // seems to be false incorrectly sometimes && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
         {

@@ -183,10 +183,13 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             if (blacklistGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
 
+            // Set AssistRequestReturn=true immediately so FollowFocusGoal is
+            // selectable right now, without waiting ~1.5s for the N5 chat echo.
+            // The N5 press delivers real coordinates to the leader.
+            chatReader.AssistRequestReturn = true;
             // Press N5 (AssistCantFollow) — sends position to leader, sets
             // AssistRequestReturn=true on both bots, selects FollowFocusGoal on assist.
-            // We don't need to do this, follow focus goal will do it
-            //input.PressAssistCantFollow();
+            input.PressAssistCantFollow();
             return;
         }
 

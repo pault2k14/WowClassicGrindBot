@@ -241,11 +241,19 @@ public sealed partial class GoapAgent : IDisposable
                     AssistIsFollowing();
                     previousAssistIsFollowing = true;
 
-                    // Assist confirmed follow — evade waiting is resolved.
-                    if (_evadeLeaderWaiting)
+                    // Assist confirmed follow — evade waiting is resolved, but only
+                    // once the recovery window has also elapsed. If the assist sends
+                    // "i'm following" early (normal FFG cycle before N5 fires) and then
+                    // immediately drops follow again, clearing too early would leave the
+                    // leader with NO PLAN for the rest of the recovery window.
+                    if (_evadeLeaderWaiting && DateTime.UtcNow >= _evadeRecoveryUntilUtc)
                     {
                         _evadeLeaderWaiting = false;
-                        logger.LogInformation("[GoapAgent] Assist re-established follow after evade — clearing evadeLeaderWaiting.");
+                        logger.LogInformation("[GoapAgent] Assist re-established follow after evade recovery — clearing evadeLeaderWaiting.");
+                    }
+                    else if (_evadeLeaderWaiting)
+                    {
+                        logger.LogInformation("[GoapAgent] Assist sent i'm following during evade window — keeping evadeLeaderWaiting until recovery elapses.");
                     }
                 }
                 else
@@ -306,7 +314,18 @@ public sealed partial class GoapAgent : IDisposable
                 previousEvadeRecovery = evadeRecoveryActive;
                 BroadcastGoapEvent(GoapKey.evadeRecovery, evadeRecoveryActive);
                 if (!evadeRecoveryActive)
+                {
                     logger.LogInformation("[GoapAgent] Evade recovery window elapsed — resuming normal combat.");
+                    // Also clear waiting flag — the window has passed whether or not the
+                    // assist confirmed follow. If they didn't, the leader will re-plan
+                    // normally (FRG requires assistrequestreturnorisfollowing, which will
+                    // be true if AssistIsFollowing or AssistRequestReturn is set).
+                    if (_evadeLeaderWaiting)
+                    {
+                        _evadeLeaderWaiting = false;
+                        logger.LogInformation("[GoapAgent] Clearing evadeLeaderWaiting — recovery window elapsed.");
+                    }
+                }
             }
             // ───────────────────────────────────────────────────────────────────────
 
