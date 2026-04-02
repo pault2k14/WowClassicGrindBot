@@ -172,11 +172,21 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 playerReader.IgnoreTarget(blacklistGuid);
             }
 
-            input.StopForward(false);
             input.PressStopAttack();
             wait.Update();
             input.PressClearTarget();
             wait.Update();
+            input.StopForward(false);
+
+            // Fire EvadeBlacklistEvent so the assist's own GoapAgent starts its
+            // evadeRecovery timer, blocking Combat/Approach/Pull on the assist side.
+            if (blacklistGuid != 0)
+                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
+
+            // Press N5 (AssistCantFollow) — sends position to leader, sets
+            // AssistRequestReturn=true on both bots, selects FollowFocusGoal on assist.
+            // We don't need to do this, follow focus goal will do it
+            //input.PressAssistCantFollow();
             return;
         }
 

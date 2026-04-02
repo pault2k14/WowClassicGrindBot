@@ -9,9 +9,14 @@ using static System.MathF;
 
 namespace Core.Goals;
 
-public sealed class FollowFocusGoal : GoapGoal
+public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 {
     public override float Cost => 19f;
+
+    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
+    // While true, FFG skips the "assist focus combat" block so the assist
+    // stays in follow mode rather than trying to re-engage near the evading mob.
+    private bool _evadeRecoveryActive;
 
     private readonly ConfigurableInput input;
     private readonly PlayerReader playerReader;
@@ -207,7 +212,9 @@ public sealed class FollowFocusGoal : GoapGoal
         }
 
         // If focus is in combat, try to assist instead of following.
-        if (bits.Focus_Combat() && bits.FocusTarget())
+        // Skip during evade recovery — the assist must stay in follow mode
+        // and not try to re-engage while both bots are moving away from the evading mob.
+        if (!_evadeRecoveryActive && bits.Focus_Combat() && bits.FocusTarget())
         {
             wait.Update();
             input.PressTargetFocus();
@@ -218,6 +225,7 @@ public sealed class FollowFocusGoal : GoapGoal
             return;
         }
 
+        
         if (chatReader.ForcedFollow)
         {
             AddEffect(GoapKey.forcedfollow, true);
@@ -252,6 +260,14 @@ public sealed class FollowFocusGoal : GoapGoal
     // Normal follow behaviour. If the leader is too far to follow, request
     // their position so we can navigate to them.
     // -------------------------------------------------------------------------
+    public void OnGoapEvent(GoapEventArgs e)
+    {
+        if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
+        {
+            _evadeRecoveryActive = s.Value;
+        }
+    }
+
     private void UpdateIdle()
     {
         // If we've already sent "i'm following" and the leader is still in

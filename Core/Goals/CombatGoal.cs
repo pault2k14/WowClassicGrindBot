@@ -288,6 +288,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             input.PressClearTarget();
             wait.Update();
             stopMoving.Stop();
+
+            // Fire EvadeBlacklistEvent so the assist's own GoapAgent starts its
+            // evadeRecovery timer, blocking Combat/Approach/Pull on the assist side
+            // and keeping FollowFocusGoal as the only selectable goal.
+            if (blacklistGuid != 0)
+                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
+
+            // Press N5 (AssistCantFollow) — sends "i tried following but you are too far
+            // away my position:x,y" to party chat. This sets AssistRequestReturn=true on
+            // BOTH bots (ChatReader parses it on both sides), giving the leader real
+            // coordinates and making assistshouldfollow=true on the assist so
+            // FollowFocusGoal is selected immediately.
+            input.PressAssistCantFollow();
             return;
         }
 
@@ -370,7 +383,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             
 
             if (bits.FocusTarget() && bits.Focus_Combat()
-                && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile())
+                && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()
+                // Do NOT re-acquire a target that is evading — the assist may not have
+                // cleared it yet (e.g. if the N2 broadcast failed to parse), and switching
+                // to the focus's target would re-acquire the evading mob and loop forever.
+                && !combatLog.EvadeMobs.Contains(playerReader.FocusTargetGuid)
+                && !playerReader.IsIgnored(playerReader.FocusTargetGuid))
             // Doesn't always seem to work && bits.FocusTarget_Alive()
             {
                 logger.LogInformation("Targeting target of focus as they are in combat");
@@ -491,6 +509,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                      && (!bits.Target() || bits.Target_Dead()) && bits.FocusTarget() 
                      && bits.FocusTarget_Alive() && bits.Focus_Combat() 
                      && bits.FocusTarget_Hostile()
+                     // Do NOT switch to the focus's target if it is an evading mob —
+                     // the assist may still have it targeted, causing an infinite evade loop.
+                     && !combatLog.EvadeMobs.Contains(playerReader.FocusTargetGuid)
+                     && !playerReader.IsIgnored(playerReader.FocusTargetGuid)
                    // doesn't always seem to work correctly && bits.FocusTarget_Alive()  && bits.FocusTarget_Combat() 
                    )
                 )

@@ -151,9 +151,15 @@ public sealed partial class ClassConfiguration
     };
 
     /// <summary>
-    /// Leader presses this to broadcast "blacklist target: {guid}" to party chat.
-    /// The in-game macro sends the current target's GUID so the assist can
-    /// also ignore the evading mob and clear their target.
+    /// Leader presses N2 to broadcast "blacklist target: {entryId}" to party chat.
+    /// The in-game macro extracts the numeric entry ID (segment 6 of the GUID) so
+    /// the assist can also ignore the evading mob and clear their target.
+    ///
+    /// Bind N2 to this macro on the LEADER:
+    ///   /run local g=UnitGUID("target"); if g then local t={strsplit("-",g)}; SendChatMessage("blacklist target: "..(t[6] or "0"),"PARTY") end
+    ///
+    /// This sends e.g. "blacklist target: 4342" (the NPC entry ID).
+    /// ChatReader also handles the full GUID string as a fallback.
     /// </summary>
     public KeyAction LeaderBlacklistTarget { get; } = new()
     {

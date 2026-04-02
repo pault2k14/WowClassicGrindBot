@@ -317,18 +317,41 @@ public sealed class ChatReader : IReader
         }
 
         // --- ASSIST side receives "blacklist target: {guid}" from leader ---
+        // The leader's N2 macro sends either:
+        //   a) Just the numeric entry ID:  "blacklist target: 4342"
+        //   b) The full GUID string:       "blacklist target: creature-0-5163-1-522-4342-00004da002"
+        // We try numeric parse first, then fall back to extracting the entry ID
+        // from the 6th segment (index 5) of the hyphen-delimited GUID string.
         if (BotMode == Mode.AssistFocus && type == ChatMessageType.Party && msg.StartsWith("blacklist target: "))
         {
             string guidStr = msg["blacklist target: ".Length..].Trim();
-            if (int.TryParse(guidStr, out int targetGuid))
+            int targetGuid = 0;
+
+            if (int.TryParse(guidStr, out int directId))
+            {
+                // Macro sent the bare numeric entry ID — use it directly.
+                targetGuid = directId;
+            }
+            else
+            {
+                // Macro sent the full GUID string (e.g. "creature-0-5163-1-522-4342-00004da002").
+                // The entry/NPC ID is the 6th hyphen-delimited segment (index 5).
+                var segments = guidStr.Split('-');
+                if (segments.Length >= 6 && int.TryParse(segments[5], out int entryId))
+                {
+                    targetGuid = entryId;
+                }
+                else
+                {
+                    logger.LogWarning($"[ChatReader] Failed to parse blacklist target guid from: {msg}");
+                }
+            }
+
+            if (targetGuid != 0)
             {
                 logger.LogInformation($"[ChatReader] Leader requests blacklist target guid={targetGuid}");
                 LeaderBlacklistTargetId = targetGuid;
                 LeaderBlacklistTarget = true;
-            }
-            else
-            {
-                logger.LogWarning($"[ChatReader] Failed to parse blacklist target guid from: {msg}");
             }
         }
 

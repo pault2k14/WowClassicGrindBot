@@ -48,10 +48,18 @@ public sealed partial class GoapAgent : IDisposable
     private readonly IBagChangeTracker bagChangeTracker;
     private readonly Navigation navigation;
 
-    // Evade recovery: blocks CombatGoal and ApproachTargetGoal for a fixed window
-    // after an evading mob is detected, giving both bots time to navigate away.
+    // Evade recovery: blocks CombatGoal, ApproachTargetGoal and PullTargetGoal for a fixed
+    // window after an evading mob is detected, giving both bots time to navigate away.
     private DateTime _evadeRecoveryUntilUtc = DateTime.MinValue;
     private const double EvadeRecoveryDurationSec = 10.0;
+
+    // Set when the leader fires an evade blacklist broadcast and the assist has not
+    // yet confirmed they are following again. While true it overrides
+    // assistrequestreturnorisfollowing=true in WorldState so FRG can run (the leader
+    // can patrol away from the evading mob) without corrupting the position-bearing
+    // AssistRequestReturn/AssistXPos/AssistYPos fields.
+    // Cleared when ChatReader receives "i'm following" from the assist.
+    private bool _evadeLeaderWaiting;
 
     private bool active;
     public bool Active
@@ -232,6 +240,13 @@ public sealed partial class GoapAgent : IDisposable
                 {
                     AssistIsFollowing();
                     previousAssistIsFollowing = true;
+
+                    // Assist confirmed follow — evade waiting is resolved.
+                    if (_evadeLeaderWaiting)
+                    {
+                        _evadeLeaderWaiting = false;
+                        logger.LogInformation("[GoapAgent] Assist re-established follow after evade — clearing evadeLeaderWaiting.");
+                    }
                 }
                 else
                 {
@@ -396,7 +411,7 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.forcedfollow: " + chatReader.ForcedFollow);
         logger.LogInformation("GoapKey.assistisfollowing: " + chatReader.AssistIsFollowing);
         logger.LogInformation("GoapKey.assistrequestreturn: " + chatReader.AssistRequestReturn);
-        logger.LogInformation("GoapKey.assistrequestreturnorisfollowing: " + (chatReader.AssistIsFollowing || chatReader.AssistRequestReturn));
+        logger.LogInformation("GoapKey.assistrequestreturnorisfollowing: " + (chatReader.AssistIsFollowing || chatReader.AssistRequestReturn || _evadeLeaderWaiting));
         logger.LogInformation("GoapKey.assistshouldfollow: " + (chatReader.AssistRequestReturn || (!chatReader.ForcedFollow
             && !(playerCombat && dmgTaken) && !dmgDone && !dmgTaken)));
         logger.LogInformation("GoapKey.drinking: " + restHandler.IsDrinking());
@@ -479,7 +494,12 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.forcedfollow] = chatReader.ForcedFollow;
         WorldState[GoapKey.assistisfollowing] = chatReader.AssistIsFollowing;
         WorldState[GoapKey.assistrequestreturn] = chatReader.AssistRequestReturn;
-        WorldState[GoapKey.assistrequestreturnorisfollowing] = chatReader.AssistIsFollowing || chatReader.AssistRequestReturn;
+        // _evadeLeaderWaiting is set when the leader broadcasts an evade blacklist and
+        // the assist has not yet re-confirmed follow. During this window we allow
+        // FollowRouteGoal to run so the leader can navigate away from the evading mob,
+        // without touching AssistRequestReturn (which carries position data).
+        WorldState[GoapKey.assistrequestreturnorisfollowing] =
+            chatReader.AssistIsFollowing || chatReader.AssistRequestReturn || _evadeLeaderWaiting;
 
         WorldState[GoapKey.assistshouldfollow] =
             chatReader.AssistRequestReturn ||
@@ -584,32 +604,46 @@ public sealed partial class GoapAgent : IDisposable
         }
         else if (e is EvadeBlacklistEvent evade)
         {
-            // Only the leader broadcasts the evade command. The assist handles its own
-            // cleanup via the "blacklist target: {guid}" party chat message parsed by ChatReader.
-            if (classConfig.Mode == Mode.PartyLeader && evade.TargetGuid != 0)
+            // Both the leader and assist start their own evade recovery timer when this
+            // event fires. On the leader it fires from CombatGoal/PullTargetGoal detection.
+            // On the assist it fires from the LeaderBlacklistTarget goal handlers.
+            if (evade.TargetGuid != 0)
             {
                 logger.LogInformation(
                     $"[GoapAgent] Evade blacklist event guid={evade.TargetGuid} — " +
                     $"starting {EvadeRecoveryDurationSec}s recovery window.");
 
-                // Start the recovery timer. UpdateWorldState() sets WorldState[evadeRecovery]=true,
-                // which blocks CombatGoal and ApproachTargetGoal from being selected by the planner.
+                // Start the recovery timer on this bot. UpdateWorldState() sets
+                // WorldState[evadeRecovery]=true, blocking CombatGoal, ApproachTargetGoal
+                // and PullTargetGoal from being selected by the planner.
                 _evadeRecoveryUntilUtc = DateTime.UtcNow.AddSeconds(EvadeRecoveryDurationSec);
 
-                // Stop movement immediately so neither bot keeps walking into the evading mob.
-                stopMoving.Stop();
-                input.StopForward(true);
-
-                // Press N2 macro → party chat "blacklist target: {guid}".
-                // ChatReader on the assist parses this → LeaderBlacklistTarget=true.
-                // FollowFocusGoal consumes it: IgnoreTarget + stop attack + clear target.
-                input.PressLeaderBlacklistTarget();
-
-                // Suppress the leader's NPC name-scanner for the same duration so it
-                // doesn't immediately find a new target during the recovery window.
-                foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                if (classConfig.Mode == Mode.PartyLeader)
                 {
-                    goal.SuppressTargetFinderBriefly((int)(EvadeRecoveryDurationSec * 1000));
+                    // Mark that the leader is waiting for the assist to re-establish follow.
+                    // This unblocks FollowRouteGoal (via assistrequestreturnorisfollowing override)
+                    // so the leader waits in place until the assist confirms following.
+                    // Cleared in GoapThread when "i'm following" arrives from the assist.
+                    _evadeLeaderWaiting = true;
+
+                    // Stop and wait — leader must not move until the assist confirms following,
+                    // otherwise the assist (20-30 yards away) may never catch up.
+                    stopMoving.Stop();
+                    input.StopForward(true);
+
+                    // Press N2 macro → party chat "blacklist target: {entryId}".
+                    // ChatReader on the assist parses this → LeaderBlacklistTarget=true.
+                    // The assist's goal handlers consume it: IgnoreTarget + clear target
+                    // + press N5 (AssistCantFollow) → AssistRequestReturn=true on both bots
+                    // → FollowFocusGoal becomes selectable on the assist immediately.
+                    input.PressLeaderBlacklistTarget();
+
+                    // Suppress the leader's NPC name-scanner for the same duration so it
+                    // doesn't immediately find a new target during the recovery window.
+                    foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                    {
+                        goal.SuppressTargetFinderBriefly((int)(EvadeRecoveryDurationSec * 1000));
+                    }
                 }
             }
         }

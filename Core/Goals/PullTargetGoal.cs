@@ -220,6 +220,16 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             input.PressClearTarget();
             wait.Update();
             stopMoving.Stop();
+
+            // Fire EvadeBlacklistEvent so the assist's own GoapAgent starts its
+            // evadeRecovery timer, blocking Combat/Approach/Pull on the assist side.
+            if (blacklistGuid != 0)
+                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
+
+            // Press N5 (AssistCantFollow) — sends position to leader, sets
+            // AssistRequestReturn=true on both bots, selects FollowFocusGoal on assist.
+            // We don't need this as follow focus goal should do it
+            //input.PressAssistCantFollow();
             return;
         }
 
