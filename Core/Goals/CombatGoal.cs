@@ -503,9 +503,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             // TODO Do we need Pet check to be put here? 
             if ((classConfig.Mode == Mode.AssistFocus
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
-                && ((bits.Focus_Combat() && bits.Target_Hostile() && bits.FocusTarget_Alive()
+                && ((bits.Focus_Combat() && bits.FocusTarget_Hostile() && bits.FocusTarget_Alive()
                      // does not seem to work corretly all of the time && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
-                     && playerReader.TargetGuid != playerReader.FocusTargetGuid)
+                     && playerReader.TargetGuid != playerReader.FocusTargetGuid
+                     // Ensure our current target isn't targeting us
+                     && !playerReader.TargetsMe())
                    )
                 )
                 || ((classConfig.Mode == Mode.PartyLeader)
