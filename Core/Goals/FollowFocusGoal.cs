@@ -67,7 +67,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const double WantsLeaderToReturnTimeoutSec = 60.0;
 
     // How long to wait for the leader to reply with their position.
-    private const double WaitForPositionTimeoutSec = 5.0;
+    private const double WaitForPositionTimeoutSec = 15.0;
 
     // How long the assist will actively navigate toward the leader before
     // escalating to AssistCantFollow (the existing "too far away" flow).
@@ -359,6 +359,19 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // never arrives (stuck, timed out, etc.).
             if (_wantsLeaderToReturn)
             {
+                // If the leader position reply arrived just after our WaitForPosition
+                // timeout fired (a common race at high latency), LeaderPositionReceived
+                // will be true even though we've already sent N5 and entered
+                // _wantsLeaderToReturn. Consume it and navigate to the leader rather
+                // than waiting up to 60s for them to walk to us.
+                if (chatReader.LeaderPositionReceived)
+                {
+                    logger.LogInformation("[FFG] Stale leader position received after timeout — consuming and navigating instead of waiting for leader to return.");
+                    _wantsLeaderToReturn = false;
+                    EnterState(NavState.WaitingForPosition);
+                    return;
+                }
+
                 double waitedSec = (DateTime.UtcNow - _wantsLeaderToReturnSinceUtc).TotalSeconds;
                 if (waitedSec < WantsLeaderToReturnTimeoutSec)
                 {
