@@ -6,8 +6,8 @@
   "KeyboardOnly": true,
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/30-40/Dustwallow Marsh/35-37_v2.json",
-  "PathThereAndBack": true,
+  "PathFilename": "_pack/40-50/Feralas/40-46 The Lower Wilds v2.json",
+  "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
@@ -120,6 +120,7 @@
         ],
         "AfterCastWaitSwing": true
       },
+/*
       {
         "Name": "Hamstring",
         "Key": "7",
@@ -132,6 +133,7 @@
           "TargetHealth% < 40"
         ]
       },
+      */
       {
         "Name": "Thunder Clap",
         "Key": "6",
