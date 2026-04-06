@@ -67,7 +67,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const double WantsLeaderToReturnTimeoutSec = 60.0;
 
     // How long to wait for the leader to reply with their position.
-    private const double WaitForPositionTimeoutSec = 5.0;
+    private const double WaitForPositionTimeoutSec = 15.0;
 
     // How long the assist will actively navigate toward the leader before
     // escalating to AssistCantFollow (the existing "too far away" flow).
@@ -200,7 +200,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             input.PressJump();
         }
 
-
         // --- Assist-side evade blacklist handling ---
         // If the leader has broadcast "blacklist target: {guid}", the assist must
         // immediately stop attacking, ignore that target, and clear it. This ensures
@@ -314,18 +313,40 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         // Leader is in range — press follow once and announce it.
+        // Focus_Inspect range (~30 yards) is larger than AutoFollow range, so we
+        // must verify AutoFollow actually established before sending "i'm following".
+        // If we send it prematurely the leader resumes patrol and the assist
+        // immediately loses them again.
         if (playerReader.TargetGuid == focusTargetGuid &&
             playerReader.SpellInRange.Focus_Inspect &&
             (DateTime.UtcNow - _lastFollowAttemptUtc).TotalSeconds >= FollowAttemptCooldownSec)
         {
             _lastFollowAttemptUtc = DateTime.UtcNow;
+
+            // Stop movement before pressing follow — if the character is still
+            // running (or the leader is walking past), AutoFollow may not establish.
+            // TryFollowIfInRange does the same thing for consistency.
+            input.StopForward(true);
+            wait.Update();
+
             input.PressFollowTarget();
             wait.Update();
             wait.Update();
-            chatReader.AssistRequestReturn = false;
-            _wantsLeaderToReturn = false;
-            SendImFollowing();
-            return;
+            wait.Update();
+
+            if (bits.AutoFollow())
+            {
+                input.StopForward(true);
+                chatReader.AssistRequestReturn = false;
+                _wantsLeaderToReturn = false;
+                SendImFollowing();
+                return;
+            }
+
+            // AutoFollow didn't establish — leader is in inspect range but not
+            // close enough to follow. Stay in UpdateIdle so the out-of-range path
+            // below can fire and request their position if needed.
+            logger.LogInformation("[FFG] PressFollowTarget in range but AutoFollow not established — staying in Idle.");
         }
 
         // Leader is out of inspect range — request their position to navigate back.
@@ -338,6 +359,19 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // never arrives (stuck, timed out, etc.).
             if (_wantsLeaderToReturn)
             {
+                // If the leader position reply arrived just after our WaitForPosition
+                // timeout fired (a common race at high latency), LeaderPositionReceived
+                // will be true even though we've already sent N5 and entered
+                // _wantsLeaderToReturn. Consume it and navigate to the leader rather
+                // than waiting up to 60s for them to walk to us.
+                if (chatReader.LeaderPositionReceived)
+                {
+                    logger.LogInformation("[FFG] Stale leader position received after timeout — consuming and navigating instead of waiting for leader to return.");
+                    _wantsLeaderToReturn = false;
+                    EnterState(NavState.WaitingForPosition);
+                    return;
+                }
+
                 double waitedSec = (DateTime.UtcNow - _wantsLeaderToReturnSinceUtc).TotalSeconds;
                 if (waitedSec < WantsLeaderToReturnTimeoutSec)
                 {
