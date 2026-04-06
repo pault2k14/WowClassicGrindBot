@@ -30,7 +30,7 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
-          "Mana > 185",
+          "Mana > 215",
           "TargetAlive"
         ]
       },
@@ -44,7 +44,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 170",
+          "Mana > 205",
           "TargetAlive"
         ]
       },
@@ -139,7 +139,7 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
-          "Mana > 185",
+          "Mana > 215",
           "TargetAlive"
         ]
       },
@@ -154,7 +154,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 170",
+          "Mana > 205",
           "TargetAlive"
         ]
       },
@@ -168,7 +168,7 @@
         "ChangeTargetTo": "party1",
         "Requirements": [
           "P1_Debuff_Crystalline Slumber > 1",
-          "Mana > 144"
+          "Mana > 159"
         ]
       },
       {
@@ -189,7 +189,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 185"
+          "Mana > 215"
         ]
       },
       {
@@ -232,8 +232,8 @@
         "Key": "2",
         "HasCastBar": true,
         "Requirements": [
-          "InMeleeRange",
-          //"MaxRange < 27",
+          //"InMeleeRange",
+          "MaxRange < 27",
           "TargetHealth% > MIN_TARGET_HP%",
           "Mana% > MIN_MANA_OFFENSIVE%"
         ]
@@ -246,17 +246,17 @@
           //"HasRangedWeapon",
           "TargetHealth% < MIN_TARGET_HP% || Mana% < MIN_MANA_OFFENSIVE%",
           "!Shooting",
-          //"SpellInRange:1"
-          "InMeleeRange"
+          "SpellInRange:1"
+          //"InMeleeRange"
         ]
       },
       {
         "Name": "Approach",
         "Requirements": [
-          "!InMeleeRange"
+          //"!InMeleeRange"
           //"OutOfCombatRange"
           //"MaxRange > 27"
-          //"!SpellInRange:1"
+          "!SpellInRange:1"
         ],
         "Log": true
       }
@@ -297,7 +297,7 @@
         "Requirements": [
           "!Renew",
           "Health% < 80",
-          "Mana > 170"
+          "Mana > 205"
         ]
       },
       {
@@ -311,7 +311,7 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 80",
-          "Mana > 170",
+          "Mana > 205",
           "TargetAlive"
         ]
       },
@@ -325,7 +325,7 @@
         "ChangeTargetTo": "party1",
         "Requirements": [
           "P1_Debuff_Crystalline Slumber > 1",
-          "Mana > 144"
+          "Mana > 159"
         ]
       },
       {
@@ -386,7 +386,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 65",
-          "Mana > 185",
+          "Mana > 215",
           "!Food",
           "!Drink"
         ]
@@ -401,7 +401,7 @@
         "Requirements": [
           "!Renew",
           "Health% < 30",
-          "Mana > 170",
+          "Mana > 205",
           "TargetAlive",
           "!InCombat",
           "!Food",
