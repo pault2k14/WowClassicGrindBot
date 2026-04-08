@@ -45,6 +45,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     // would not exit until its own Update() returned normally.
     private bool _evadeRecoveryActive;
 
+    // Geometry trap detection: tracks how long we've been stuck approaching
+    // without dealing any new damage. If the character is pinned at the base of
+    // a slope or ledge the mob is on, consecutiveApproach keeps resetting via
+    // StuckDetector but DamageDoneCount doesn't increase. After UnreachableMobTimeoutSec
+    // of this pattern we disengage — stop attack, clear target, blacklist the mob.
+    // We use a snapshot of DamageDoneCount at the moment stuck begins so that
+    // damage dealt to other mobs earlier in the same combat session doesn't
+    // mask the fact that we're making no progress on the current target.
+    private const double UnreachableMobTimeoutSec = 18.0;
+    private DateTime _stuckApproachingSinceUtc = DateTime.MinValue;
+    private bool _stuckApproachingActive;
+    private int _stuckApproachingDamageSnapshot;
+
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
         ClassConfiguration classConfiguration, ClassConfiguration classConfig,
@@ -186,6 +199,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         wait.Update();
         //input.PressLastTarget();
         //wait.Update();
+
+        // Reset geometry-trap detection for the new fight.
+        _stuckApproachingActive = false;
+        _stuckApproachingSinceUtc = DateTime.MinValue;
+        _stuckApproachingDamageSnapshot = 0;
     }
 
     public override void OnExit()
@@ -343,23 +361,82 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         if (consecutiveApproach >= 5 
             && (!playerReader.IsInMeleeRange() || combatLog.DamageDoneCount() == 0))
         {
-            
             if (!stuckDetector.IsMoving())
             {
                 logger.LogInformation("StuckDetector: We aren't moving");
                 stuckDetector.Update();
+
+                // Start the geometry-trap timer if not already running.
+                // Snapshot DamageDoneCount now — we watch for any increase from this
+                // value rather than checking for zero, so that damage dealt to other
+                // mobs earlier in the same combat session doesn't mask being stuck.
+                if (!_stuckApproachingActive)
+                {
+                    _stuckApproachingActive = true;
+                    _stuckApproachingSinceUtc = DateTime.UtcNow;
+                    _stuckApproachingDamageSnapshot = combatLog.DamageDoneCount();
+                    logger.LogInformation($"[CombatGoal] Geometry trap timer started — stuck approaching. DamageDone snapshot={_stuckApproachingDamageSnapshot}.");
+                }
+                else
+                {
+                    // If DamageDoneCount has increased since the snapshot, damage is
+                    // landing — reset the timer and take a new snapshot.
+                    int currentDamage = combatLog.DamageDoneCount();
+                    if (currentDamage > _stuckApproachingDamageSnapshot)
+                    {
+                        logger.LogInformation($"[CombatGoal] Geometry trap timer reset — damage increased ({_stuckApproachingDamageSnapshot} -> {currentDamage}).");
+                        _stuckApproachingActive = false;
+                        _stuckApproachingSinceUtc = DateTime.MinValue;
+                        _stuckApproachingDamageSnapshot = 0;
+                    }
+                    else
+                    {
+                        double stuckSec = (DateTime.UtcNow - _stuckApproachingSinceUtc).TotalSeconds;
+                        if (stuckSec >= UnreachableMobTimeoutSec)
+                        {
+                            logger.LogWarning($"[CombatGoal] Geometry trap detected after {stuckSec:0.0}s — mob unreachable, disengaging.");
+                            playerReader.IgnoreTarget(playerReader.TargetGuid);
+                            input.PressStopAttack();
+                            wait.Update();
+                            input.PressClearTarget();
+                            wait.Update();
+                            stopMoving.Stop();
+                            input.TurnRandomDir(500 + Random.Shared.Next(500));
+                            wait.Update();
+                            _stuckApproachingActive = false;
+                            _stuckApproachingSinceUtc = DateTime.MinValue;
+                            _stuckApproachingDamageSnapshot = 0;
+                            consecutiveApproach = 0;
+                            return;
+                        }
+                    }
+                }
             }
             else
             {
                 logger.LogInformation("StuckDetector: We are moving");
+                // If we're moving again, reset the geometry trap timer.
+                if (_stuckApproachingActive)
+                {
+                    _stuckApproachingActive = false;
+                    _stuckApproachingSinceUtc = DateTime.MinValue;
+                    _stuckApproachingDamageSnapshot = 0;
+                    logger.LogInformation("[CombatGoal] Geometry trap timer reset — character is moving.");
+                }
             }
-                
         }
         else if (consecutiveApproach >= 5 
             && (playerReader.IsInMeleeRange() && combatLog.DamageDoneCount() > 0))
         {
             consecutiveApproach = 0;
             logger.LogInformation("StuckDetector: Reset consecutiveApproach");
+            // Damage is landing — not a geometry trap, reset the timer.
+            if (_stuckApproachingActive)
+            {
+                _stuckApproachingActive = false;
+                _stuckApproachingSinceUtc = DateTime.MinValue;
+                _stuckApproachingDamageSnapshot = 0;
+            }
         }
 
         if(consecutiveNoAction >= 20 && combatLog.DamageDoneCount() == 0)
