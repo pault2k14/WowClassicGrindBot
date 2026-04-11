@@ -531,6 +531,18 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
             return false;
         }
 
+        // If in a party and another party member begins to loot or skin
+        // you will get a target is tapped error
+        if (bits.Target_Tagged())
+        {
+            LogWarning("Keyboard Don't loot tagged target!");
+
+            input.PressClearTarget();
+            wait.Update();
+
+            return false;
+        }
+
         if (!bits.Target_Dead())
         {
             LogWarning("Keyboard Don't attack alive target!");

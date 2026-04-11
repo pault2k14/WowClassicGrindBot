@@ -225,7 +225,9 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         int attempts = 0;
         while (attempts < MAX_ATTEMPTS)
         {
-            bool foundTarget = bits.Target() && bits.Target_Dead();
+            // Add check for tagged target in case we are in a party and another party member already tapped
+            // the mob
+            bool foundTarget = bits.Target() && bits.Target_Dead() && !bits.Target_Tagged();
 
             if (!foundTarget && state.LastCombatKillCount == 1)
             {
@@ -238,6 +240,12 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
                     {
                         foundTarget = true;
                         Log("Last Target found!");
+                    }
+                    else if(bits.Target_Tagged())
+                    {
+                        Log("Last Target was tagged!");
+                        input.PressClearTarget();
+                        wait.Update();
                     }
                     else
                     {
