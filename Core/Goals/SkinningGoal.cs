@@ -78,8 +78,8 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
 
         if (classConfig.Mode == Mode.AssistFocus)
-        {
-            AddPrecondition(GoapKey.partymembercombat, false);
+        {  // Disable for now to see if it resolves NO PLAN for assist when looting/skinning
+           // AddPrecondition(GoapKey.partymembercombat, false);
         }
         else if (classConfig.Mode == Mode.PartyLeader)
         {
