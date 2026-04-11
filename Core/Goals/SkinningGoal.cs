@@ -289,7 +289,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
             if (!playerReader.MinRangeZero())
             {
                 e = wait.Until(MAX_TIME_TO_REACH_MELEE,
-                    NotMovingOrTargetTagged, input.PressApproachOnCooldown);
+                    NotMovingOrTargetTagged, ApproachOnCooldownWithWait);
 
                 LogReachedCorpse(logger, e);
                 interact = !playerReader.MinRangeZero();
@@ -420,8 +420,25 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         }
     }
 
+    private void ApproachOnCooldownWithWait()
+    {
+        wait.Fixed(1000);
+        if (bits.Target() && bits.Target_Tagged())
+        {
+            return;
+        }
+
+        input.PressApproachOnCooldown();
+    }
+
     private void WhileNotCastingInteract()
     {
+        wait.Fixed(1000);
+        if(bits.Target() && bits.Target_Tagged())
+        {
+            return;
+        }
+
         if (!playerReader.IsCasting())
             input.PressApproachOnCooldown();
     }

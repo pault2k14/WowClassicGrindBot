@@ -588,7 +588,9 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
     {
         if (bits.Target() && !bits.Target_Tagged() && (!bits.SoftInteract() || EligibleCorpseSoftTargetExists()))
         {
-            if (!bits.Moving())
+            wait.Fixed(1000);
+
+            if (!bits.Moving() && !bits.Target_Tagged())
             {
                 input.PressApproachOnCooldown();
                 if (input.Approach.OnCooldown())
