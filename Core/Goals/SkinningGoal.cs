@@ -289,7 +289,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
             if (!playerReader.MinRangeZero())
             {
                 e = wait.Until(MAX_TIME_TO_REACH_MELEE,
-                    bits.NotMoving, input.PressApproachOnCooldown);
+                    NotMovingOrTargetTagged, input.PressApproachOnCooldown);
 
                 LogReachedCorpse(logger, e);
                 interact = !playerReader.MinRangeZero();
@@ -362,6 +362,9 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         LogWarnOutOfAttempts(logger, attempts);
         ExitInterruptOrFailed(false);
     }
+
+    private bool NotMovingOrTargetTagged() => bits.Target_Tagged() || bits.NotMoving();
+
 
     public override void OnExit()
     {
@@ -502,7 +505,8 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
     private bool CastStartedOrFailed()
     {
-        return playerReader.IsCasting() ||
+        return playerReader.IsCasting() || 
+            bits.Target_Tagged() ||
             playerReader.LastUIError is
             UI_ERROR.ERR_LOOT_LOCKED or
             UI_ERROR.ERR_REQUIRES_S;
