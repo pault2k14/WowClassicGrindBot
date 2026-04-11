@@ -108,6 +108,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         AddPrecondition(GoapKey.assistshouldfollow, true);
 
+        // Try adding these preconditions to let the assit loot
+        AddPrecondition(GoapKey.shouldloot, false);
+        AddPrecondition(GoapKey.shouldgather, false);
+        AddPrecondition(GoapKey.consumecorpse, false);
+
         switch (classConfig.UnitToFollow)
         {
             case "focus":
