@@ -236,20 +236,14 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
                 if (bits.Target())
                 {
-                    if (bits.Target_Dead())
+                    if (bits.Target_Dead() && !bits.Target_Tagged())
                     {
                         foundTarget = true;
                         Log("Last Target found!");
                     }
-                    else if(bits.Target_Tagged())
-                    {
-                        Log("Last Target was tagged!");
-                        input.PressClearTarget();
-                        wait.Update();
-                    }
                     else
                     {
-                        Log("Last Target is alive!");
+                        Log("Last Target is alive or target tagged!");
                         input.PressClearTarget();
                         wait.Update();
                     }

@@ -582,11 +582,11 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         return bits.Target() && playerReader.MinRangeZero();
     }
 
-    private bool NotMovingOrLootAvailable() => !bits.Target() || bits.NotMoving() || playerReader.LootWindowCount.Value > 0;
+    private bool NotMovingOrLootAvailable() => !bits.Target() || bits.Target_Tagged() || bits.NotMoving() || playerReader.LootWindowCount.Value > 0;
 
     private void TryPressSafeApproachOnCooldownIfNeeded()
     {
-        if (bits.Target() && (!bits.SoftInteract() || EligibleCorpseSoftTargetExists()))
+        if (bits.Target() && !bits.Target_Tagged() && (!bits.SoftInteract() || EligibleCorpseSoftTargetExists()))
         {
             if (!bits.Moving())
             {
