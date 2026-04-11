@@ -588,6 +588,11 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
     {
         if (bits.Target() && !bits.Target_Tagged() && (!bits.SoftInteract() || EligibleCorpseSoftTargetExists()))
         {
+            // TODO Could we use an initial wait condition instead?
+            //  just wait one time, set a boolean in these kinds of functions
+            //  then we wouldn't have to wait any longer?
+            //  Maybe the leader has to wait 1000ms and the assist has to wait 2000ms?
+            //    - probably should not be the same values
             wait.Fixed(1000);
 
             if (!bits.Moving() && !bits.Target_Tagged())

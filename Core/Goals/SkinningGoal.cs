@@ -16,7 +16,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
     private const int MAX_ATTEMPTS = 5;
     private const int MAX_TIME_TO_REACH_MELEE = 10000;
-    private const int MAX_TIME_TO_DETECT_LOOT = 2 * CastingHandler.GCD;
+    private const int MAX_TIME_TO_DETECT_LOOT = 2000; // 2 * CastingHandler.GCD;
     private const int MAX_TIME_TO_DETECT_CAST = 2 * CastingHandler.GCD;
     private const int MAX_TIME_TO_WAIT_NPC_NAME = 1000;
 
