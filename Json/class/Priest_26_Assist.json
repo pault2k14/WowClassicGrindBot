@@ -1,7 +1,9 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": false,
+  "Loot": true,
+  "Skin": true,
+  "KeyboardOnly": true,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
@@ -469,6 +471,24 @@
           "Mana% < 40",
           "!InCombat",
           "!FocusCombat"
+        ]
+      }
+    ]
+  },
+  "LootActions": {
+    "Sequence": [
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
         ]
       }
     ]

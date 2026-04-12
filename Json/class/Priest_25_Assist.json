@@ -1,7 +1,9 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": false,
+  "Loot": true,
+  "Skin": true,
+  "KeyboardOnly": true,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
@@ -219,7 +221,7 @@
         "HasCastBar": true,
         "Requirements": [
           "MaxRange < 27",
-          "Mana% > MIN_MANA_OFFENSIVE%",
+          "Mana% > MIN_MANA_OFFENSIVE%"
           //"TargetHealth% > MIN_TARGET_HP%",
         ]
       },
@@ -470,6 +472,24 @@
           "Mana% < 40",
           "!InCombat",
           "!FocusCombat"
+        ]
+      }
+    ]
+  },
+  "LootActions": {
+    "Sequence": [
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
         ]
       }
     ]

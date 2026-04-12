@@ -120,7 +120,7 @@
         ],
         "AfterCastWaitSwing": true
       },
-/*
+      /*
       {
         "Name": "Hamstring",
         "Key": "7",
@@ -218,23 +218,23 @@
           "BagItem:Item_Heavy_Throwing_Dagger",
           "!HasRangedWeapon"
         ]
-      },
+      }
+    ]
+  },
+  "LootActions": {
+    "Sequence": [
       {
         "Name": "Destroy Junk 1",
         "Key": "N0",
-        "Cooldown": 40000,
         "BeforeCastDelay": 500,
         "Requirements": [
-          "!InCombat"
         ]
       },
       {
         "Name": "Destroy Junk 2",
         "Key": "N0",
-        "Cooldown": 40000,
         "BeforeCastDelay": 500,
         "Requirements": [
-          "!InCombat"
         ]
       }
     ]

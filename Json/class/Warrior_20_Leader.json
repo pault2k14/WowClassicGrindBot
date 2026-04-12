@@ -2,16 +2,21 @@
   "ClassName": "Warrior",
   "Mode": "PartyLeader",
   "Loot": true,
-  //"Skin": true,
+  "Skin": true,
   "KeyboardOnly": true,
   "NPCMaxLevels_Above": 3,
   "NPCMaxLevels_Below": 6,
-  "PathFilename": "_pack/20-30/Stonetalon Mountains/17-21 Spiders v2.json",
+  "PathFilename": "_pack/20-30/Ashenvale/22-25 (mob level) Thistlefur Village v2.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AutoPetAttack": false,
   "Blacklist": [
-    
+    "Thistlefur Avenger",
+    "Thistlefur Den Watcher",
+    "Thistlefur Den Watcher",
+    "Thistlefur Shaman",
+    "Thistlefur Totemic",
+    "Thistlefur Ursa"
   ],
   "IntVariables": {
     "Debuff_POISON": 136067
@@ -169,6 +174,24 @@
         "Key": "F8",
         "Requirements": [
           "!HasRangedWeapon"
+        ]
+      }
+    ]
+  },
+  "LootActions": {
+    "Sequence": [
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
         ]
       }
     ]
