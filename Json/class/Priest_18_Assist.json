@@ -2,7 +2,7 @@
   "ClassName": "Priest",
   "Mode": "AssistFocus",
   "Loot": true,
-  "Skin": true,
+  //"Skin": true,
   "KeyboardOnly": true,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
