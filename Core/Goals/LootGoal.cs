@@ -38,6 +38,8 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
     private readonly GoapAgentState state;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
+    private readonly CastingHandler castingHandler;
+    private readonly IMountHandler mountHandler;
 
     private readonly CancellationToken token;
 
@@ -54,7 +56,8 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         PlayerDirection playerDirection,
         GoapAgentState state, CombatLog combatLog,
         CancellationTokenSource cts, RestHandler restHandler,
-        ChatReader chatReader)
+        ChatReader chatReader, CastingHandler castingHandler,
+        IMountHandler mountHandler)
         : base(nameof(LootGoal))
     {
         this.logger = logger;
@@ -71,7 +74,10 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         this.playerDirection = playerDirection;
         this.state = state;
         this.chatReader = chatReader;
+        this.castingHandler = castingHandler;
+        this.mountHandler = mountHandler;
 
+        this.Keys = classConfig.LootActions.Sequence;
         this.token = cts.Token;
 
         if (classConfig.Mode == Mode.AssistFocus)
@@ -134,6 +140,40 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         CleanUpAfterLooting();
 
         ClearTargetIfNeeded();
+
+        PerformActionsPostLoot();
+    }
+
+    private void PerformActionsPostLoot()
+    {
+        for (int i = 0; i < Keys.Length; i++)
+        {
+
+            KeyAction keyAction = Keys[i];
+
+            if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
+            {
+                continue;
+            }
+
+            if (keyAction.BeforeCastDismount && mountHandler.IsMounted())
+            {
+                mountHandler.Dismount();
+            }
+
+            if (chatReader.ForcedFollow && !keyAction.UseWithForcedFollow)
+            {
+                continue;
+            }
+
+            if (castingHandler.CastIfReady(keyAction,
+                keyAction.Interrupts.Count > 0
+                ? keyAction.CanBeInterrupted
+                : bits.Target_Alive))
+            {
+                break;
+            }
+        }
     }
 
     private void WaitForLosingTarget()
