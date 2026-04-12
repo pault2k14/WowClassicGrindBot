@@ -1,7 +1,11 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": false,
+  "Loot": true,
+  "Skin": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Above": 3,
+  "NPCMaxLevels_Below": 6,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
@@ -364,7 +368,7 @@
       {
         "Name": "Drink",
         "Key": "F11",
-        "Cooldown":  24000,
+        "Cooldown": 24000,
         "AfterCastMaxDelay": 3000,
         "Requirements": [
           "Mana% < 30",

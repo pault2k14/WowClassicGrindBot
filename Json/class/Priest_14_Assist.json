@@ -1,7 +1,11 @@
 {
   "ClassName": "Priest",
   "Mode": "AssistFocus",
-  "Loot": false,
+  "Loot": true,
+  "Skin": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Above": 3,
+  "NPCMaxLevels_Below": 6,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
   "PathThereAndBack": true,
@@ -365,6 +369,24 @@
           "!Inner Fire",
           "!Food",
           "!Drink"
+        ]
+      },
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "Cooldown": 40000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "Cooldown": 40000,
+        "BeforeCastDelay": 500,
+        "Requirements": [
+          "!InCombat"
         ]
       }
     ]
