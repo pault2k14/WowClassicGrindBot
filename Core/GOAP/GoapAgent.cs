@@ -53,6 +53,12 @@ public sealed partial class GoapAgent : IDisposable
     private DateTime _evadeRecoveryUntilUtc = DateTime.MinValue;
     private const double EvadeRecoveryDurationSec = 10.0;
 
+    // Ghost combat escape: same evadeRecovery window but triggered when both bots are
+    // stuck in combat with no hostile target and no damage for 20s (bugged mob holding
+    // combat flag). Uses a longer window so the bots have time to travel out of range.
+    // No N2 press or _evadeLeaderWaiting — both bots move freely since there is no real mob.
+    private const double GhostCombatEscapeDurationSec = 15.0;
+
     // Set when the leader fires an evade blacklist broadcast and the assist has not
     // yet confirmed they are following again. While true it overrides
     // assistrequestreturnorisfollowing=true in WorldState so FRG can run (the leader
@@ -626,42 +632,71 @@ public sealed partial class GoapAgent : IDisposable
             // Both the leader and assist start their own evade recovery timer when this
             // event fires. On the leader it fires from CombatGoal/PullTargetGoal detection.
             // On the assist it fires from the LeaderBlacklistTarget goal handlers.
+            //
+            // guid=0 is a special case: ghost combat escape. The combat flag is being held
+            // by a bugged mob with no hostile target and no damage. The leader presses N2
+            // with guid=0 so the assist receives "blacklist target: 0", clears its combat
+            // state, and follows the leader along the route. The leader continues patrol
+            // via _evadeLeaderWaiting (unblocks FRG) and waits for "i'm following".
+            // Unlike real evade, there is no mob to IgnoreTarget and no stop-and-wait —
+            // the leader moves immediately so the assist has somewhere to follow TO.
+
             if (evade.TargetGuid != 0)
             {
                 logger.LogInformation(
                     $"[GoapAgent] Evade blacklist event guid={evade.TargetGuid} — " +
                     $"starting {EvadeRecoveryDurationSec}s recovery window.");
 
-                // Start the recovery timer on this bot. UpdateWorldState() sets
-                // WorldState[evadeRecovery]=true, blocking CombatGoal, ApproachTargetGoal
-                // and PullTargetGoal from being selected by the planner.
                 _evadeRecoveryUntilUtc = DateTime.UtcNow.AddSeconds(EvadeRecoveryDurationSec);
 
                 if (classConfig.Mode == Mode.PartyLeader)
                 {
-                    // Mark that the leader is waiting for the assist to re-establish follow.
-                    // This unblocks FollowRouteGoal (via assistrequestreturnorisfollowing override)
-                    // so the leader waits in place until the assist confirms following.
-                    // Cleared in GoapThread when "i'm following" arrives from the assist.
                     _evadeLeaderWaiting = true;
 
-                    // Stop and wait — leader must not move until the assist confirms following,
-                    // otherwise the assist (20-30 yards away) may never catch up.
+                    // Stop and wait — leader must not move until the assist confirms following.
                     stopMoving.Stop();
                     input.StopForward(true);
 
-                    // Press N2 macro → party chat "blacklist target: {entryId}".
-                    // ChatReader on the assist parses this → LeaderBlacklistTarget=true.
-                    // The assist's goal handlers consume it: IgnoreTarget + clear target
-                    // + press N5 (AssistCantFollow) → AssistRequestReturn=true on both bots
-                    // → FollowFocusGoal becomes selectable on the assist immediately.
+                    // Press N2 → "blacklist target: {entryId}" in party chat.
                     input.PressLeaderBlacklistTarget();
 
-                    // Suppress the leader's NPC name-scanner for the same duration so it
-                    // doesn't immediately find a new target during the recovery window.
                     foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
                     {
                         goal.SuppressTargetFinderBriefly((int)(EvadeRecoveryDurationSec * 1000));
+                    }
+                }
+            }
+            else
+            {
+                // guid=0: ghost combat escape (bugged mob holding combat flag).
+                // Behaviour is identical to a real evade — leader stops and waits,
+                // assist clears combat state, presses N5 to send position, leader
+                // navigates to assist (or assist navigates to leader via N8/N9),
+                // then both continue the route once "i'm following" is received.
+                // The only difference from a real evade is no IgnoreTarget call
+                // and a longer 15s recovery window.
+                logger.LogInformation(
+                    $"[GoapAgent] Ghost combat escape (guid=0) — starting {GhostCombatEscapeDurationSec}s recovery window.");
+
+                _evadeRecoveryUntilUtc = DateTime.UtcNow.AddSeconds(GhostCombatEscapeDurationSec);
+
+                if (classConfig.Mode == Mode.PartyLeader)
+                {
+                    _evadeLeaderWaiting = true;
+
+                    // Stop and wait — same as real evade. Leader must not move until
+                    // the assist confirms following, so the assist has a stable
+                    // destination to navigate toward.
+                    stopMoving.Stop();
+                    input.StopForward(true);
+
+                    // Press N2 → "blacklist target: 0" in party chat.
+                    // Assist sees guid=0, fires EvadeBlacklistEvent(0) locally, presses N5.
+                    input.PressLeaderBlacklistTarget();
+
+                    foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                    {
+                        goal.SuppressTargetFinderBriefly((int)(GhostCombatEscapeDurationSec * 1000));
                     }
                 }
             }

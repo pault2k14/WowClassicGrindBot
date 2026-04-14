@@ -240,6 +240,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 // AssistXPos/AssistYPos populated for PauseForAssistNavigation.
                 input.PressAssistCantFollow();
             }
+            else
+            {
+                // Ghost combat escape (guid=0): same stop-wait-coordinate flow as real
+                // evade, just without IgnoreTarget. Assist fires EvadeBlacklistEvent(0)
+                // locally, sets AssistRequestReturn and presses N5 so the leader gets
+                // real coordinates and navigates here (or assist navigates to leader via
+                // N8/N9). Once following, both continue the route.
+                logger.LogInformation("[FFG] Leader ghost combat escape (guid=0) — starting evade recovery, pressing N5.");
+                SendGoapEvent(new EvadeBlacklistEvent(0));
+                chatReader.AssistRequestReturn = true;
+                input.PressAssistCantFollow();
+            }
         }
 
         // If focus is in combat, try to assist instead of following.

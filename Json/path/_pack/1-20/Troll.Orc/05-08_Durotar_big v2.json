@@ -294,6 +294,23 @@
     }
   ],
   "blacklists": [
-    
+    { // ledge / pit near Razor Hill
+      "minX": 51.420784,
+      "minY": 46.693110,
+      "maxX": 52.289200,
+      "maxY": 48.405641
+    },
+    { // ledge / pit near sen jin village #1
+      "minX": 53.456813,
+      "minY": 65.311408,
+      "maxX": 54.556108,
+      "maxY": 66.743129
+    },
+    { // ledge / pit near sen jin village #2
+      "minX": 52.379113,
+      "minY": 68.213820,
+      "maxX": 54.761505,
+      "maxY": 70.457721
+    }
   ]
 }

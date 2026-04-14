@@ -45,6 +45,16 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     // would not exit until its own Update() returned normally.
     private bool _evadeRecoveryActive;
 
+    // Ghost combat detection: triggered when both bots are stuck in combat with no hostile
+    // target and no damage dealt or taken for GhostCombatTimeoutSec. This handles bugged
+    // mobs that hold the combat flag indefinitely without ever attacking.
+    // Uses a combined DamageDoneCount + DamageTakenCount snapshot so prior kills
+    // in the same session don't mask the fact that nothing is happening right now.
+    private const double GhostCombatTimeoutSec = 20.0;
+    private DateTime _ghostCombatSinceUtc = DateTime.MinValue;
+    private bool _ghostCombatActive;
+    private int _ghostCombatDamageSnapshot;
+
     // Geometry trap detection: tracks how long we've been stuck approaching
     // without dealing any new damage. If the character is pinned at the base of
     // a slope or ledge the mob is on, consecutiveApproach keeps resetting via
@@ -204,6 +214,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         _stuckApproachingActive = false;
         _stuckApproachingSinceUtc = DateTime.MinValue;
         _stuckApproachingDamageSnapshot = 0;
+
+        // Reset ghost combat detection for the new fight.
+        _ghostCombatActive = false;
+        _ghostCombatSinceUtc = DateTime.MinValue;
+        _ghostCombatDamageSnapshot = 0;
     }
 
     public override void OnExit()
@@ -307,23 +322,84 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
             stopMoving.Stop();
 
-            // Fire EvadeBlacklistEvent so the assist's own GoapAgent starts its
-            // evadeRecovery timer, blocking Combat/Approach/Pull on the assist side
-            // and keeping FollowFocusGoal as the only selectable goal.
-            if (blacklistGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
+            // Fire EvadeBlacklistEvent regardless of guid — for guid=0 (ghost combat)
+            // GoapAgent skips IgnoreTarget but otherwise runs the same stop-wait-coordinate
+            // flow: leader waits, assist presses N5 to send position, leader navigates to
+            // assist (or assist navigates to leader via N8/N9), then both continue route.
+            SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
 
-            // Set AssistRequestReturn=true immediately so FollowFocusGoal is
-            // selectable right now, without waiting ~1.5s for the N5 chat echo.
-            // The N5 press delivers real coordinates to the leader.
+            // Set AssistRequestReturn=true immediately so FollowFocusGoal is selectable
+            // before the N5 echo arrives from chat. N5 delivers real coordinates to leader.
             chatReader.AssistRequestReturn = true;
-            // Press N5 (AssistCantFollow) — sends "i tried following but you are too far
-            // away my position:x,y" to party chat. This sets AssistRequestReturn=true on
-            // BOTH bots (ChatReader parses it on both sides), giving the leader real
-            // coordinates and making assistshouldfollow=true on the assist so
-            // FollowFocusGoal is selected immediately.
             input.PressAssistCantFollow();
             return;
+        }
+
+        // Ghost combat detection: if neither this bot nor its focus has a hostile target
+        // and no damage (dealt or taken) has occurred since the snapshot was taken,
+        // the combat flag is being held by a bugged mob. After 20s, fire
+        // EvadeBlacklistEvent(0) — this sets evadeRecovery=true for 15s in GoapAgent,
+        // unblocking FollowRouteGoal so both bots travel out of range.
+        // The cycle repeats until a real hostile target is acquired or damage begins.
+        if (classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
+        {
+            bool noHostileTarget = !bits.Target_Hostile() && !bits.FocusTarget_Hostile();
+            int currentCombinedDamage = combatLog.DamageDoneCount() + combatLog.DamageTakenCount();
+
+            if (noHostileTarget)
+            {
+                if (!_ghostCombatActive)
+                {
+                    _ghostCombatActive = true;
+                    _ghostCombatSinceUtc = DateTime.UtcNow;
+                    _ghostCombatDamageSnapshot = currentCombinedDamage;
+                    logger.LogInformation($"[CombatGoal] Ghost combat timer started — no hostile target on either bot. DamageSnapshot={_ghostCombatDamageSnapshot}.");
+                }
+                else if (currentCombinedDamage > _ghostCombatDamageSnapshot)
+                {
+                    // Damage occurred — real combat is happening, reset the timer.
+                    logger.LogInformation($"[CombatGoal] Ghost combat timer reset — damage increased ({_ghostCombatDamageSnapshot} -> {currentCombinedDamage}).");
+                    _ghostCombatActive = false;
+                    _ghostCombatSinceUtc = DateTime.MinValue;
+                    _ghostCombatDamageSnapshot = 0;
+                }
+                else
+                {
+                    double ghostSec = (DateTime.UtcNow - _ghostCombatSinceUtc).TotalSeconds;
+                    logger.LogInformation($"[CombatGoal] Ghost combat timer: {ghostSec:0.0}s / {GhostCombatTimeoutSec}s — no hostile target, no damage.");
+                    if (ghostSec >= GhostCombatTimeoutSec)
+                    {
+                        logger.LogWarning($"[CombatGoal] Ghost combat detected after {ghostSec:0.0}s — escaping via route.");
+                        _ghostCombatActive = false;
+                        _ghostCombatSinceUtc = DateTime.MinValue;
+                        _ghostCombatDamageSnapshot = 0;
+                        input.PressStopAttack();
+                        wait.Update();
+                        input.PressClearTarget();
+                        wait.Update();
+                        stopMoving.Stop();
+                        // Fire EvadeBlacklistEvent(0) — guid=0 signals ghost combat escape
+                        // (no specific mob to blacklist). GoapAgent handles guid=0 by pressing
+                        // N2 ("blacklist target: 0"), setting _evadeLeaderWaiting so FRG runs,
+                        // and starting a 15s recovery window. The leader continues the route;
+                        // the assist receives the chat message, fires EvadeBlacklistEvent(0)
+                        // locally, and follows the leader via FollowFocusGoal.
+                        SendGoapEvent(new EvadeBlacklistEvent(0));
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                // A hostile target is acquired — reset the ghost combat timer.
+                if (_ghostCombatActive)
+                {
+                    logger.LogInformation("[CombatGoal] Ghost combat timer reset — hostile target acquired.");
+                    _ghostCombatActive = false;
+                    _ghostCombatSinceUtc = DateTime.MinValue;
+                    _ghostCombatDamageSnapshot = 0;
+                }
+            }
         }
 
         if (classConfig.Loot && !chatReader.AssistRequestReturn)
