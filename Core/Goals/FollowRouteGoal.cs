@@ -200,6 +200,19 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             AddPrecondition(GoapKey.dangercombat, false);
             navigation.OnAnyPointReached += Navigation_OnWayPointReached;
         }
+        else if (classConfig.Mode == Mode.PartyLeader)
+        {
+            // partyleadercanfollowroute is a compound key computed by GoapAgent that
+            // encodes all the combat/corpse/evade conditions in one place:
+            //   - During evade recovery: always true (leader must be able to reach assist
+            //     regardless of incombat/damagedone/producedcorpse state)
+            //   - Outside evade recovery: true only when no ongoing combat indicators
+            //     and no pending corpse/consume cycle (same as a normal solo bot)
+            // This replaces individual incombat/damagedone/damagetaken/producedcorpse/
+            // consumecorpse preconditions which would permanently block FRG after any
+            // kill because DamageDoneCount is a cumulative session counter.
+            AddPrecondition(GoapKey.partyleadercanfollowroute, true);
+        }
         else
         {
             if (classConfig.Loot)

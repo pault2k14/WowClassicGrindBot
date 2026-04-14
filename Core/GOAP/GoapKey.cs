@@ -57,6 +57,17 @@ public enum GoapKey
     /// </summary>
     evadeRecovery,
 
+    /// <summary>
+    /// Compound gate for PartyLeader FollowRouteGoal.
+    /// True when the leader is permitted to follow the patrol route:
+    ///   - During evade recovery (bypass all combat/corpse checks so the
+    ///     leader can navigate toward the assist regardless of fight state), OR
+    ///   - Outside evade recovery AND no ongoing combat indicators AND no
+    ///     pending corpse/consume cycle that should be resolved first.
+    /// Computed by GoapAgent.CanPartyLeaderFollowRoute().
+    /// </summary>
+    partyleadercanfollowroute,
+
     LENGTH
 }
 
@@ -110,6 +121,7 @@ public static class GoapKey_Extension
         GoapKey.party4connected => "party member 4 connected",
         GoapKey.leaderWaitingForAssist => "leader waiting for assist",
         GoapKey.evadeRecovery => "evade recovery",
+        GoapKey.partyleadercanfollowroute => "leader can follow route",
         _ => unknown
     };
 
@@ -159,6 +171,7 @@ public static class GoapKey_Extension
         GoapKey.party4connected => "!party member 4 connected",
         GoapKey.leaderWaitingForAssist => "!leader waiting for assist",
         GoapKey.evadeRecovery => "!evade recovery",
+        GoapKey.partyleadercanfollowroute => "!leader can follow route",
         _ => unknown
     };
 

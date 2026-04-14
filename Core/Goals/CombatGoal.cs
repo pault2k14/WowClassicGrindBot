@@ -1066,6 +1066,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())
             {
+                // Do NOT re-acquire an evading or ignored mob — this is the path that
+                // causes the infinite evade loop after PressNearestTarget tabs to the
+                // same evading mob. It passes Target_Combat() because it's still in the
+                // combat state even while evading.
+                if (combatLog.EvadeMobs.Contains(playerReader.TargetGuid)
+                    || playerReader.IsIgnored(playerReader.TargetGuid))
+                {
+                    logger.LogInformation("[CombatGoal] FindPossibleThreats: NearestTarget is evading/ignored — clearing.");
+                    input.PressClearTarget();
+                    wait.Update();
+                    return;
+                }
+
                 if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
                 {
                     input.PressClearTarget();

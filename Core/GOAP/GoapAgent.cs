@@ -456,6 +456,7 @@ public sealed partial class GoapAgent : IDisposable
                             AvailableGoals.OfType<FollowRouteGoal>().Any(g => g.WaitingForAssist)
                            )));
         logger.LogInformation("GoapKey.evadeRecovery: " + (DateTime.UtcNow < _evadeRecoveryUntilUtc));
+        logger.LogInformation("GoapKey.partyleadercanfollowroute: " + CanPartyLeaderFollowRoute());
     }
 
     private GoapGoal? NextGoal()
@@ -549,6 +550,9 @@ public sealed partial class GoapAgent : IDisposable
         // True for EvadeRecoveryDurationSec after an evading mob is detected.
         // Blocks CombatGoal and ApproachTargetGoal so both bots navigate away cleanly.
         WorldState[GoapKey.evadeRecovery] = DateTime.UtcNow < _evadeRecoveryUntilUtc;
+
+        // Compound gate for PartyLeader FollowRouteGoal — see CanPartyLeaderFollowRoute().
+        WorldState[GoapKey.partyleadercanfollowroute] = CanPartyLeaderFollowRoute();
     }
 
     public bool PartyInCombat()
@@ -591,6 +595,31 @@ public sealed partial class GoapAgent : IDisposable
                  // Attempt to fix movement to Consume Corpse/Loot/SKin while in combat.
                  || (playerCombat || bits.Focus_Combat() && dmgTaken)
                 );
+    }
+
+    /// <summary>
+    /// Compound gate for GoapKey.partyleadercanfollowroute.
+    /// Used as a precondition on FollowRouteGoal for PartyLeader so the leader
+    /// can always select FRG during evade recovery regardless of combat/corpse state,
+    /// but must complete the normal loot/consume cycle outside evade recovery.
+    /// </summary>
+    public bool CanPartyLeaderFollowRoute()
+    {
+        // During evade recovery the leader must always be able to select FRG —
+        // bypass all combat/damage/corpse checks so it can navigate to the assist.
+        if (DateTime.UtcNow < _evadeRecoveryUntilUtc)
+            return true;
+
+        bool dmgTaken = combatLog.DamageTakenCount() > 0;
+        bool dmgDone = combatLog.DamageDoneCount() > 0;
+
+        // Outside evade recovery: same conditions as a normal solo bot.
+        // No ongoing combat indicators, no pending corpse/consume cycle.
+        return (!classConfig.Loot || !bits.Combat())
+            && !dmgDone
+            && !dmgTaken
+            && State.LastCombatKillCount == 0
+            && !State.ShouldConsumeCorpse;
     }
 
     private void HandleGoapEvent(GoapEventArgs e)
