@@ -171,6 +171,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             navigation.Stop();
             _navState = NavState.Idle;
         }
+        else if (_navState == NavState.WaitingForPosition)
+        {
+            // Re-entering after a plan cycle while waiting for a position reply.
+            if (chatReader.LeaderPositionReceived)
+            {
+                // Position arrived during the cycle — leave state as-is so
+                // UpdateWaitingForPosition consumes it on the very first tick.
+                logger.LogInformation("[FFG] OnEnter: leader position received during plan cycle — will consume immediately.");
+            }
+            else
+            {
+                double elapsed = (DateTime.UtcNow - _navStateEnteredUtc).TotalSeconds;
+                if (elapsed >= WaitForPositionTimeoutSec)
+                {
+                    // Timed out while we were in another goal — escalate now.
+                    logger.LogWarning($"[FFG] OnEnter: WaitingForPosition timed out while goal was inactive ({elapsed:0.0}s) — escalating to AssistCantFollow.");
+                    SendAssistCantFollow();
+                    _navState = NavState.Idle;
+                }
+                else
+                {
+                    logger.LogInformation($"[FFG] OnEnter: resuming WaitingForPosition ({elapsed:0.0}s / {WaitForPositionTimeoutSec}s elapsed).");
+                }
+            }
+        }
     }
 
     public override void OnExit()
@@ -193,9 +218,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             navigation.Stop();
         }
 
-        _navState = NavState.Idle;
-        // Clear the position flag in case it arrived while we were exiting.
-        chatReader.LeaderPositionReceived = false;
+        // If we are waiting for a position reply, preserve both the nav state and
+        // the LeaderPositionReceived flag across the plan cycle. The leader's reply
+        // can arrive at exactly the moment the GOAP planner picks a different goal
+        // and OnExit fires — clearing these here discards valid data and leaves the
+        // assist stuck waiting out the full 35s cooldown before it can request again.
+        // For any other state, reset to Idle and clear the flag as normal.
+        if (_navState == NavState.WaitingForPosition)
+        {
+            logger.LogInformation("[FFG] OnExit: preserving WaitingForPosition state and position data across plan cycle.");
+            // Leave _navState and LeaderPositionReceived intact.
+        }
+        else
+        {
+            _navState = NavState.Idle;
+            chatReader.LeaderPositionReceived = false;
+        }
     }
 
     public override void Update()
@@ -312,6 +350,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
     private void UpdateIdle()
     {
+        // Safety net: if LeaderPositionReceived is true but _navState is Idle, a position
+        // reply arrived during a plan cycle after _navState was already reset (e.g. from a
+        // NavigatingToLeader → Idle transition that raced with the reply). Consume it
+        // immediately by entering WaitingForPosition rather than ignoring it.
+        if (chatReader.LeaderPositionReceived)
+        {
+            logger.LogInformation("[FFG] UpdateIdle: leader position received while in Idle — entering WaitingForPosition to consume.");
+            EnterState(NavState.WaitingForPosition);
+            return;
+        }
+
         // If we've already sent "i'm following" and the leader is still in
         // inspect range, we're following fine — do nothing.
         // AutoFollow() drops while the character is running to catch up, so
