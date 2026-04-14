@@ -2,7 +2,7 @@
   "ClassName": "Priest",
   "Mode": "AssistFocus",
   "Loot": true,
-  "Skin": true,
+  //"Skin": true,
   "KeyboardOnly": true,
   "UnitToFollow": "party1",
   "PathFilename": "5_Gnome.json",
@@ -174,8 +174,9 @@
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 1500,
+        "Cooldown": 3000,
         "Requirements": [
+          "!Shadow Word: Pain",
           "InMeleeRange",
           //"MaxRange < 27",
           "Mana% > MIN_MANA_OFFENSIVE%"
