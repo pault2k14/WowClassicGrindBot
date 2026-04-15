@@ -347,12 +347,13 @@ public sealed class ChatReader : IReader
                 }
             }
 
-            if (targetGuid != 0)
-            {
-                logger.LogInformation($"[ChatReader] Leader requests blacklist target guid={targetGuid}");
-                LeaderBlacklistTargetId = targetGuid;
-                LeaderBlacklistTarget = true;
-            }
+            // guid=0 is the ghost-combat escape signal — allow it through so
+            // FFG's LeaderBlacklistTarget handler fires and presses N5.
+            // Previously the targetGuid != 0 guard silently dropped this message
+            // and the assist never responded to the leader's ghost-combat broadcast.
+            logger.LogInformation($"[ChatReader] Leader requests blacklist target guid={targetGuid}");
+            LeaderBlacklistTargetId = targetGuid;
+            LeaderBlacklistTarget = true;
         }
 
         // --- LEADER side confirmation that it sent a blacklist broadcast ---

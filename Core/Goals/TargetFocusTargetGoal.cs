@@ -1,9 +1,9 @@
-﻿using Core.GOAP;
+using Core.GOAP;
 using Microsoft.Extensions.Logging;
 
 namespace Core.Goals;
 
-public sealed class TargetFocusTargetGoal : GoapGoal
+public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
 {
     public override float Cost => 10f;
 
@@ -14,8 +14,17 @@ public sealed class TargetFocusTargetGoal : GoapGoal
     private readonly Wait wait;
     private readonly ChatReader chatReader;
 
+    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true/false.
+    // While true, CanRun() returns false so the planner cannot select this goal.
+    // This prevents the TFT/FFG ping-pong that occurs when bits.Focus_Combat() is
+    // true (the leader's focus is on an evading mob) during evade recovery — without
+    // this guard, TFT beats FFG every plan cycle because FFG presses N4 on exit and
+    // TFT has no cost penalty, starving FFG of the plan-holding time it needs to
+    // navigate back to the leader.
+    private bool _evadeRecoveryActive;
+
     public TargetFocusTargetGoal(ConfigurableInput input, PlayerReader playerReader,
-        AddonBits bits, ClassConfiguration classConfig, Wait wait, 
+        AddonBits bits, ClassConfiguration classConfig, Wait wait,
         ILogger<TargetFocusTargetGoal> logger, ChatReader chatReader)
         : base(nameof(TargetFocusTargetGoal))
     {
@@ -43,8 +52,26 @@ public sealed class TargetFocusTargetGoal : GoapGoal
         this.logger = logger;
     }
 
+    public void OnGoapEvent(GoapEventArgs e)
+    {
+        if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
+        {
+            _evadeRecoveryActive = s.Value;
+            if (s.Value)
+                logger.LogInformation("[TFT] Evade recovery started — CanRun() blocked until recovery clears.");
+            else
+                logger.LogInformation("[TFT] Evade recovery cleared — CanRun() unblocked.");
+        }
+    }
+
     public override bool CanRun()
     {
+        // During evade recovery the assist must stay in FollowFocusGoal and
+        // navigate back to the leader. Returning false here prevents the planner
+        // from ever selecting TFT, stopping the TFT/FFG ping-pong loop.
+        if (_evadeRecoveryActive)
+            return false;
+
         if (bits.TargetTarget_PlayerOrPet())
             return false;
 

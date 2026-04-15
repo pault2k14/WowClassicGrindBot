@@ -253,6 +253,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             chatReader.LeaderBlacklistTarget = false;
             chatReader.LeaderBlacklistTargetId = 0;
 
+            logger.LogInformation($"[FFG] OnGoapEvent LeaderBlacklistTarget received guid={blacklistGuid}");
+
             if (blacklistGuid != 0)
             {
                 logger.LogInformation($"[FFG] Leader blacklisted target guid={blacklistGuid} — stopping attack, ignoring and starting evade recovery.");
