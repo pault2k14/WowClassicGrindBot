@@ -51,7 +51,7 @@ public sealed partial class GoapAgent : IDisposable
     // Evade recovery: blocks CombatGoal, ApproachTargetGoal and PullTargetGoal for a fixed
     // window after an evading mob is detected, giving both bots time to navigate away.
     private DateTime _evadeRecoveryUntilUtc = DateTime.MinValue;
-    private const double EvadeRecoveryDurationSec = 10.0;
+    private const double EvadeRecoveryDurationSec = 25.0;
 
     // Ghost combat escape: same evadeRecovery window but triggered when both bots are
     // stuck in combat with no hostile target and no damage for 20s (bugged mob holding
