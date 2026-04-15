@@ -59,6 +59,14 @@ public sealed partial class GoapAgent : IDisposable
     // No N2 press or _evadeLeaderWaiting — both bots move freely since there is no real mob.
     private const double GhostCombatEscapeDurationSec = 15.0;
 
+    // Post-combat loot/gather reset timer. After combat ends, if neither shouldloot nor
+    // shouldgather has been cleared by LootGoal/SkinningGoal within this window, forcibly
+    // reset the counts to zero. This handles cases where the leader skins/loots a corpse
+    // before the assist can, leaving the assist stuck in NO PLAN with stale flags.
+    // Timer cancels if combat resumes before it expires.
+    private const double PostCombatResetSec = 10.0;
+    private DateTime _postCombatResetUtc = DateTime.MinValue;
+
     // Set when the leader fires an evade blacklist broadcast and the assist has not
     // yet confirmed they are following again. While true it overrides
     // assistrequestreturnorisfollowing=true in WorldState so FRG can run (the leader
@@ -357,11 +365,44 @@ public sealed partial class GoapAgent : IDisposable
                 {
                     SendPartyInCombat();
                     previousPartyInCombat = true;
+
+                    // Combat resumed — cancel the post-combat reset timer so we don't
+                    // wipe loot/gather state mid-fight.
+                    if (_postCombatResetUtc != DateTime.MinValue)
+                    {
+                        logger.LogInformation("[GoapAgent] Post-combat reset timer cancelled — combat resumed.");
+                        _postCombatResetUtc = DateTime.MinValue;
+                    }
                 }
                 else
                 {
                     SendPartyNotInCombat();
                     previousPartyInCombat = false;
+
+                    // Combat ended — start the 10s timer. If loot/gather haven't been
+                    // cleared by their respective goals by the time it fires, force-reset
+                    // them. This handles the case where the leader loots/skins a corpse
+                    // before the assist can, leaving the assist stuck in NO PLAN.
+                    if (State.LootableCorpseCount > 0 || State.GatherableCorpseCount > 0)
+                    {
+                        _postCombatResetUtc = DateTime.UtcNow.AddSeconds(PostCombatResetSec);
+                        logger.LogInformation($"[GoapAgent] Post-combat reset timer started ({PostCombatResetSec}s) — LootableCorpseCount={State.LootableCorpseCount} GatherableCorpseCount={State.GatherableCorpseCount}.");
+                    }
+                }
+            }
+
+            // Post-combat loot/gather reset: if the timer has expired and we're still
+            // not in combat, force-clear the stale counts.
+            if (_postCombatResetUtc != DateTime.MinValue &&
+                DateTime.UtcNow >= _postCombatResetUtc &&
+                !PartyInCombat())
+            {
+                _postCombatResetUtc = DateTime.MinValue;
+                if (State.LootableCorpseCount > 0 || State.GatherableCorpseCount > 0)
+                {
+                    logger.LogWarning($"[GoapAgent] Post-combat reset timer expired — clearing stale LootableCorpseCount={State.LootableCorpseCount} GatherableCorpseCount={State.GatherableCorpseCount}.");
+                    State.LootableCorpseCount = 0;
+                    State.GatherableCorpseCount = 0;
                 }
             }
 
