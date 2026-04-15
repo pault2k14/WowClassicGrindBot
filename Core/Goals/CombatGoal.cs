@@ -1064,21 +1064,22 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
-            if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())
+            // Do NOT re-acquire an evading or ignored mob. Check this first, before
+            // entering the Target_Combat block, so we fall through to wait.Till below.
+            // Checking inside Target_Combat (the previous location) caused a tight loop:
+            // clearing and returning immediately put us back in Update() which re-entered
+            // FindPossibleThreats every tick since !bits.Target() && DamageTakenCount > 0
+            // were both still true, and PressNearestTarget kept returning the same mob.
+            if (combatLog.EvadeMobs.Contains(playerReader.TargetGuid)
+                || playerReader.IsIgnored(playerReader.TargetGuid))
             {
-                // Do NOT re-acquire an evading or ignored mob — this is the path that
-                // causes the infinite evade loop after PressNearestTarget tabs to the
-                // same evading mob. It passes Target_Combat() because it's still in the
-                // combat state even while evading.
-                if (combatLog.EvadeMobs.Contains(playerReader.TargetGuid)
-                    || playerReader.IsIgnored(playerReader.TargetGuid))
-                {
-                    logger.LogInformation("[CombatGoal] FindPossibleThreats: NearestTarget is evading/ignored — clearing.");
-                    input.PressClearTarget();
-                    wait.Update();
-                    return;
-                }
-
+                logger.LogInformation("[CombatGoal] FindPossibleThreats: NearestTarget is evading/ignored — clearing, waiting for real target or combat drop.");
+                input.PressClearTarget();
+                wait.Update();
+                // fall through to wait.Till at the bottom — do NOT return
+            }
+            else if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())
+            {
                 if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader.TargetRaidIcon()) != -1)
                 {
                     input.PressClearTarget();
