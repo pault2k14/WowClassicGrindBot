@@ -1065,18 +1065,21 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
             // Do NOT re-acquire an evading or ignored mob. Check this first, before
-            // entering the Target_Combat block, so we fall through to wait.Till below.
-            // Checking inside Target_Combat (the previous location) caused a tight loop:
-            // clearing and returning immediately put us back in Update() which re-entered
-            // FindPossibleThreats every tick since !bits.Target() && DamageTakenCount > 0
-            // were both still true, and PressNearestTarget kept returning the same mob.
+            // entering the Target_Combat block. Re-fire EvadeBlacklistEvent so the full
+            // evade escape machinery restarts: evadeRecovery=true blocks CombatGoal,
+            // presses N2 to notify the assist, sets _evadeLeaderWaiting so FRG runs,
+            // and the leader moves away along the route. Simply clearing and waiting
+            // is not enough — combat won't drop while we're still in range of the mob.
             if (combatLog.EvadeMobs.Contains(playerReader.TargetGuid)
                 || playerReader.IsIgnored(playerReader.TargetGuid))
             {
-                logger.LogInformation("[CombatGoal] FindPossibleThreats: NearestTarget is evading/ignored — clearing, waiting for real target or combat drop.");
+                int evadingGuid = playerReader.TargetGuid;
+                logger.LogInformation($"[CombatGoal] FindPossibleThreats: NearestTarget guid={evadingGuid} is evading/ignored — re-firing evade escape to move away.");
                 input.PressClearTarget();
                 wait.Update();
-                // fall through to wait.Till at the bottom — do NOT return
+                stopMoving.Stop();
+                SendGoapEvent(new EvadeBlacklistEvent(evadingGuid));
+                return;
             }
             else if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())
             {
