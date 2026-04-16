@@ -5,7 +5,6 @@ using SharedLib;
 using System;
 using System.Numerics;
 using System.Threading;
-using static System.MathF;
 
 namespace Core.Goals;
 
@@ -69,11 +68,27 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // How long to wait for the leader to reply with their position.
     private const double WaitForPositionTimeoutSec = 15.0;
 
-    // How long the assist will actively navigate toward the leader before
-    // escalating to AssistCantFollow (the existing "too far away" flow).
-    private const double NavigationTimeoutSec = 30.0;
+    // Maximum ACTIVE navigation time before escalating to AssistCantFollow.
+    // Uses elapsed-time-only-when-moving (same pattern as FRG's TickAssistReturnTimeout)
+    // so the timeout doesn't burn down while the assist is in combat or evade recovery.
+    private const double NavigationActiveTimeoutSec = 30.0;
 
     private DateTime _navStateEnteredUtc;
+
+    // --- NavigatingToLeader: rewind/retry and active-time timeout ---
+    // The leader's map position we're currently navigating to (for rewind retry).
+    private Vector3 _navLeaderTargetMapPos;
+    // True while rewinding to the last safe anchor before retrying the leader target.
+    private bool _navRewindActive;
+    // The world-space safe anchor position to rewind to on path failure.
+    private Vector3 _navRewindAnchorW;
+    // 0 = first attempt, 1 = after rewind retry. Abort on second failure.
+    private int _navAttempt;
+    // Active-time elapsed since entering NavigatingToLeader.
+    // Only increments when not in combat and not in evade recovery.
+    private TimeSpan _navActiveElapsed;
+    private DateTime _navLastTickUtc;
+    private bool _navTimerInit;
 
     // Cooldown so we don't spam the position request if something goes wrong.
     private const double RequestPositionCooldownSec = 35.0;
@@ -141,8 +156,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 break;
         }
 
-        // Subscribe to destination-reached so we can attempt follow on arrival.
+        // Subscribe to navigation events.
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
+        navigation.OnWayPointReached += Navigation_OnWayPointReached;
+        navigation.OnPathFailed += Navigation_OnPathFailed;
     }
 
     // Called when the goal is disposed or the agent shuts down.
@@ -150,6 +167,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private void Cleanup()
     {
         navigation.OnDestinationReached -= Navigation_OnDestinationReached;
+        navigation.OnWayPointReached -= Navigation_OnWayPointReached;
+        navigation.OnPathFailed -= Navigation_OnPathFailed;
     }
 
     public override void OnEnter()
@@ -169,6 +188,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             logger.LogInformation("[FFG] OnEnter: was NavigatingToLeader, stopping navigation.");
             navigation.Stop();
+            ResetNavRetryState();
             _navState = NavState.Idle;
         }
         else if (_navState == NavState.WaitingForPosition)
@@ -364,11 +384,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         // If we've already sent "i'm following" and the leader is still in
-        // inspect range, we're following fine — do nothing.
-        // AutoFollow() drops while the character is running to catch up, so
-        // we cannot use it as an ongoing "still following" signal.
+        // inspect range AND AutoFollow is active, we're following fine — do nothing.
+        // If AutoFollow has dropped (terrain bump, manual keypress, etc.) we must
+        // fall through immediately so the follow attempt below re-establishes it,
+        // rather than waiting up to ~30 yards for the leader to leave inspect range.
         if (lastMessageSent == followMessage.ImFollowing &&
-            playerReader.SpellInRange.Focus_Inspect)
+            playerReader.SpellInRange.Focus_Inspect &&
+            bits.AutoFollow())
         {
             return;
         }
@@ -496,44 +518,29 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             float ly = chatReader.LeaderYPos;
             chatReader.LeaderPositionReceived = false;
 
-            logger.LogInformation($"[FFG] Leader position received: X={lx} Y={ly}. Starting navigation.");
-
             Vector3 leaderMapPos = new Vector3(lx, ly, playerReader.MapPos.Z);
-            Vector3 myMapPos = playerReader.MapPos;
+            float dx = lx - playerReader.MapPos.X;
+            float dy = ly - playerReader.MapPos.Y;
+            float dist = (float)Math.Sqrt(dx * dx + dy * dy);
 
-            // Build a dense chain of intermediate waypoints between our current
-            // position and the leader's position. Navigation is much more robust
-            // with many short segments (as in FRG's patrol route) than a single
-            // long waypoint — it gives the stuck detector, refill logic, and
-            // escape machinery many intermediate progress points to work with.
-            const float WaypointSpacingMap = 2.0f; // ~2 map units between each waypoint
+            logger.LogInformation($"[FFG] Leader position received: X={lx} Y={ly} dist={dist:0.00} map units. Starting navigation.");
 
-            float dx = lx - myMapPos.X;
-            float dy = ly - myMapPos.Y;
-            float dist = Sqrt(dx * dx + dy * dy);
+            // Store target for rewind retry, reset retry state and active-time timer.
+            _navLeaderTargetMapPos = leaderMapPos;
+            _navAttempt = 0;
+            _navRewindActive = false;
+            _navRewindAnchorW = default;
+            _navTimerInit = false;
+            _navActiveElapsed = TimeSpan.Zero;
 
-            int steps = Math.Max(1, (int)(dist / WaypointSpacingMap));
-            int totalPoints = steps + 1; // intermediate steps + leader endpoint
-
-            // Stack-allocate if small enough, heap-allocate for longer routes.
-            Vector3[] waypoints = new Vector3[totalPoints];
-            for (int i = 0; i < steps; i++)
-            {
-                float t = (float)(i + 1) / (steps + 1);
-                waypoints[i] = new Vector3(
-                    myMapPos.X + dx * t,
-                    myMapPos.Y + dy * t,
-                    myMapPos.Z
-                );
-            }
-            waypoints[steps] = leaderMapPos; // final point is leader's exact position
-
-            logger.LogInformation(
-                $"[FFG] Navigating to leader with {totalPoints} waypoints " +
-                $"(dist={dist:0.00} map units, spacing={WaypointSpacingMap}).");
-
-            navigation.SetWayPoints(waypoints.AsSpan());
-            navigation.Resume();
+            // Pass only the destination and let the pather plan the full route.
+            // Previously this generated linear intermediate waypoints which caused
+            // the assist to get stuck on terrain — the pather would navigate around
+            // one obstacle but the next pre-sliced segment still pointed straight
+            // through the next piece of terrain. SetSingleWaypoint lets the pather
+            // return a full terrain-aware path with proper intermediate points,
+            // giving the stuck detector and escape machinery progress points to work with.
+            navigation.SetSingleWaypoint(leaderMapPos);
 
             EnterState(NavState.NavigatingToLeader);
             return;
@@ -558,17 +565,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -------------------------------------------------------------------------
     private void UpdateNavigatingToLeader()
     {
-        double elapsed = (DateTime.UtcNow - _navStateEnteredUtc).TotalSeconds;
-        if (elapsed >= NavigationTimeoutSec)
-        {
-            logger.LogWarning(
-                $"[FFG] Navigation timeout after {elapsed:0.0}s — " +
-                "escalating to AssistCantFollow.");
-            navigation.Stop();
-            SendAssistCantFollow();
-            EnterState(NavState.Idle);
+        // Active-time timeout — only counts time when not in combat / evade recovery.
+        TickNavActiveTimeout();
+        if (_navState != NavState.NavigatingToLeader)
             return;
-        }
 
         // Drive navigation this tick.
         navigation.Update(CancellationToken.None);
@@ -580,27 +580,134 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         wait.Update();
     }
 
+    // Active-time navigation timeout.
+    // Only accumulates elapsed time when the assist is actively moving toward the leader
+    // (not in combat, not in evade recovery) so a stuck or paused assist doesn't burn
+    // through its budget while standing still.
+    private void TickNavActiveTimeout()
+    {
+        var now = DateTime.UtcNow;
+
+        if (!_navTimerInit)
+        {
+            _navTimerInit = true;
+            _navLastTickUtc = now;
+            _navActiveElapsed = TimeSpan.Zero;
+            return;
+        }
+
+        bool countActive = !bits.Combat() && !_evadeRecoveryActive;
+        if (countActive)
+            _navActiveElapsed += (now - _navLastTickUtc);
+
+        _navLastTickUtc = now;
+
+        if (_navActiveElapsed.TotalSeconds >= NavigationActiveTimeoutSec)
+        {
+            logger.LogWarning(
+                $"[FFG] Navigation active timeout after {_navActiveElapsed.TotalSeconds:0.0}s — " +
+                "escalating to AssistCantFollow.");
+            navigation.Stop();
+            ResetNavRetryState();
+            SendAssistCantFollow();
+            EnterState(NavState.Idle);
+        }
+    }
+
+    private void ResetNavRetryState()
+    {
+        _navLeaderTargetMapPos = default;
+        _navRewindActive = false;
+        _navRewindAnchorW = default;
+        _navAttempt = 0;
+        _navTimerInit = false;
+        _navActiveElapsed = TimeSpan.Zero;
+    }
+
     // -------------------------------------------------------------------------
-    // Navigation event: fires when we reach the leader's last known position.
-    // Make one final follow attempt; if still out of range, escalate.
+    // Navigation event: fires when we reach the current navigation destination.
+    // If rewinding, retry the leader target. Otherwise make one final follow
+    // attempt; if still out of range, escalate to AssistCantFollow.
     // -------------------------------------------------------------------------
     private void Navigation_OnDestinationReached()
     {
         if (_navState != NavState.NavigatingToLeader)
             return;
 
+        if (_navRewindActive)
+        {
+            // Rewind destination reached — retry the leader target.
+            _navRewindActive = false;
+            logger.LogInformation($"[FFG] Rewind destination reached. Retrying leader target {_navLeaderTargetMapPos}.");
+            navigation.SetSingleWaypoint(_navLeaderTargetMapPos);
+            return;
+        }
+
         logger.LogInformation("[FFG] Reached leader's last known position. Attempting follow.");
 
-        // Give the game a tick to settle before trying.
         wait.Update();
 
         if (TryFollowIfInRange())
             return;
 
-        // Still can't follow — escalate.
         logger.LogWarning("[FFG] Reached leader position but still out of follow range. Escalating to AssistCantFollow.");
+        ResetNavRetryState();
         SendAssistCantFollow();
         EnterState(NavState.Idle);
+    }
+
+    // -------------------------------------------------------------------------
+    // Navigation event: fires when an intermediate waypoint is reached.
+    // Try opportunistically to follow — the leader may now be in range.
+    // -------------------------------------------------------------------------
+    private void Navigation_OnWayPointReached()
+    {
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
+        TryFollowIfInRange();
+    }
+
+    // -------------------------------------------------------------------------
+    // Navigation event: fires when the pather fails to find a path.
+    // On first failure, rewind to last safe anchor then retry the leader target.
+    // On second failure, escalate to AssistCantFollow.
+    // -------------------------------------------------------------------------
+    private void Navigation_OnPathFailed(Vector3 startW, Vector3 endW)
+    {
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
+        // FFG only ever has one navigation target active at a time so we don't
+        // need to verify endW against our target — any path failure while in
+        // NavigatingToLeader is for the leader destination or rewind anchor.
+
+        if (_navAttempt >= 1)
+        {
+            logger.LogWarning("[FFG] Path to leader failed after rewind retry — escalating to AssistCantFollow.");
+            ResetNavRetryState();
+            SendAssistCantFollow();
+            EnterState(NavState.Idle);
+            return;
+        }
+
+        if (!navigation.HasLastSafeAnchor)
+        {
+            logger.LogWarning("[FFG] Path to leader failed — no safe anchor available. Escalating to AssistCantFollow.");
+            ResetNavRetryState();
+            SendAssistCantFollow();
+            EnterState(NavState.Idle);
+            return;
+        }
+
+        _navAttempt = 1;
+        _navRewindActive = true;
+        _navRewindAnchorW = navigation.LastSafeAnchorW;
+
+        logger.LogWarning(
+            $"[FFG] Path to leader failed. Rewinding to anchor={_navRewindAnchorW} then retrying target={_navLeaderTargetMapPos}.");
+
+        navigation.SetSingleWaypoint(_navRewindAnchorW);
     }
 
     // -------------------------------------------------------------------------
