@@ -2,6 +2,7 @@ using Core.GOAP;
 using Core.Goals;
 using Microsoft.Extensions.Logging;
 using SharedLib;
+using SharedLib.Extensions;
 using System;
 using System.Numerics;
 using System.Threading;
@@ -94,6 +95,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const double RequestPositionCooldownSec = 35.0;
     private DateTime _lastPositionRequestUtc = DateTime.MinValue;
 
+    // --- Idle stuck detection ---
+    // Detects when the assist is physically trapped on terrain while out of follow
+    // range and not in combat. Without this, the assist can sit on terrain forever
+    // while the leader repeatedly navigates to it and waits for "i'm following" —
+    // a deadlock that can kill the leader if they are soloing in the meantime.
+    private const double StuckCheckIntervalSec = 3.0;
+    private const float StuckMinMovementWorld = 1.0f;  // world units
+    private const double StuckEscapeCooldownSec = 10.0;
+    private Vector3 _stuckCheckPosW;
+    private DateTime _stuckCheckLastUtc = DateTime.MinValue;
+    private DateTime _stuckEscapeLastUtc = DateTime.MinValue;
+
     public FollowFocusGoal(ConfigurableInput input,
         PlayerReader playerReader,
         AddonBits bits,
@@ -178,6 +191,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             wait.Update(1000);
         }
 
+        // Reset stuck detection snapshot on re-entry so stale position data
+        // from a previous plan cycle doesn't cause a false positive.
+        _stuckCheckLastUtc = DateTime.MinValue;
+        navigation.ResetApproachEscape();
+
         if (input.IsKeyDown(input.ForwardKey))
         {
             input.StopForward(true);
@@ -226,6 +244,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
+        navigation.ResetApproachEscape();
         input.StepBackwards();
         input.PressAssistIsNotFollowing();
         lastMessageSent = followMessage.ImNotFollowing;
@@ -440,8 +459,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         // Leader is out of inspect range — request their position to navigate back.
+        // Guard: only proceed if we have confirmed the leader is actually targeted.
+        // If TargetGuid doesn't match yet (the game hasn't registered the TargetFocus
+        // press from above), Focus_Inspect will be stale/false even if the leader is
+        // standing right next to us. Returning here lets the next tick re-evaluate
+        // after the addon has updated — preventing a spurious N8 request when the
+        // assist and leader are essentially co-located immediately after a plan transition.
         if (!playerReader.SpellInRange.Focus_Inspect)
         {
+            if (playerReader.TargetGuid != focusTargetGuid)
+            {
+                // Target not confirmed yet — skip this tick, don't request position.
+                wait.Update();
+                return;
+            }
+
+            // Check if the assist is stuck on terrain.
+            TickIdleStuckDetection();
             // If the assist already gave up navigating and asked the leader to come back
             // (_wantsLeaderToReturn=true), do NOT send position requests (N8) again —
             // the leader should be on their way and we must stay put and wait.
@@ -533,13 +567,24 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             _navTimerInit = false;
             _navActiveElapsed = TimeSpan.Zero;
 
+            // If the leader is essentially co-located (dist < 1 map unit), skip
+            // navigation entirely and attempt follow directly. At this distance
+            // SetSingleWaypoint fires OnDestinationReached almost immediately on the
+            // first tick before Focus_Inspect or TargetGuid have settled after a plan
+            // transition, causing a spurious AssistCantFollow escalation even when
+            // the two are standing on top of each other.
+            if (dist < 1.0f)
+            {
+                logger.LogInformation("[FFG] Leader is co-located — skipping navigation, attempting follow directly.");
+                EnterState(NavState.NavigatingToLeader);
+                if (TryFollowIfInRange())
+                    return;
+                // If follow didn't establish immediately, stay in NavigatingToLeader
+                // so the next Update tick continues trying via TryFollowIfInRange.
+                return;
+            }
+
             // Pass only the destination and let the pather plan the full route.
-            // Previously this generated linear intermediate waypoints which caused
-            // the assist to get stuck on terrain — the pather would navigate around
-            // one obstacle but the next pre-sliced segment still pointed straight
-            // through the next piece of terrain. SetSingleWaypoint lets the pather
-            // return a full terrain-aware path with proper intermediate points,
-            // giving the stuck detector and escape machinery progress points to work with.
             navigation.SetSingleWaypoint(leaderMapPos);
 
             EnterState(NavState.NavigatingToLeader);
@@ -569,6 +614,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         TickNavActiveTimeout();
         if (_navState != NavState.NavigatingToLeader)
             return;
+
+        // Record position for approach vector so TryUnstuck has a direction
+        // to project from if the assist gets stuck during navigation.
+        navigation.RecordApproachPosition(playerReader.WorldPos);
 
         // Drive navigation this tick.
         navigation.Update(CancellationToken.None);
@@ -622,6 +671,71 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navAttempt = 0;
         _navTimerInit = false;
         _navActiveElapsed = TimeSpan.Zero;
+    }
+
+    // -------------------------------------------------------------------------
+    // Idle stuck detection
+    // Fires when the assist hasn't moved while out of follow range and not in
+    // combat. This catches the case where the assist is physically trapped on
+    // terrain — the leader keeps navigating to it and waiting for "i'm following"
+    // but the assist can never establish AutoFollow because it can't move.
+    // On detection: turn random direction, step back, jump, reset wantsLeaderToReturn,
+    // and force a fresh N8 position request so the leader gets updated coordinates
+    // after the escape attempt.
+    // -------------------------------------------------------------------------
+    private void TickIdleStuckDetection()
+    {
+        // Don't run during combat or evade recovery.
+        if (bits.Combat() || _evadeRecoveryActive)
+        {
+            _stuckCheckLastUtc = DateTime.MinValue;
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        Vector3 currentW = playerReader.WorldPos;
+
+        // Initialise snapshot on first call or after a reset.
+        if (_stuckCheckLastUtc == DateTime.MinValue)
+        {
+            _stuckCheckPosW = currentW;
+            _stuckCheckLastUtc = now;
+            return;
+        }
+
+        double elapsed = (now - _stuckCheckLastUtc).TotalSeconds;
+        if (elapsed < StuckCheckIntervalSec)
+            return;
+
+        float moved = currentW.WorldDistanceXYTo(_stuckCheckPosW);
+
+        // Reset snapshot regardless — if we moved enough we just take a new baseline.
+        _stuckCheckPosW = currentW;
+        _stuckCheckLastUtc = now;
+
+        if (moved >= StuckMinMovementWorld)
+            return;
+
+        // Haven't moved enough — check escape cooldown.
+        if ((now - _stuckEscapeLastUtc).TotalSeconds < StuckEscapeCooldownSec)
+            return;
+
+        _stuckEscapeLastUtc = now;
+        logger.LogWarning(
+            $"[FFG] Idle stuck detected — moved only {moved:0.00} world units in {elapsed:0.0}s. " +
+            "Attempting pather-based escape.");
+
+        // Use pather-based escape: project a waypoint along the approach vector
+        // (10-30 yards) to route around the terrain obstacle, falling back to
+        // random turn/jump if all pather attempts fail.
+        navigation.TryUnstuck();
+
+        // Reset wantsLeaderToReturn so a fresh N8 fires immediately,
+        // giving the leader the assist's new position after the escape attempt
+        // rather than waiting up to 60s for the leader to walk to the old stuck spot.
+        _wantsLeaderToReturn = false;
+        _lastPositionRequestUtc = DateTime.MinValue;
+        logger.LogInformation("[FFG] Idle stuck escape: reset wantsLeaderToReturn and position cooldown — will request fresh position.");
     }
 
     // -------------------------------------------------------------------------

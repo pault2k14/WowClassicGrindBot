@@ -30,6 +30,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private readonly CombatLog combatLog;
     private readonly ChatReader chatReader;
     private readonly StuckDetector stuckDetector;
+    private readonly Navigation navigation;
     
     private float lastDirection;
     private float lastMinDistance;
@@ -59,10 +60,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     // without dealing any new damage. If the character is pinned at the base of
     // a slope or ledge the mob is on, consecutiveApproach keeps resetting via
     // StuckDetector but DamageDoneCount doesn't increase. After UnreachableMobTimeoutSec
-    // of this pattern we disengage — stop attack, clear target, blacklist the mob.
-    // We use a snapshot of DamageDoneCount at the moment stuck begins so that
-    // damage dealt to other mobs earlier in the same combat session doesn't
-    // mask the fact that we're making no progress on the current target.
+    // of this pattern we disengage — stop attack, clear target, then call
+    // navigation.TryUnstuck() which projects a waypoint along the approach vector
+    // (10-30 yards) to route around the obstacle before falling back to random movement.
     private const double UnreachableMobTimeoutSec = 18.0;
     private DateTime _stuckApproachingSinceUtc = DateTime.MinValue;
     private bool _stuckApproachingActive;
@@ -73,7 +73,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         ClassConfiguration classConfiguration, ClassConfiguration classConfig,
         CastingHandler castingHandler, CombatLog combatLog,
         IMountHandler mountHandler, ChatReader chatReader,
-        StuckDetector stuckDetector)
+        StuckDetector stuckDetector, Navigation navigation)
         : base(nameof(CombatGoal))
     {
         this.logger = logger;
@@ -90,6 +90,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.classConfig = classConfig;
         this.chatReader = chatReader;
         this.stuckDetector = stuckDetector;
+        this.navigation = navigation;
 
         if (classConfig.Mode == Mode.AssistFocus)
         {
@@ -176,6 +177,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
         stuckDetector.Reset();
+        navigation.ResetApproachEscape();
 
         if (mountHandler.IsMounted())
         {
@@ -184,31 +186,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         lastDirection = playerReader.Direction;
 
-        // Let's just totally disable soft interact for nwo
-        // to see if that will help
-        // Scenario
-        // 1. Target Mob
-        // 2. Press Disable Soft Interact
-        // 3. Additional mob
-        // 4. Kill first mob
-        // 5. Interact with additional mob (that is targeted) actually
-        //    interacts with Original mob as soft interact that was
-        //    established before disabling soft interact is not cleared
-        // - Possible solutions
-        //   Option 1 - Completely disable soft interact
-        //   Option 2 -
-        //      1. Disable soft interact
-        //      2. clear target
-        //      3. target last target
-        //   Option 3 - 
-        //      1. Enable soft interact on entering loot
-        //      2. Disable soft interact after leaving skinning
-        //input.PressClearTarget();
-        //wait.Update();
         input.PressDisableSoftInteract();
         wait.Update();
-        //input.PressLastTarget();
-        //wait.Update();
 
         // Reset geometry-trap detection for the new fight.
         _stuckApproachingActive = false;
@@ -228,25 +207,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             stopMoving.Stop();
         }
 
-        // Let's just totally disable soft interact for nwo
-        // to see if that will help
-        // Scenario
-        // 1. Target Mob
-        // 2. Press Disable Soft Interact
-        // 3. Additional mob
-        // 4. Kill first mob
-        // 5. Interact with additional mob (that is targeted) actually
-        //    interacts with Original mob as soft interact that was
-        //    established before disabling soft interact is not cleared
-        // - Possible solutions
-        //   Option 1 - Completely disable soft interact
-        //   Option 2 -
-        //      1. Disable soft interact
-        //      2. clear target
-        //      3. target last target
-        //   Option 3 - 
-        //      1. Enable soft interact on entering loot
-        //      2. Disable soft interact after leaving skinning
+        navigation.ResetApproachEscape();
+
         input.PressEnableSoftInteract();
         wait.Update();
     }
@@ -378,12 +340,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                         input.PressClearTarget();
                         wait.Update();
                         stopMoving.Stop();
-                        // Fire EvadeBlacklistEvent(0) — guid=0 signals ghost combat escape
-                        // (no specific mob to blacklist). GoapAgent handles guid=0 by pressing
-                        // N2 ("blacklist target: 0"), setting _evadeLeaderWaiting so FRG runs,
-                        // and starting a 15s recovery window. The leader continues the route;
-                        // the assist receives the chat message, fires EvadeBlacklistEvent(0)
-                        // locally, and follows the leader via FollowFocusGoal.
                         SendGoapEvent(new EvadeBlacklistEvent(0));
                         return;
                     }
@@ -477,8 +433,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                             input.PressClearTarget();
                             wait.Update();
                             stopMoving.Stop();
-                            input.TurnRandomDir(500 + Random.Shared.Next(500));
-                            wait.Update();
+                            // Use pather-based escape: project waypoint along approach vector
+                            // (10-30 yards, incrementing by 1) to route around the obstacle.
+                            // Falls back to random turn/jump if all pather attempts fail.
+                            navigation.TryUnstuck();
                             _stuckApproachingActive = false;
                             _stuckApproachingSinceUtc = DateTime.MinValue;
                             _stuckApproachingDamageSnapshot = 0;
@@ -541,12 +499,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if (bits.FocusTarget() && bits.Focus_Combat()
                 && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()
-                // Do NOT re-acquire a target that is evading — the assist may not have
-                // cleared it yet (e.g. if the N2 broadcast failed to parse), and switching
-                // to the focus's target would re-acquire the evading mob and loop forever.
                 && !combatLog.EvadeMobs.Contains(playerReader.FocusTargetGuid)
                 && !playerReader.IsIgnored(playerReader.FocusTargetGuid))
-            // Doesn't always seem to work && bits.FocusTarget_Alive()
             {
                 logger.LogInformation("Targeting target of focus as they are in combat");
 
@@ -580,15 +534,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation($"playerReader.PTCurrent (Rage): {playerReader.PTCurrent()}");
         }
         
-        
-        // Check to see if our target guid changed since the
-        // last time we ran combat actions
         if(playerReader.TargetGuid != lastTargetGuid)
         {
             targetGuidChanged = true;
         }
 
-        // After comparison update lastTargetGuid to current target.
         lastTargetGuid = playerReader.TargetGuid;
 
         logger.LogInformation($"targetGuidCHange: {targetGuidChanged}");
@@ -653,13 +603,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
             }
 
-            // TODO Do we need Pet check to be put here? 
             if ((classConfig.Mode == Mode.AssistFocus
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
                 && ((bits.Focus_Combat() && bits.FocusTarget_Hostile() && bits.FocusTarget_Alive()
-                     // does not seem to work corretly all of the time && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
                      && playerReader.TargetGuid != playerReader.FocusTargetGuid
-                     // Ensure our current target isn't targeting us
                      && !playerReader.TargetsMe())
                    )
                 )
@@ -668,11 +615,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                      && (!bits.Target() || bits.Target_Dead()) && bits.FocusTarget() 
                      && bits.FocusTarget_Alive() && bits.Focus_Combat() 
                      && bits.FocusTarget_Hostile()
-                     // Do NOT switch to the focus's target if it is an evading mob —
-                     // the assist may still have it targeted, causing an infinite evade loop.
                      && !combatLog.EvadeMobs.Contains(playerReader.FocusTargetGuid)
                      && !playerReader.IsIgnored(playerReader.FocusTargetGuid)
-                   // doesn't always seem to work correctly && bits.FocusTarget_Alive()  && bits.FocusTarget_Combat() 
                    )
                 )
             {
@@ -710,8 +654,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 return;
             }
 
-            // Sometimes a mob will attack our assist while the party leader
-            // is pulling a different mob.
             if (classConfig.Mode == Mode.AssistFocus
                 && playerReader.OutOfCombatRange()
                 && !playerReader.TargetsMe()
@@ -719,11 +661,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
                 && playerReader.TargetGuid == playerReader.FocusTargetGuid)
             {
-                // We are taking damage, we are out of combat range,
-                // and our target is the same as the focus, we probably
-                // were attacked while the focus was pulling / approaching
-                // and will not be able to get into combat range with the focus's target
-                // let's find and attack the mob that is attacking us.
                 logger.LogInformation("Update: AssistFocus Taking damage but not within combat range of focus target, checking who is targeting me.");
                 CheckTargetsTargetingMe();
                 return;
@@ -736,29 +673,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             foundValidCrowdControlAction = false;
             successfulCast = false;
 
-
-            // Use specific raid icons to force attacking of a non focus target
-            /*
-            if (classConfig.Mode == Mode.AssistFocus
-                && classConfig.RaidIconsToAttackWithoutFocus.Length > 0
-                && !playerReader.hasSkullIcon
-                && !keyAction.CrowdControl)
-            {
-                //logger.LogInformation("CombatGoals: Check for RaidIconsToAttackWithoutFocus");
-                
-                if (!CheckNonFocusAttack())
-                {
-                    //logger.LogInformation("CombatGoals: Didn't find a RaidIconToAttackWithoutFocus");
-                    wait.Update();
-                    input.PressTargetFocus();
-                    input.PressTargetOfTarget();
-                    wait.Update();
-                }
-                
-            }
-            */
-
-            /* Use the triangle icon to prevent combat to a target */
             if (classConfig.Mode == Mode.AssistFocus
                 && playerReader.hasTriangleIcon())
             {
@@ -767,7 +681,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 return;
             }
 
-            /* Use the skull icon to force melee range */
             if (classConfig.Mode == Mode.AssistFocus
                 && playerReader.hasSkullIcon()
                 && !playerReader.IsInMeleeRange()
@@ -787,11 +700,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if (keyAction.CrowdControl)
             {
                 crowdControlAction = keyAction.CrowdControl;
-                //logger.LogInformation("Checking Crowd Control");
                 if (!CheckCrowdControl(keyAction))
                 {
-                    //logger.LogInformation("No valid crowd control mobs found for this action.");
-
                     if (playerReader.TargetGuid != playerReader.FocusTargetGuid
                         || !bits.Target() || (bits.Target() && bits.Target_Dead()))
                     {
@@ -821,9 +731,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 }
             }
 
-            //logger.LogInformation("Update keyAction.CanRun(): " + keyAction.CanRun());
-
-            // We Don't have the correct kind of crowd control continue on 
             if ((currentTargetHasRaidIcon && !keyAction.CrowdControl) ||
                 (currentTargetHasRaidIcon && keyAction.CrowdControl && !foundValidCrowdControlAction))
             {
@@ -834,14 +741,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 continue;
             }
 
-            //logger.LogInformation("Update currentTargetHasRaidIcon #2: " + currentTargetHasRaidIcon);
-
             bool interrupt() => bits.Target_Alive() && keyAction.CanBeInterrupted();
 
             if (castingHandler.CastIfReady(keyAction, interrupt))
             {
                 if(keyAction.Name.Equals("Approach"))
                 {
+                    // Record position for pather-based stuck escape direction tracking.
+                    navigation.RecordApproachPosition(playerReader.WorldPos);
                     consecutiveApproach = consecutiveApproach + 1;
                 }
                 else
@@ -849,7 +756,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     consecutiveApproach = 0; 
                 }
                 
-                //logger.LogInformation("CombatGoals: Successful Cast");
                 successfulCast = true;
                 castOnTargetThisUpdate = true;
                 consecutiveNoAction = 0;
@@ -864,8 +770,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
             }
 
-            // Safety valve - if we accidentally target a friendly member we should,
-            // clear target.
             if ((!bits.Target_Hostile()
                  || bits.Target_PlayerControlled()
                  || bits.Target_Player()
@@ -891,20 +795,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("castOnTargetThisUpdate: " + castOnTargetThisUpdate);
             logger.LogInformation("targetGuidChanged: " + targetGuidChanged);
         }
-        
-
-        /* DISABLE THIS FOR NOW TO SEE IF IT IS REALLY NEEDED
-        if(bits.TargetTarget_PlayerOrPet() && !castOnTargetThisUpdate && !targetGuidChanged
-            && playerReader.TargetGuid == playerReader.FocusTargetGuid)
-        {
-            logger.LogInformation("bits.TargetTarget_PlayerOrPet(): " + bits.TargetTarget_PlayerOrPet()
-                + "playerReader.TargetGuid == playerReader.FocusTargetGuid"
-                + "!castOnTargetThisUpdate: " + !castOnTargetThisUpdate
-                + "!targetGuidChanged: " + !targetGuidChanged);
-            input.PressInteract();
-            wait.Update();
-        }
-        */
 
         if (crowdControlAction && successfulCast)
         {
@@ -919,9 +809,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             consecutiveNoAction = consecutiveNoAction + 1;
         }
 
-        // TODO Could this be moved further down?
-        // If we are a partyleader or assistfocus we don't want to try to loot/soft interact if our focus 
-        // is still in combat
         if (!bits.Target_Hostile() && !bits.Target_Alive() && !bits.Combat() 
             && !bits.Focus_Combat() && !playerReader.PetTarget() 
             && classConfig.Loot && bits.SoftInteract_Enabled())
@@ -930,11 +817,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             DealWithSoftInteract();
         }
 
-
-        // TODO make sure before picking up ANY new target that
-        // 1 of Us, Focus, or Pet is in combat with a target
-        // trying to clean up picking up extra targets when they weren't
-        // actually in combat with us
         if (!bits.Target() || (!bits.Target_Combat() && combatLog.DamageTakenCount() > 0) || (bits.Target() && bits.Target_Dead()))
         {
             logger.LogInformation("Lost target!");
@@ -943,7 +825,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 || (bits.Pet())
                 || ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus) 
                       && bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()))
-            // doesn't seem to work correcly all of the time && bits.FocusTarget_Alive()  && bits.FocusTarget_Combat()
             {
                 if (bits.Target() && bits.Target_Dead())
                 {
@@ -975,9 +856,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     private void FindPossibleThreats()
     {
-        // if (bits.Pet_Defensive())
-        // Pet can still get attacked even if they are passive
-        // so maybe this should jsut check if there is a pet at all?
         if (bits.Pet())
         {
             float elapsedPetFoundTarget = wait.Until(CastingHandler.GCD,
@@ -988,9 +866,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 logger.LogWarning("Pet not found target!");
                 input.PressClearTarget();
-                // remove early return so we can check for targets on
-                // our focus or other hostile targets near us
-                // return;
             } else if(elapsedPetFoundTarget > 0)
             {
                 ResetCooldowns();
@@ -1017,12 +892,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             && bits.Focus_Combat() && bits.FocusTarget() 
             && bits.FocusTarget_Hostile()
             && bits.FocusTarget_Alive()
-            // Do NOT re-acquire via focus if the focus's target is an evading mob.
-            // This is the path that caused the infinite evade loop in FindPossibleThreats.
             && !combatLog.EvadeMobs.Contains(playerReader.FocusTargetGuid)
             && !playerReader.IsIgnored(playerReader.FocusTargetGuid)
             )
-        // seems to be false incorrectly sometimes && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
         {
             logger.LogWarning($"Found new combat target of focus.");
             logger.LogInformation("bits.Focus_Combat(): " + bits.Focus_Combat());
@@ -1030,7 +902,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
             logger.LogInformation("bits.FocusTarget_Combat(): " + bits.FocusTarget_Combat());
             logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
-
 
             ResetCooldowns();
 
@@ -1064,12 +935,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
-            // Do NOT re-acquire an evading or ignored mob. Check this first, before
-            // entering the Target_Combat block. Re-fire EvadeBlacklistEvent so the full
-            // evade escape machinery restarts: evadeRecovery=true blocks CombatGoal,
-            // presses N2 to notify the assist, sets _evadeLeaderWaiting so FRG runs,
-            // and the leader moves away along the route. Simply clearing and waiting
-            // is not enough — combat won't drop while we're still in range of the mob.
             if (combatLog.EvadeMobs.Contains(playerReader.TargetGuid)
                 || playerReader.IsIgnored(playerReader.TargetGuid))
             {
@@ -1098,7 +963,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 wait.Update();
                 return;
             } else if(bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Hostile() && bits.FocusTarget_Alive())
-            // doesn't seem to always work correctly && bits.FocusTarget_Alive() && bits.FocusTarget_Combat()
             {
                 logger.LogWarning("Found new target of focus!");
                 ResetCooldowns();
@@ -1111,7 +975,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 return;
             }
 
-
             logger.LogWarning("Dont pull non-hostile target!");
             input.PressClearTarget();
             wait.Update();
@@ -1120,18 +983,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         logger.LogWarning($"Waiting for target to exists or lose combat. Possible threats {combatLog.DamageTakenCount()}!");
         wait.Till(CastingHandler.GCD * 2,
             () => bits.Target_Alive() || !bits.Combat());
-
-        /* DISABLE THIS AS IT SEEMS TO CAUSE ISSUES WHEN
-         * pulling and a mob attacks from behind
-        if (classConfig.Mode == Mode.AssistFocus || classConfig.Mode == Mode.PartyLeader)
-        {
-            // Added this so we can hopefully pickup the target
-            // later if it is in combat with us
-            logger.LogInformation("CHECK - Added clear target to exit of FindPossibleThreats");
-            input.PressClearTarget();
-            wait.Update();
-        }
-        */
     }
 
     public bool CheckTargetsTargetingMe()
@@ -1139,12 +990,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         int originalTargetGuid = playerReader.TargetGuid;
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
 
-        // Add current target
         unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
-
-        /* Tab through all nearby hostile units recording their GUID
-         * if we find a mob targeting me keep it targeted  
-         */
 
         wait.Update();
 
@@ -1185,13 +1031,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         int originalTargetGuid = playerReader.TargetGuid;
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
         
-        // Add current target
         unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
         
-        /* Tab through all nearby hostile units recording their GUID
-         * if we find a mob with a raid icon add it to list of targets  
-         */
-
         wait.Update();
 
         for (int x = 0; x < 10; x++)
@@ -1202,13 +1043,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if (bits.Target_Alive() && item.CanRun())
             {
-                //logger.LogInformation("CheckCrowdControl target alive and CanRun true");
                 return true;
             }
 
             if (unitGuidDictonary.ContainsKey(playerReader.TargetGuid))
             {
-                //logger.LogInformation("CheckCrowdControl Found the same target as we saw before break");
                 break;
             }
 
@@ -1217,7 +1056,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         if (playerReader.TargetGuid != originalTargetGuid)
         {
-            //logger.LogInformation("CheckCrowdControl exiting function, targetGuid and originalTargetGuid not the same, clear target!");
             wait.Update();
             input.PressClearTarget();
             wait.Update();
@@ -1229,12 +1067,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     public bool CheckNonFocusAttack()
     {
         Dictionary<int, int> unitGuidDictonary = new Dictionary<int, int>();
-        // Add current target
         unitGuidDictonary.Add(playerReader.TargetGuid, playerReader.TargetRaidIcon());
-
-        /* Tab through all nearby hostile units recording their GUID
-         * if we find a mob with a raid icon add it to list of targets  
-         */
 
         wait.Update();
 
@@ -1244,9 +1077,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             waitForTargetChange();
 
             if (bits.Target_Alive() && classConfig.RaidIconsToAttackWithoutFocus
-    .Contains(playerReader.TargetRaidIcon()))
+                .Contains(playerReader.TargetRaidIcon()))
             {
-                //logger.LogInformation("CombatGoals: Found RaidIconsToAttackWithoutFocus");
                 return true;
             }
 

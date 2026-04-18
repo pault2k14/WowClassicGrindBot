@@ -119,6 +119,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
         stuckDetector.Reset();
+        navigation.ResetApproachEscape();
 
         if (mountHandler.IsMounted())
         {
@@ -148,6 +149,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
+        navigation.ResetApproachEscape();
+
         if (requiresNpcNameFinder)
         {
             npcNameTargeting.ChangeNpcType(NpcNames.None);
@@ -226,7 +229,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             if (blacklistGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
 
-            if(!bits.AutoFollow())
+            if (!bits.AutoFollow())
             {
                 // Set AssistRequestReturn=true immediately so FollowFocusGoal is
                 // selectable right now, without waiting ~1.5s for the N5 chat echo.
@@ -236,7 +239,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
                 // AssistRequestReturn=true on both bots, selects FollowFocusGoal on assist.
                 input.PressAssistCantFollow();
             }
-            
             return;
         }
 
@@ -267,8 +269,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         {
             input.PressStopAttack();
             input.PressClearTarget();
-            Log("Pull taking too long. Clear target and face away!");
-            input.TurnRandomDir(1000);
+            Log("Pull taking too long. Clear target and attempting unstuck.");
+            navigation.TryUnstuck();
             return;
         }
 
@@ -364,6 +366,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
         if (!bits.SoftInteract() || EligibleEnemySoftTargetExists())
         {
+            navigation.RecordApproachPosition(playerReader.WorldPos);
             input.PressApproach();
             wait.Update();
         }
@@ -375,7 +378,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         }
 
         if (!stuckDetector.IsMoving())
-            stuckDetector.Update();
+            navigation.TryUnstuck();
     }
 
     private void ConditionalApproach()

@@ -133,6 +133,22 @@ public sealed partial class Navigation : IDisposable
     public bool HasLastSafeAnchor => lastSafeAnchorW != default;
     public Vector3 LastSafeAnchorW => lastSafeAnchorW;
 
+    // --- Approach-vector pather escape ---
+    // Goals call RecordApproachPosition() each time they press the Approach/Interact key.
+    // Navigation keeps the position only when genuine forward progress has been made from it.
+    // When TryUnstuck() is called, Navigation projects waypoints along the approach vector
+    // starting at 10 world units (yards) and incrementing by 1 up to 30, trying to find a
+    // pather path that routes around the obstacle. Falls back to stuckDetector.Update() if
+    // all 21 attempts fail.
+    private const float ApproachEscapeStartYards = 10f;
+    private const float ApproachEscapeEndYards = 30f;
+    private const float ApproachEscapeProgressMinW = 0.75f; // min movement to keep a recorded position
+    private Vector3 _approachRecordedW;       // last approach position where progress was confirmed
+    private Vector3 _approachPrevRecordedW;   // position before that, for direction vector
+    private bool _approachEscapeActive;
+    private float _approachEscapeCurrentYards;
+    private DateTime _approachEscapeLastAttemptUtc = DateTime.MinValue;
+
     // Backoff to prevent request spam on repeated blacklist rejections
     private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
     private DateTime noPathCooldownUntilUtc = DateTime.MinValue;
@@ -1083,6 +1099,161 @@ public sealed partial class Navigation : IDisposable
     public void ResetStuckParameters()
     {
         stuckDetector.Reset(StuckOwnerId);
+    }
+
+    /// <summary>
+    /// Called by goals each time they press the Approach/Interact key.
+    /// Navigation keeps the position only when genuine forward progress has been
+    /// made since the last recorded position — this gives a reliable approach
+    /// direction vector for pather-based stuck escape.
+    /// </summary>
+    public void RecordApproachPosition(Vector3 worldPos)
+    {
+        if (_approachRecordedW == default)
+        {
+            _approachRecordedW = worldPos;
+            return;
+        }
+
+        float moved = worldPos.WorldDistanceXYTo(_approachRecordedW);
+        if (moved >= ApproachEscapeProgressMinW)
+        {
+            _approachPrevRecordedW = _approachRecordedW;
+            _approachRecordedW = worldPos;
+        }
+    }
+
+    /// <summary>
+    /// Called by goals when their own stuck detection fires (e.g. !stuckDetector.IsMoving()).
+    /// Attempts to find a pather path by projecting a waypoint along the approach vector,
+    /// starting at 10 yards and incrementing by 1 up to 30 yards (21 attempts).
+    /// Each call advances one step — returns true while an escape attempt is in progress
+    /// so the goal knows to skip its own unstuck handling.
+    /// Falls back to stuckDetector.Update() once all attempts are exhausted.
+    /// </summary>
+    public bool TryUnstuck(CancellationToken token = default)
+    {
+        var now = DateTime.UtcNow;
+
+        // Throttle to one attempt per tick (~250ms) so the pather has time to respond.
+        if ((now - _approachEscapeLastAttemptUtc).TotalMilliseconds < 200)
+            return _approachEscapeActive;
+
+        _approachEscapeLastAttemptUtc = now;
+
+        // If navigation became active since the last attempt, the pather found a path.
+        if (_approachEscapeActive && active)
+        {
+            logger.LogInformation(
+                $"[NAV] ApproachEscape: path found at {_approachEscapeCurrentYards:0}y — navigating.");
+            _approachEscapeActive = false;
+            return true;
+        }
+
+        // Initialise or advance the attempt.
+        if (!_approachEscapeActive)
+        {
+            _approachEscapeActive = true;
+            _approachEscapeCurrentYards = ApproachEscapeStartYards;
+        }
+        else
+        {
+            _approachEscapeCurrentYards += 1f;
+        }
+
+        if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
+        {
+            // All pather attempts exhausted — fall back to stuckDetector.Update().
+            logger.LogWarning(
+                "[NAV] ApproachEscape: all pather attempts exhausted — falling back to random unstuck.");
+            _approachEscapeActive = false;
+            _approachEscapeCurrentYards = ApproachEscapeStartYards;
+            stuckDetector.SetTargetLocation(StuckOwnerId, _approachRecordedW == default
+                ? Nav2D(playerReader.WorldPos)
+                : _approachRecordedW);
+            stuckDetector.Update(StuckOwnerId, token);
+            return false;
+        }
+
+        Vector3 projection = ProjectApproachEscapeTarget(_approachEscapeCurrentYards);
+        logger.LogInformation(
+            $"[NAV] ApproachEscape: attempt {_approachEscapeCurrentYards:0}y -> {projection}");
+
+        // SetSingleWaypoint sets active=true and enqueues the pather request.
+        // On the next TryUnstuck() call we check if 'active' is still true (path received)
+        // or false (path failed / no result yet) and advance accordingly.
+        SetSingleWaypoint(projection);
+        return true;
+    }
+
+    /// <summary>
+    /// Resets approach escape state. Call when the goal exits or target changes.
+    /// </summary>
+    public void ResetApproachEscape()
+    {
+        _approachEscapeActive = false;
+        _approachEscapeCurrentYards = ApproachEscapeStartYards;
+        _approachRecordedW = default;
+        _approachPrevRecordedW = default;
+        _approachEscapeLastAttemptUtc = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Projects a world-space waypoint along the approach vector by the given number
+    /// of world units (yards) beyond the current player position.
+    /// Uses _approachPrevRecordedW → _approachRecordedW as the direction vector.
+    /// Falls back to current facing direction if the approach vector is degenerate.
+    /// </summary>
+    private Vector3 ProjectApproachEscapeTarget(float yards)
+    {
+        Vector3 currentW = Nav2D(playerReader.WorldPos);
+
+        float dx, dy;
+
+        if (_approachPrevRecordedW != default && _approachRecordedW != default)
+        {
+            // Two recorded approach positions — use their direction vector.
+            dx = _approachRecordedW.X - _approachPrevRecordedW.X;
+            dy = _approachRecordedW.Y - _approachPrevRecordedW.Y;
+        }
+        else if (_approachRecordedW != default)
+        {
+            // Only one recorded position — use current pos as the direction endpoint.
+            dx = currentW.X - _approachRecordedW.X;
+            dy = currentW.Y - _approachRecordedW.Y;
+        }
+        else if (_chaseProgTarget != default)
+        {
+            // No approach positions recorded (e.g. Navigation-driven movement without
+            // Approach key presses) — use the current chase target as the direction.
+            // This gives TryUnstuck a meaningful projection for goals like FFG whose
+            // navigation is driven entirely by Navigation internals.
+            dx = _chaseProgTarget.X - currentW.X;
+            dy = _chaseProgTarget.Y - currentW.Y;
+            logger.LogInformation("[NAV] ApproachEscape: no recorded approach positions — using chase target for direction.");
+        }
+        else
+        {
+            // No recorded positions and no chase target — fall back to facing direction.
+            float facing = playerReader.Direction;
+            dx = Cos(facing);
+            dy = Sin(facing);
+            logger.LogInformation("[NAV] ApproachEscape: no direction data — using facing direction.");
+        }
+
+        float len = Sqrt(dx * dx + dy * dy);
+        if (len < 0.01f)
+        {
+            float facing = playerReader.Direction;
+            dx = Cos(facing);
+            dy = Sin(facing);
+            len = 1f;
+        }
+
+        return new Vector3(
+            currentW.X + (dx / len) * yards,
+            currentW.Y + (dy / len) * yards,
+            currentW.Z);
     }
 
     private void LogRefill(string msg)

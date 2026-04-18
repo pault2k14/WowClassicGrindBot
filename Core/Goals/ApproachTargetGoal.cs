@@ -127,12 +127,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         approachStart = GetTimestamp();
         SetNextStuckTimeCheck();
 
+        navigation.ResetApproachEscape();
         input.PressDisableSoftInteract();
         wait.Update();
     }
 
     public override void OnExit()
     {
+        navigation.ResetApproachEscape();
         // Temporarily disable due to navigation supression updates
         input.StopForward(false);
     }
@@ -193,7 +195,6 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 // AssistRequestReturn=true on both bots, selects FollowFocusGoal on assist.
                 input.PressAssistCantFollow();
             }
-
             return;
         }
 
@@ -313,16 +314,16 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 // so we should approach
                 if (foundCrowdControlAction || classConfig.AssistApproach)
                 {
+                    navigation.RecordApproachPosition(playerReader.WorldPos);
                     input.PressApproach();
                     wait.Update();
                 }
-                // Either the target did not have a raid icon or none
-                // of our combat actions had a matching raid icon requirement
                 else
                 {
                     input.PressTargetFocus();
                     input.PressTargetOfTarget();
                     wait.Update();
+                    navigation.RecordApproachPosition(playerReader.WorldPos);
                     input.PressApproach();
                     wait.Update();
                 }
@@ -349,6 +350,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     return;
                 }
                 
+                navigation.RecordApproachPosition(playerReader.WorldPos);
                 input.PressApproach();
                 wait.Update();
             }
@@ -400,10 +402,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     }
                 }
 
-                Log($"Seems stuck! Clear Target.");
+                Log($"Seems stuck! Attempting pather-based escape.");
 
                 input.PressClearTarget();
-                input.TurnRandomDir(250 + Random.Shared.Next(250));
+                navigation.TryUnstuck();
                 wait.Update();
 
                 return;
