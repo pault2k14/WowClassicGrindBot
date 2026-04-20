@@ -366,7 +366,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
         // If a pather-based escape is in progress, don't press Approach —
         // let Navigation drive the character out of the obstacle uninterrupted.
-        if (navigation.TryUnstuck())
+        if (navigation.IsApproachEscapeActive)
             return;
 
         if (!bits.SoftInteract() || EligibleEnemySoftTargetExists())

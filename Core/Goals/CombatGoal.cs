@@ -749,7 +749,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 {
                     // If a pather-based escape is in progress, don't press Approach —
                     // let Navigation drive the character out of the obstacle uninterrupted.
-                    if (navigation.TryUnstuck())
+                    if (navigation.IsApproachEscapeActive)
                         return;
 
                     // Record position for pather-based stuck escape direction tracking.

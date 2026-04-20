@@ -133,6 +133,13 @@ public sealed partial class Navigation : IDisposable
     public bool HasLastSafeAnchor => lastSafeAnchorW != default;
     public Vector3 LastSafeAnchorW => lastSafeAnchorW;
 
+    /// <summary>
+    /// True while a pather-based approach escape is actively in progress.
+    /// Goals should check this before pressing Approach/Interact to avoid
+    /// interrupting Navigation while it is routing around an obstacle.
+    /// </summary>
+    public bool IsApproachEscapeActive => _approachEscapeActive;
+
     // --- Approach-vector pather escape ---
     // Goals call RecordApproachPosition() each time they press the Approach/Interact key.
     // Navigation keeps the position only when genuine forward progress has been made from it.
