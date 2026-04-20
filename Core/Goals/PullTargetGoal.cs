@@ -269,9 +269,17 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (PullDurationMs > MAX_PULL_DURATION)
         {
             input.PressStopAttack();
-            input.PressClearTarget();
-            Log("Pull taking too long. Clear target and attempting unstuck.");
-            navigation.TryUnstuck();
+
+            // Only clear the target if no escape is already in progress.
+            // Clearing mid-escape causes FRG to take over and compete with
+            // the escape navigation.
+            if (!navigation.IsApproachEscapeActive)
+            {
+                input.PressClearTarget();
+                navigation.TryUnstuck();
+                Log("Pull taking too long. Clear target and attempting unstuck.");
+            }
+
             return;
         }
 

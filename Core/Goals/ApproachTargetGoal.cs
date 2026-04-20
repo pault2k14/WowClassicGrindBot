@@ -426,12 +426,18 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (ApproachDurationMs > MAX_APPROACH_DURATION_MS)
         {
-            logger.LogWarning("Too long time. Clear Target. Attempting pather escape.");
+            logger.LogWarning("Too long time. Attempting pather escape.");
 
-            input.PressClearTarget();
-            navigation.TryUnstuck();
+            // Only clear the target if no escape is already in progress.
+            // Clearing mid-escape causes FRG to take over and compete with
+            // the escape navigation. If escape is active, just keep driving it.
+            if (!navigation.IsApproachEscapeActive)
+            {
+                input.PressClearTarget();
+                navigation.TryUnstuck();
+            }
+
             wait.Update();
-
             return;
         }
 
@@ -489,8 +495,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         {
             Log($"Going away from the target! {initialMinRange} < {playerReader.MinRange()}");
 
-            input.PressClearTarget();
-            wait.Update();
+            // Don't clear the target during an active pather escape — distance increases
+            // are expected while the character takes a detour around an obstacle.
+            // Once the escape completes, this check fires normally if the mob moved away.
+            if (!navigation.IsApproachEscapeActive)
+            {
+                input.PressClearTarget();
+                wait.Update();
+            }
         }
     }
 
