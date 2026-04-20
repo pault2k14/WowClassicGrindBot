@@ -365,6 +365,14 @@ public sealed partial class Navigation : IDisposable
         stopMoving.Stop();
         input.StopForward(true);
 
+        // If this was the completion of a pather-based approach escape, clear
+        // the escape state so goals resume normal approach on the next tick.
+        if (_approachEscapeActive)
+        {
+            logger.LogInformation("[NAV] ApproachEscape: escape navigation complete — resuming normal approach.");
+            _approachEscapeActive = false;
+        }
+
         ResetStuckParameters();
         ResetNoProgressWatchdog();
         ResetChaseProgressWatchdog();
@@ -1140,22 +1148,19 @@ public sealed partial class Navigation : IDisposable
     /// </summary>
     public bool TryUnstuck(CancellationToken token = default)
     {
-        // If escape is already active, check whether Navigation is still running it.
+        // If escape is already active, Navigation is executing the route.
+        // StopAndResetAtDestination() will clear _approachEscapeActive when the
+        // route completes. If active is false, navigation was stopped externally.
         if (_approachEscapeActive)
         {
-            if (active)
+            if (!active)
             {
-                // Navigation is still executing the escape route — stay blocked.
-                return true;
-            }
-            else
-            {
-                // Navigation finished the escape route — clear state and let
-                // the goal resume normal approach.
-                logger.LogInformation("[NAV] ApproachEscape: escape navigation complete — resuming normal approach.");
+                // Navigation stopped externally (e.g. Stop() called) — clear escape.
+                logger.LogInformation("[NAV] ApproachEscape: navigation stopped externally — clearing escape.");
                 ResetApproachEscape();
                 return false;
             }
+            return true;
         }
 
         var now = DateTime.UtcNow;
