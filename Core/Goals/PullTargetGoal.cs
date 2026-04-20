@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using SharedLib.NpcFinder;
 
 using System;
+using System.Threading;
 
 using static System.Diagnostics.Stopwatch;
 
@@ -364,10 +365,15 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (input.Approach.OnCooldown())
             return;
 
-        // If a pather-based escape is in progress, don't press Approach —
-        // let Navigation drive the character out of the obstacle uninterrupted.
+        // If a pather-based escape is in progress, drive Navigation rather than
+        // pressing Approach. TryUnstuck() checks for completion and clears the
+        // escape when the route finishes so normal approach can resume.
         if (navigation.IsApproachEscapeActive)
+        {
+            navigation.Update(CancellationToken.None);
+            navigation.TryUnstuck();
             return;
+        }
 
         if (!bits.SoftInteract() || EligibleEnemySoftTargetExists())
         {

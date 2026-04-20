@@ -747,10 +747,15 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 if(keyAction.Name.Equals("Approach"))
                 {
-                    // If a pather-based escape is in progress, don't press Approach —
-                    // let Navigation drive the character out of the obstacle uninterrupted.
+                    // If a pather-based escape is in progress, drive Navigation rather than
+                    // pressing Approach. TryUnstuck() checks for completion and clears the
+                    // escape when the route finishes so normal approach can resume.
                     if (navigation.IsApproachEscapeActive)
+                    {
+                        navigation.Update(CancellationToken.None);
+                        navigation.TryUnstuck();
                         return;
+                    }
 
                     // Record position for pather-based stuck escape direction tracking.
                     navigation.RecordApproachPosition(playerReader.WorldPos);

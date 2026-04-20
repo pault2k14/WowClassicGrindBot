@@ -476,6 +476,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
             // Check if the assist is stuck on terrain.
             TickIdleStuckDetection();
+
+            // If a pather-based escape was initiated by TickIdleStuckDetection,
+            // drive Navigation this tick and check for completion.
+            if (navigation.IsApproachEscapeActive)
+            {
+                navigation.Update(CancellationToken.None);
+                navigation.TryUnstuck();
+                return;
+            }
+
             // If the assist already gave up navigating and asked the leader to come back
             // (_wantsLeaderToReturn=true), do NOT send position requests (N8) again —
             // the leader should be on their way and we must stay put and wait.

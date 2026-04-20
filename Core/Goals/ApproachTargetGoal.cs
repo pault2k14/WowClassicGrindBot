@@ -3,6 +3,7 @@ using Core.GOAP;
 using Microsoft.Extensions.Logging;
 
 using System;
+using System.Threading;
 
 using static System.Diagnostics.Stopwatch;
 
@@ -265,9 +266,15 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (!input.Approach.OnCooldown() && (!bits.SoftInteract() || HasValidSoftInteract()))
         {
-            // If a pather-based escape is in progress, let Navigation drive movement.
+            // If a pather-based escape is in progress, drive Navigation rather than
+            // pressing Approach. TryUnstuck() checks for completion and clears the
+            // escape when the route finishes so normal approach can resume.
             if (navigation.IsApproachEscapeActive)
+            {
+                navigation.Update(CancellationToken.None);
+                navigation.TryUnstuck();
                 return;
+            }
 
             logger.LogInformation("!input.Approach.OnCooldown(): " + !input.Approach.OnCooldown());
             logger.LogInformation("!bits.SoftInteract(): " + !bits.SoftInteract());
