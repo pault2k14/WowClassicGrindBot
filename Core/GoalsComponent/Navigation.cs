@@ -1140,41 +1140,40 @@ public sealed partial class Navigation : IDisposable
     /// </summary>
     public bool TryUnstuck(CancellationToken token = default)
     {
+        // If escape is already active, check whether Navigation is still running it.
+        if (_approachEscapeActive)
+        {
+            if (active)
+            {
+                // Navigation is still executing the escape route — stay blocked.
+                return true;
+            }
+            else
+            {
+                // Navigation finished the escape route — clear state and let
+                // the goal resume normal approach.
+                logger.LogInformation("[NAV] ApproachEscape: escape navigation complete — resuming normal approach.");
+                ResetApproachEscape();
+                return false;
+            }
+        }
+
         var now = DateTime.UtcNow;
 
-        // Throttle to one attempt per tick (~250ms) so the pather has time to respond.
+        // Throttle to one new attempt per 200ms so the pather has time to respond.
         if ((now - _approachEscapeLastAttemptUtc).TotalMilliseconds < 200)
-            return _approachEscapeActive;
+            return false;
 
         _approachEscapeLastAttemptUtc = now;
 
-        // If navigation became active since the last attempt, the pather found a path.
-        if (_approachEscapeActive && active)
-        {
-            logger.LogInformation(
-                $"[NAV] ApproachEscape: path found at {_approachEscapeCurrentYards:0}y — navigating.");
-            _approachEscapeActive = false;
-            return true;
-        }
-
-        // Initialise or advance the attempt.
-        if (!_approachEscapeActive)
-        {
-            _approachEscapeActive = true;
-            _approachEscapeCurrentYards = ApproachEscapeStartYards;
-        }
-        else
-        {
-            _approachEscapeCurrentYards += 1f;
-        }
+        _approachEscapeCurrentYards += 1f;
 
         if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
         {
             // All pather attempts exhausted — fall back to stuckDetector.Update().
             logger.LogWarning(
                 "[NAV] ApproachEscape: all pather attempts exhausted — falling back to random unstuck.");
-            _approachEscapeActive = false;
-            _approachEscapeCurrentYards = ApproachEscapeStartYards;
+            ResetApproachEscape();
             stuckDetector.SetTargetLocation(StuckOwnerId, _approachRecordedW == default
                 ? Nav2D(playerReader.WorldPos)
                 : _approachRecordedW);
@@ -1187,9 +1186,10 @@ public sealed partial class Navigation : IDisposable
             $"[NAV] ApproachEscape: attempt {_approachEscapeCurrentYards:0}y -> {projection}");
 
         // SetSingleWaypoint sets active=true and enqueues the pather request.
-        // On the next TryUnstuck() call we check if 'active' is still true (path received)
-        // or false (path failed / no result yet) and advance accordingly.
+        // On the next TryUnstuck() call active will still be true, keeping the goal blocked
+        // until Navigation actually finishes following the escape route.
         SetSingleWaypoint(projection);
+        _approachEscapeActive = true;
         return true;
     }
 
@@ -1199,7 +1199,9 @@ public sealed partial class Navigation : IDisposable
     public void ResetApproachEscape()
     {
         _approachEscapeActive = false;
-        _approachEscapeCurrentYards = ApproachEscapeStartYards;
+        // Pre-incremented in TryUnstuck before use, so reset to Start-1
+        // so the first attempt fires at exactly ApproachEscapeStartYards.
+        _approachEscapeCurrentYards = ApproachEscapeStartYards - 1f;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
         _approachEscapeLastAttemptUtc = DateTime.MinValue;

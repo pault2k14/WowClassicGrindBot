@@ -126,8 +126,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         approachStart = GetTimestamp();
         SetNextStuckTimeCheck();
-
         navigation.ResetApproachEscape();
+
         input.PressDisableSoftInteract();
         wait.Update();
     }
@@ -265,8 +265,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (!input.Approach.OnCooldown() && (!bits.SoftInteract() || HasValidSoftInteract()))
         {
-            // If a pather-based escape is in progress, don't press Approach —
-            // let Navigation drive the character out of the obstacle uninterrupted.
+            // If a pather-based escape is in progress, let Navigation drive movement.
             if (navigation.IsApproachEscapeActive)
                 return;
 
@@ -407,7 +406,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     }
                 }
 
-                Log($"Seems stuck! Attempting pather-based escape.");
+                Log($"Seems stuck! Clear Target.");
 
                 input.PressClearTarget();
                 navigation.TryUnstuck();
@@ -419,10 +418,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (ApproachDurationMs > MAX_APPROACH_DURATION_MS)
         {
-            logger.LogWarning("Too long time. Clear Target. Turn away.");
+            logger.LogWarning("Too long time. Clear Target. Attempting pather escape.");
 
             input.PressClearTarget();
-            input.TurnRandomDir(250 + Random.Shared.Next(250));
+            navigation.TryUnstuck();
             wait.Update();
 
             return;
