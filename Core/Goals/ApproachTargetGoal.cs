@@ -265,6 +265,11 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (!input.Approach.OnCooldown() && (!bits.SoftInteract() || HasValidSoftInteract()))
         {
+            // If a pather-based escape is in progress, don't press Approach —
+            // let Navigation drive the character out of the obstacle uninterrupted.
+            if (navigation.TryUnstuck())
+                return;
+
             logger.LogInformation("!input.Approach.OnCooldown(): " + !input.Approach.OnCooldown());
             logger.LogInformation("!bits.SoftInteract(): " + !bits.SoftInteract());
             logger.LogInformation("HasValidSoftInteract(): " + HasValidSoftInteract());

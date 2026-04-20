@@ -364,6 +364,11 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (input.Approach.OnCooldown())
             return;
 
+        // If a pather-based escape is in progress, don't press Approach —
+        // let Navigation drive the character out of the obstacle uninterrupted.
+        if (navigation.TryUnstuck())
+            return;
+
         if (!bits.SoftInteract() || EligibleEnemySoftTargetExists())
         {
             navigation.RecordApproachPosition(playerReader.WorldPos);
