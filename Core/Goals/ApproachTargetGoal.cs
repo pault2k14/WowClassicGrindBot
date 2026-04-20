@@ -126,7 +126,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         approachStart = GetTimestamp();
         SetNextStuckTimeCheck();
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
 
         input.PressDisableSoftInteract();
         wait.Update();
@@ -134,7 +134,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
         // Temporarily disable due to navigation supression updates
         input.StopForward(false);
     }

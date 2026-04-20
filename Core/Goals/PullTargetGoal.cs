@@ -119,7 +119,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
         stuckDetector.Reset();
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
 
         if (mountHandler.IsMounted())
         {
@@ -149,7 +149,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
 
         if (requiresNpcNameFinder)
         {

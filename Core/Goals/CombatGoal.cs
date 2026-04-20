@@ -177,7 +177,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
         stuckDetector.Reset();
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
 
         if (mountHandler.IsMounted())
         {
@@ -207,7 +207,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             stopMoving.Stop();
         }
 
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
 
         input.PressEnableSoftInteract();
         wait.Update();

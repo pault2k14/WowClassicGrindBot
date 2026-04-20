@@ -194,7 +194,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Reset stuck detection snapshot on re-entry so stale position data
         // from a previous plan cycle doesn't cause a false positive.
         _stuckCheckLastUtc = DateTime.MinValue;
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
 
         if (input.IsKeyDown(input.ForwardKey))
         {
@@ -244,7 +244,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
-        navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
         input.StepBackwards();
         input.PressAssistIsNotFollowing();
         lastMessageSent = followMessage.ImNotFollowing;
