@@ -415,9 +415,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     }
                 }
 
-                Log($"Seems stuck! Clear Target.");
+                Log($"Seems stuck! Attempting pather escape.");
 
-                input.PressClearTarget();
                 navigation.TryUnstuck();
                 wait.Update();
 
