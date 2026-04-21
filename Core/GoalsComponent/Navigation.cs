@@ -150,11 +150,13 @@ public sealed partial class Navigation : IDisposable
     private const float ApproachEscapeStartYards = 10f;
     private const float ApproachEscapeEndYards = 30f;
     private const float ApproachEscapeProgressMinW = 0.75f; // min movement to keep a recorded position
-    private Vector3 _approachRecordedW;       // last approach position where progress was confirmed
-    private Vector3 _approachPrevRecordedW;   // position before that, for direction vector
+    private const double ApproachEscapeTimeoutSec = 8.0;    // max time on a single escape attempt before retrying at larger distance
+    private Vector3 _approachRecordedW;
+    private Vector3 _approachPrevRecordedW;
     private bool _approachEscapeActive;
     private float _approachEscapeCurrentYards;
     private DateTime _approachEscapeLastAttemptUtc = DateTime.MinValue;
+    private DateTime _approachEscapeStartUtc = DateTime.MinValue;
 
     // Backoff to prevent request spam on repeated blacklist rejections
     private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
@@ -1160,6 +1162,20 @@ public sealed partial class Navigation : IDisposable
                 ResetApproachEscape();
                 return false;
             }
+
+            // If the escape itself has been running too long without completing,
+            // the escape route is also blocked by terrain. Clear it so the goal's
+            // stuck detection fires again and tries a larger distance on the next call.
+            double escapeSec = (DateTime.UtcNow - _approachEscapeStartUtc).TotalSeconds;
+            if (escapeSec >= ApproachEscapeTimeoutSec)
+            {
+                logger.LogWarning($"[NAV] ApproachEscape: escape stuck after {escapeSec:0.0}s — clearing to retry at larger distance.");
+                _approachEscapeActive = false;
+                _approachEscapeStartUtc = DateTime.MinValue;
+                Stop();
+                return false;
+            }
+
             return true;
         }
 
@@ -1195,6 +1211,7 @@ public sealed partial class Navigation : IDisposable
         // until Navigation actually finishes following the escape route.
         SetSingleWaypoint(projection);
         _approachEscapeActive = true;
+        _approachEscapeStartUtc = DateTime.UtcNow;
         return true;
     }
 
@@ -1204,12 +1221,11 @@ public sealed partial class Navigation : IDisposable
     public void ResetApproachEscape()
     {
         _approachEscapeActive = false;
-        // Pre-incremented in TryUnstuck before use, so reset to Start-1
-        // so the first attempt fires at exactly ApproachEscapeStartYards.
         _approachEscapeCurrentYards = ApproachEscapeStartYards - 1f;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
+        _approachEscapeStartUtc = DateTime.MinValue;
     }
 
     /// <summary>
