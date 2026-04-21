@@ -157,6 +157,12 @@ public sealed partial class Navigation : IDisposable
     private float _approachEscapeCurrentYards;
     private DateTime _approachEscapeLastAttemptUtc = DateTime.MinValue;
     private DateTime _approachEscapeStartUtc = DateTime.MinValue;
+    // Locked approach direction: captured from _approachRecordedW/_approachPrevRecordedW
+    // at the moment TryUnstuck first fires, so all escalation attempts (10y→30y) use
+    // the same world-space direction toward the mob rather than compounding arc errors
+    // from positions recorded after each escape movement.
+    private Vector3 _approachEscapeLockedRecordedW;
+    private Vector3 _approachEscapeLockedPrevRecordedW;
 
     // Backoff to prevent request spam on repeated blacklist rejections
     private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
@@ -1189,6 +1195,19 @@ public sealed partial class Navigation : IDisposable
 
         _approachEscapeCurrentYards += 5f;
 
+        // Lock the approach direction from the recorded positions on the first escape
+        // attempt. These are world-space positions from actual movement toward the mob,
+        // so the direction is correct regardless of coordinate axis conventions.
+        // Locking prevents compound arc errors from positions recorded after each
+        // escape movement updating the direction away from the mob.
+        if (_approachEscapeLockedRecordedW == default)
+        {
+            _approachEscapeLockedRecordedW = _approachRecordedW;
+            _approachEscapeLockedPrevRecordedW = _approachPrevRecordedW;
+            logger.LogInformation($"[NAV] ApproachEscape: locking approach direction from recorded positions " +
+                $"prev={_approachEscapeLockedPrevRecordedW} curr={_approachEscapeLockedRecordedW}");
+        }
+
         if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
         {
             // All pather attempts exhausted — fall back to stuckDetector.Update().
@@ -1203,12 +1222,23 @@ public sealed partial class Navigation : IDisposable
         }
 
         Vector3 projection = ProjectApproachEscapeTarget(_approachEscapeCurrentYards);
+
+        // Validate the projected point is within the nav mesh area (0-100 map coords).
+        // Points outside this range have no mesh data and will crash the pather.
+        Vector3 projectionMap = WorldMapAreaDB.ToMap_FlipXY(projection, playerReader.WorldMapArea);
+        if (projectionMap.X is < 0 or > 100 || projectionMap.Y is < 0 or > 100)
+        {
+            logger.LogWarning(
+                $"[NAV] ApproachEscape: projected target at {_approachEscapeCurrentYards:0}y is outside map bounds {projectionMap} — skipping.");
+            // Don't queue — let the next TryUnstuck call try a different direction
+            // or exhaust attempts and fall back to stuckDetector.
+            _approachEscapeActive = false;
+            return false;
+        }
+
         logger.LogInformation(
             $"[NAV] ApproachEscape: attempt {_approachEscapeCurrentYards:0}y -> {projection}");
 
-        // SetSingleWaypoint sets active=true and enqueues the pather request.
-        // On the next TryUnstuck() call active will still be true, keeping the goal blocked
-        // until Navigation actually finishes following the escape route.
         SetSingleWaypoint(projection);
         _approachEscapeActive = true;
         _approachEscapeStartUtc = DateTime.UtcNow;
@@ -1226,15 +1256,19 @@ public sealed partial class Navigation : IDisposable
         _approachEscapeCurrentYards = ApproachEscapeStartYards - 5f;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
+        _approachEscapeLockedRecordedW = default;
+        _approachEscapeLockedPrevRecordedW = default;
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
         _approachEscapeStartUtc = DateTime.MinValue;
     }
 
     /// <summary>
-    /// Projects a world-space waypoint along the approach vector by the given number
-    /// of world units (yards) beyond the current player position.
-    /// Uses _approachPrevRecordedW → _approachRecordedW as the direction vector.
-    /// Falls back to current facing direction if the approach vector is degenerate.
+    /// Projects a world-space waypoint along the approach direction by the given
+    /// number of world units beyond the current player position.
+    /// Primary: locked world-space positions from actual approach movement toward the
+    /// mob, captured at first TryUnstuck. Using world positions avoids the coordinate
+    /// axis convention issue with Cos/Sin of playerReader.Direction (which is in map
+    /// angular space due to ToMap_FlipXY). Falls back to chase target, then facing.
     /// </summary>
     private Vector3 ProjectApproachEscapeTarget(float yards)
     {
@@ -1242,44 +1276,58 @@ public sealed partial class Navigation : IDisposable
 
         float dx, dy;
 
-        if (_approachPrevRecordedW != default && _approachRecordedW != default)
+        if (_approachEscapeLockedPrevRecordedW != default && _approachEscapeLockedRecordedW != default)
         {
-            // Two recorded approach positions — use their direction vector.
+            // Two locked world-space positions from approach movement — direction is
+            // toward the mob and correct for all escalation attempts.
+            dx = _approachEscapeLockedRecordedW.X - _approachEscapeLockedPrevRecordedW.X;
+            dy = _approachEscapeLockedRecordedW.Y - _approachEscapeLockedPrevRecordedW.Y;
+        }
+        else if (_approachEscapeLockedRecordedW != default)
+        {
+            dx = currentW.X - _approachEscapeLockedRecordedW.X;
+            dy = currentW.Y - _approachEscapeLockedRecordedW.Y;
+            logger.LogInformation("[NAV] ApproachEscape: single locked position — projecting from it.");
+        }
+        else if (_approachPrevRecordedW != default && _approachRecordedW != default)
+        {
+            // No locked positions yet — use current recorded positions.
             dx = _approachRecordedW.X - _approachPrevRecordedW.X;
             dy = _approachRecordedW.Y - _approachPrevRecordedW.Y;
-        }
-        else if (_approachRecordedW != default)
-        {
-            // Only one recorded position — use current pos as the direction endpoint.
-            dx = currentW.X - _approachRecordedW.X;
-            dy = currentW.Y - _approachRecordedW.Y;
+            logger.LogInformation("[NAV] ApproachEscape: using current recorded positions for direction.");
         }
         else if (_chaseProgTarget != default)
         {
-            // No approach positions recorded (e.g. Navigation-driven movement without
-            // Approach key presses) — use the current chase target as the direction.
-            // This gives TryUnstuck a meaningful projection for goals like FFG whose
-            // navigation is driven entirely by Navigation internals.
             dx = _chaseProgTarget.X - currentW.X;
             dy = _chaseProgTarget.Y - currentW.Y;
-            logger.LogInformation("[NAV] ApproachEscape: no recorded approach positions — using chase target for direction.");
+            logger.LogInformation("[NAV] ApproachEscape: no recorded positions — using chase target for direction.");
         }
         else
         {
-            // No recorded positions and no chase target — fall back to facing direction.
+            // Last resort: facing direction. playerReader.Direction is in map angular
+            // space so Cos/Sin may not align perfectly with world axes.
             float facing = playerReader.Direction;
             dx = Cos(facing);
             dy = Sin(facing);
-            logger.LogInformation("[NAV] ApproachEscape: no direction data — using facing direction.");
+            logger.LogInformation("[NAV] ApproachEscape: no position data — using facing direction as last resort.");
         }
 
         float len = Sqrt(dx * dx + dy * dy);
         if (len < 0.01f)
         {
-            float facing = playerReader.Direction;
-            dx = Cos(facing);
-            dy = Sin(facing);
-            len = 1f;
+            if (_chaseProgTarget != default)
+            {
+                dx = _chaseProgTarget.X - currentW.X;
+                dy = _chaseProgTarget.Y - currentW.Y;
+                len = Sqrt(dx * dx + dy * dy);
+            }
+            if (len < 0.01f)
+            {
+                float facing = playerReader.Direction;
+                dx = Cos(facing);
+                dy = Sin(facing);
+                len = 1f;
+            }
         }
 
         return new Vector3(

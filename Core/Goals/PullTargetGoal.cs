@@ -379,7 +379,11 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (navigation.IsApproachEscapeActive)
         {
             navigation.Update(CancellationToken.None);
-            navigation.TryUnstuck(); // checks escape timeout, stops Navigation if stuck
+            // Re-check after Update — StopAndResetAtDestination may have just
+            // completed the escape. Only call TryUnstuck if still active (to
+            // check the timeout), otherwise let normal approach resume next tick.
+            if (navigation.IsApproachEscapeActive)
+                navigation.TryUnstuck();
             return;
         }
 
