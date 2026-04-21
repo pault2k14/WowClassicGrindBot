@@ -45,6 +45,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     // Checked at the top of Update() to force an immediate exit.
     private bool _evadeRecoveryActive;
 
+    // Range-progress stuck detection: track whether MinRange is actually
+    // decreasing across approach presses. If range hasn't improved after
+    // RangeStuckIntervalMs, fire TryUnstuck even if bits.Moving() is true
+    // (character may be pressing approach but bouncing against terrain).
+    private const double RangeStuckIntervalMs = 3000;
+    private float _rangeStuckLastMinRange;
+    private double _rangeStuckCheckAtMs;
+
     private double ApproachDurationMs => GetElapsedTime(approachStart).TotalMilliseconds;
 
     public ApproachTargetGoal(ILogger<ApproachTargetGoal> logger,
@@ -128,6 +136,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         approachStart = GetTimestamp();
         SetNextStuckTimeCheck();
         if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
+        _rangeStuckLastMinRange = float.MaxValue;
+        _rangeStuckCheckAtMs = RangeStuckIntervalMs;
 
         input.PressDisableSoftInteract();
         wait.Update();
@@ -424,6 +434,32 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             }
         }
 
+        // Range-progress stuck detection: even if bits.Moving() is true, if
+        // MinRange hasn't decreased after RangeStuckIntervalMs of approach
+        // presses, the character is likely bouncing against terrain. Fire
+        // TryUnstuck so the pather can route around the obstacle.
+        if (ApproachDurationMs >= _rangeStuckCheckAtMs && !navigation.IsApproachEscapeActive)
+        {
+            float currentRange = playerReader.MinRange();
+            if (currentRange >= _rangeStuckLastMinRange)
+            {
+                Log($"No range progress after {RangeStuckIntervalMs}ms ({_rangeStuckLastMinRange:0.0} -> {currentRange:0.0}y) — attempting pather escape.");
+                navigation.TryUnstuck();
+                wait.Update();
+            }
+            else
+            {
+                // Made progress — update snapshot and push the next check window.
+                _rangeStuckLastMinRange = currentRange;
+            }
+            _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+        }
+        else if (_rangeStuckLastMinRange == float.MaxValue)
+        {
+            // First tick — seed the initial range snapshot.
+            _rangeStuckLastMinRange = playerReader.MinRange();
+        }
+
         if (ApproachDurationMs > MAX_APPROACH_DURATION_MS)
         {
             logger.LogWarning("Too long time. Attempting pather escape.");
@@ -479,6 +515,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     logger.LogWarning($"Found a closer target! {playerReader.MinRange()} < {initialTargetMinRange}");
 
                     initialMinRange = playerReader.MinRange();
+                    // Reset range-progress tracking for the new target.
+                    _rangeStuckLastMinRange = playerReader.MinRange();
+                    _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
                 }
                 else
                 {
