@@ -282,9 +282,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             if (navigation.IsApproachEscapeActive)
             {
                 navigation.Update(CancellationToken.None);
-                // StopAndResetAtDestination() inside Update() clears _approachEscapeActive
-                // when the escape route completes. Next tick IsApproachEscapeActive = false
-                // and normal approach resumes.
+                navigation.TryUnstuck(); // checks escape timeout, stops Navigation if stuck
                 return;
             }
 

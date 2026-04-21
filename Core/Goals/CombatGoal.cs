@@ -753,6 +753,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     if (navigation.IsApproachEscapeActive)
                     {
                         navigation.Update(CancellationToken.None);
+                        navigation.TryUnstuck(); // checks escape timeout, stops Navigation if stuck
                         return;
                     }
 

@@ -146,7 +146,7 @@ public sealed partial class Navigation : IDisposable
     // When TryUnstuck() is called, Navigation projects waypoints along the approach vector
     // starting at 10 world units (yards) and incrementing by 1 up to 30, trying to find a
     // pather path that routes around the obstacle. Falls back to stuckDetector.Update() if
-    // all 21 attempts fail.
+    // all 5 attempts fail (10y, 15y, 20y, 25y, 30y).
     private const float ApproachEscapeStartYards = 10f;
     private const float ApproachEscapeEndYards = 30f;
     private const float ApproachEscapeProgressMinW = 0.75f; // min movement to keep a recorded position
@@ -1187,7 +1187,7 @@ public sealed partial class Navigation : IDisposable
 
         _approachEscapeLastAttemptUtc = now;
 
-        _approachEscapeCurrentYards += 1f;
+        _approachEscapeCurrentYards += 5f;
 
         if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
         {
@@ -1221,7 +1221,9 @@ public sealed partial class Navigation : IDisposable
     public void ResetApproachEscape()
     {
         _approachEscapeActive = false;
-        _approachEscapeCurrentYards = ApproachEscapeStartYards - 1f;
+        // Pre-incremented by 5 in TryUnstuck before use, so reset to Start-5
+        // so the first attempt fires at exactly ApproachEscapeStartYards (10y).
+        _approachEscapeCurrentYards = ApproachEscapeStartYards - 5f;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
