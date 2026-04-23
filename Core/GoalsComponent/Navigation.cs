@@ -1359,13 +1359,46 @@ public sealed partial class Navigation : IDisposable
         float dx = 0f, dy = 0f;
         bool directionFound = false;
 
+        // Minimum displacement required to treat the two-position vector as reliable.
+        // If the character barely moved between the two recorded approach positions
+        // (e.g. bouncing against an obstacle or on a slope), the resulting direction
+        // is noise and will send the escape the wrong way. 3y is enough to establish
+        // a meaningful direction; below that we fall through to the chase-target.
+        const float MinLockDisplacementY = 3.0f;
+
         if (_approachEscapeLockedPrevRecordedW != default && _approachEscapeLockedRecordedW != default)
         {
-            dx = _approachEscapeLockedRecordedW.X - _approachEscapeLockedPrevRecordedW.X;
-            dy = _approachEscapeLockedRecordedW.Y - _approachEscapeLockedPrevRecordedW.Y;
-            directionFound = true;
+            float ldx2 = _approachEscapeLockedRecordedW.X - _approachEscapeLockedPrevRecordedW.X;
+            float ldy2 = _approachEscapeLockedRecordedW.Y - _approachEscapeLockedPrevRecordedW.Y;
+            float disp = Sqrt(ldx2 * ldx2 + ldy2 * ldy2);
+            if (disp >= MinLockDisplacementY)
+            {
+                dx = ldx2;
+                dy = ldy2;
+                directionFound = true;
+            }
+            else
+            {
+                logger.LogWarning($"[NAV] ApproachEscape: locked positions only {disp:0.0}y apart — too noisy, preferring chase-target.");
+                // Fall through — chase target tried below, noisy positions used as last resort if needed.
+                // Store the noisy vector so we can use it if chase target is also unavailable.
+                dx = ldx2;
+                dy = ldy2;
+                // directionFound stays false — chase target gets priority.
+            }
         }
-        else if (_approachEscapeLockedRecordedW != default)
+        // Chase target: try this BEFORE single/current recorded positions because it points
+        // directly at the mob — far more reliable than a 0.5y locked position offset or
+        // noisy approach recordings. Only skip it if we already have a good two-position vector.
+        if (!directionFound && _chaseProgTarget != default)
+        {
+            dx = _chaseProgTarget.X - currentW.X;
+            dy = _chaseProgTarget.Y - currentW.Y;
+            directionFound = true;
+            logger.LogInformation("[NAV] ApproachEscape: using chase target for direction.");
+        }
+
+        if (!directionFound && _approachEscapeLockedRecordedW != default)
         {
             // Point FROM current player TOWARD the locked position (which was near the mob).
             // Note: NOT current - locked, which would point away from the mob.
@@ -1381,7 +1414,8 @@ public sealed partial class Navigation : IDisposable
             }
             // else: character is on the locked position — degenerate, fall through
         }
-        else if (_approachPrevRecordedW != default && _approachRecordedW != default)
+
+        if (!directionFound && _approachPrevRecordedW != default && _approachRecordedW != default)
         {
             dx = _approachRecordedW.X - _approachPrevRecordedW.X;
             dy = _approachRecordedW.Y - _approachPrevRecordedW.Y;
@@ -1389,12 +1423,13 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation("[NAV] ApproachEscape: using current recorded positions for direction.");
         }
 
-        if (!directionFound && _chaseProgTarget != default)
+        // Noisy two-position vector stored in dx/dy from the rejected displacement check above
+        // — use it as a last resort before facing if nothing better was found.
+        if (!directionFound && (_approachEscapeLockedPrevRecordedW != default && _approachEscapeLockedRecordedW != default))
         {
-            dx = _chaseProgTarget.X - currentW.X;
-            dy = _chaseProgTarget.Y - currentW.Y;
+            // dx/dy already contain the noisy vector from above — just accept it.
             directionFound = true;
-            logger.LogInformation("[NAV] ApproachEscape: no position data — using chase target for direction.");
+            logger.LogInformation("[NAV] ApproachEscape: noisy locked positions — using as last resort before facing.");
         }
 
         if (!directionFound)

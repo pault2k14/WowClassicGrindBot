@@ -610,7 +610,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        if (ApproachDurationMs > MIN_TIME_TILL_IDLE && initialMinRange < playerReader.MinRange())
+        // Going-away check: only fire if range has increased by more than a small buffer.
+        // Without a buffer, a patrolling mob that moves 5y after a plan re-entry (where
+        // initialMinRange was seeded to the momentarily close value) immediately clears
+        // the target. 6y is enough to distinguish a patrol shift from truly moving away.
+        const float GoingAwayBuffer = 6f;
+        if (ApproachDurationMs > MIN_TIME_TILL_IDLE &&
+            initialMinRange != float.MaxValue &&
+            playerReader.MinRange() > initialMinRange + GoingAwayBuffer)
         {
             Log($"Going away from the target! {initialMinRange} < {playerReader.MinRange()}");
 
