@@ -152,7 +152,9 @@ public sealed partial class Navigation : IDisposable
     private const float ApproachEscapeProgressMinW = 0.75f; // min movement to keep a recorded position
     private const double ApproachEscapeTimeoutSecPerYard = 0.8; // seconds per yard — scales with escape distance
     private const double ApproachEscapeNoMovementSec = 3.0;     // escalate immediately if no movement for this long
-    private Vector3 _approachEscapeStartPos;                    // player position when escape began, for displacement check
+    private Vector3 _approachEscapeStartPos;                    // player position when escape began, for initial displacement check
+    private Vector3 _approachEscapeLastProgressPos;             // rolling position — updated when character moves >2y, for mid-escape stuck detection
+    private DateTime _approachEscapeLastProgressUtc = DateTime.MinValue; // when last progress was recorded
     private Vector3 _approachRecordedW;
     private Vector3 _approachPrevRecordedW;
     private bool _approachEscapeActive;
@@ -1173,23 +1175,38 @@ public sealed partial class Navigation : IDisposable
             }
 
             // Two-phase timeout:
-            // 1. No-displacement check (short): if the character hasn't moved a
-            //    meaningful distance from where the escape started after
-            //    ApproachEscapeNoMovementSec, terrain is clearly blocking — escalate
-            //    immediately. Using displacement from start rather than sinceMove
-            //    prevents tiny left/right steering corrections from resetting the timer.
+            // 1. Rolling no-progress check (short): if the character hasn't moved >2y
+            //    from their last known progress position within ApproachEscapeNoMovementSec,
+            //    the escape is stuck — escalate immediately. This catches both the case
+            //    where the character never moved from escape start AND where they got
+            //    stuck mid-route after making initial progress.
             // 2. Completion timeout (scaled): if the character IS making progress
             //    but the route still hasn't finished, give it the full time budget.
-            double escapeSec = (DateTime.UtcNow - _approachEscapeStartUtc).TotalSeconds;
-            float displaced = Nav2D(playerReader.WorldPos).WorldDistanceXYTo(_approachEscapeStartPos);
-            bool noDisplacement = escapeSec >= ApproachEscapeNoMovementSec && displaced < 2.0f;
+            var now2 = DateTime.UtcNow;
+            Vector3 currentPos = Nav2D(playerReader.WorldPos);
+            double escapeSec = (now2 - _approachEscapeStartUtc).TotalSeconds;
+
+            // Update rolling progress position whenever the character moves >2y from it.
+            if (_approachEscapeLastProgressPos == default)
+            {
+                _approachEscapeLastProgressPos = currentPos;
+                _approachEscapeLastProgressUtc = now2;
+            }
+            else if (currentPos.WorldDistanceXYTo(_approachEscapeLastProgressPos) >= 2.0f)
+            {
+                _approachEscapeLastProgressPos = currentPos;
+                _approachEscapeLastProgressUtc = now2;
+            }
+
+            double sinceProgressSec = (now2 - _approachEscapeLastProgressUtc).TotalSeconds;
+            bool noProgress = sinceProgressSec >= ApproachEscapeNoMovementSec;
             double timeoutSec = _approachEscapeCurrentYards * ApproachEscapeTimeoutSecPerYard;
             bool timedOut = escapeSec >= timeoutSec;
 
-            if (noDisplacement || timedOut)
+            if (noProgress || timedOut)
             {
-                string reason = noDisplacement
-                    ? $"no displacement after {escapeSec:0.0}s (moved only {displaced:0.0}y from start)"
+                string reason = noProgress
+                    ? $"no progress for {sinceProgressSec:0.0}s (stuck at {currentPos})"
                     : $"total time {escapeSec:0.0}s exceeded {timeoutSec:0.0}s budget for {_approachEscapeCurrentYards:0}y";
                 logger.LogWarning($"[NAV] ApproachEscape: escape stuck ({reason}) — clearing to retry at larger distance.");
                 _approachEscapeActive = false;
@@ -1259,6 +1276,8 @@ public sealed partial class Navigation : IDisposable
         _approachEscapeActive = true;
         _approachEscapeStartUtc = DateTime.UtcNow;
         _approachEscapeStartPos = Nav2D(playerReader.WorldPos);
+        _approachEscapeLastProgressPos = default;
+        _approachEscapeLastProgressUtc = DateTime.MinValue;
         return true;
     }
 
@@ -1278,6 +1297,8 @@ public sealed partial class Navigation : IDisposable
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
         _approachEscapeStartUtc = DateTime.MinValue;
         _approachEscapeStartPos = default;
+        _approachEscapeLastProgressPos = default;
+        _approachEscapeLastProgressUtc = DateTime.MinValue;
         _approachEscapeTargetGuid = 0;
     }
 

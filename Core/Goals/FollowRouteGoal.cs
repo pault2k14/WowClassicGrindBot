@@ -284,6 +284,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Abort()
     {
+        // If a blacklisted target is still selected when we abort (e.g. GoapAgent planned
+        // BlacklistTargetGoal before FRG's background thread detected it), suppress the GUID
+        // now so that when the background thread resumes after FRG re-enters it doesn't
+        // immediately re-acquire the same mob before the BlacklistTargetGoal clears it.
+        if (bits.Target() && targetBlacklist.Is())
+            SuppressCurrentTargetBriefly();
+
         if (!targetBlacklist.Is())
             navigation.StopMovement();
 
