@@ -146,11 +146,13 @@ public sealed partial class Navigation : IDisposable
     // When TryUnstuck() is called, Navigation projects waypoints along the approach vector
     // starting at 10 world units (yards) and incrementing by 1 up to 30, trying to find a
     // pather path that routes around the obstacle. Falls back to stuckDetector.Update() if
-    // all 5 attempts fail (10y, 15y, 20y, 25y, 30y).
+    // all 3 attempts fail (10y, 20y, 30y).
     private const float ApproachEscapeStartYards = 10f;
     private const float ApproachEscapeEndYards = 30f;
     private const float ApproachEscapeProgressMinW = 0.75f; // min movement to keep a recorded position
-    private const double ApproachEscapeTimeoutSec = 8.0;    // max time on a single escape attempt before retrying at larger distance
+    private const double ApproachEscapeTimeoutSecPerYard = 0.8; // seconds per yard — scales with escape distance
+    private const double ApproachEscapeNoMovementSec = 3.0;     // escalate immediately if no movement for this long
+    private Vector3 _approachEscapeStartPos;                    // player position when escape began, for displacement check
     private Vector3 _approachRecordedW;
     private Vector3 _approachPrevRecordedW;
     private bool _approachEscapeActive;
@@ -163,6 +165,7 @@ public sealed partial class Navigation : IDisposable
     // from positions recorded after each escape movement.
     private Vector3 _approachEscapeLockedRecordedW;
     private Vector3 _approachEscapeLockedPrevRecordedW;
+    private int _approachEscapeTargetGuid;
 
     // Backoff to prevent request spam on repeated blacklist rejections
     private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
@@ -1169,13 +1172,26 @@ public sealed partial class Navigation : IDisposable
                 return false;
             }
 
-            // If the escape itself has been running too long without completing,
-            // the escape route is also blocked by terrain. Clear it so the goal's
-            // stuck detection fires again and tries a larger distance on the next call.
+            // Two-phase timeout:
+            // 1. No-displacement check (short): if the character hasn't moved a
+            //    meaningful distance from where the escape started after
+            //    ApproachEscapeNoMovementSec, terrain is clearly blocking — escalate
+            //    immediately. Using displacement from start rather than sinceMove
+            //    prevents tiny left/right steering corrections from resetting the timer.
+            // 2. Completion timeout (scaled): if the character IS making progress
+            //    but the route still hasn't finished, give it the full time budget.
             double escapeSec = (DateTime.UtcNow - _approachEscapeStartUtc).TotalSeconds;
-            if (escapeSec >= ApproachEscapeTimeoutSec)
+            float displaced = Nav2D(playerReader.WorldPos).WorldDistanceXYTo(_approachEscapeStartPos);
+            bool noDisplacement = escapeSec >= ApproachEscapeNoMovementSec && displaced < 2.0f;
+            double timeoutSec = _approachEscapeCurrentYards * ApproachEscapeTimeoutSecPerYard;
+            bool timedOut = escapeSec >= timeoutSec;
+
+            if (noDisplacement || timedOut)
             {
-                logger.LogWarning($"[NAV] ApproachEscape: escape stuck after {escapeSec:0.0}s — clearing to retry at larger distance.");
+                string reason = noDisplacement
+                    ? $"no displacement after {escapeSec:0.0}s (moved only {displaced:0.0}y from start)"
+                    : $"total time {escapeSec:0.0}s exceeded {timeoutSec:0.0}s budget for {_approachEscapeCurrentYards:0}y";
+                logger.LogWarning($"[NAV] ApproachEscape: escape stuck ({reason}) — clearing to retry at larger distance.");
                 _approachEscapeActive = false;
                 _approachEscapeStartUtc = DateTime.MinValue;
                 Stop();
@@ -1193,7 +1209,7 @@ public sealed partial class Navigation : IDisposable
 
         _approachEscapeLastAttemptUtc = now;
 
-        _approachEscapeCurrentYards += 5f;
+        _approachEscapeCurrentYards += 10f;
 
         // Lock the approach direction from the recorded positions on the first escape
         // attempt. These are world-space positions from actual movement toward the mob,
@@ -1242,6 +1258,7 @@ public sealed partial class Navigation : IDisposable
         SetSingleWaypoint(projection);
         _approachEscapeActive = true;
         _approachEscapeStartUtc = DateTime.UtcNow;
+        _approachEscapeStartPos = Nav2D(playerReader.WorldPos);
         return true;
     }
 
@@ -1251,15 +1268,46 @@ public sealed partial class Navigation : IDisposable
     public void ResetApproachEscape()
     {
         _approachEscapeActive = false;
-        // Pre-incremented by 5 in TryUnstuck before use, so reset to Start-5
+        // Pre-incremented by 10 in TryUnstuck before use, so reset to Start-10
         // so the first attempt fires at exactly ApproachEscapeStartYards (10y).
-        _approachEscapeCurrentYards = ApproachEscapeStartYards - 5f;
+        _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
         _approachEscapeLockedRecordedW = default;
         _approachEscapeLockedPrevRecordedW = default;
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
         _approachEscapeStartUtc = DateTime.MinValue;
+        _approachEscapeStartPos = default;
+        _approachEscapeTargetGuid = 0;
+    }
+
+    /// <summary>
+    /// Conditionally resets approach escape state on goal re-entry.
+    /// If the target GUID matches the previous escape, preserves the current yards
+    /// and locked direction so escalation continues from where it left off rather
+    /// than restarting at 10y. Only resets recorded positions (not locked ones) so
+    /// fresh approach presses can update the direction if needed.
+    /// </summary>
+    public void ResetApproachEscapeForTarget(int targetGuid)
+    {
+        if (targetGuid != 0 && targetGuid == _approachEscapeTargetGuid)
+        {
+            // Same target re-entered — preserve yards and locked direction,
+            // just clear active flag and timing so a new attempt can start.
+            _approachEscapeActive = false;
+            _approachRecordedW = default;
+            _approachPrevRecordedW = default;
+            _approachEscapeLastAttemptUtc = DateTime.MinValue;
+            _approachEscapeStartUtc = DateTime.MinValue;
+            _approachEscapeStartPos = default;
+            logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction.");
+        }
+        else
+        {
+            // Different target or unknown — full reset.
+            ResetApproachEscape();
+            _approachEscapeTargetGuid = targetGuid;
+        }
     }
 
     /// <summary>
@@ -1274,42 +1322,53 @@ public sealed partial class Navigation : IDisposable
     {
         Vector3 currentW = Nav2D(playerReader.WorldPos);
 
-        float dx, dy;
+        float dx = 0f, dy = 0f;
+        bool directionFound = false;
 
         if (_approachEscapeLockedPrevRecordedW != default && _approachEscapeLockedRecordedW != default)
         {
-            // Two locked world-space positions from approach movement — direction is
-            // toward the mob and correct for all escalation attempts.
             dx = _approachEscapeLockedRecordedW.X - _approachEscapeLockedPrevRecordedW.X;
             dy = _approachEscapeLockedRecordedW.Y - _approachEscapeLockedPrevRecordedW.Y;
+            directionFound = true;
         }
         else if (_approachEscapeLockedRecordedW != default)
         {
-            dx = currentW.X - _approachEscapeLockedRecordedW.X;
-            dy = currentW.Y - _approachEscapeLockedRecordedW.Y;
-            logger.LogInformation("[NAV] ApproachEscape: single locked position — projecting from it.");
+            // Point FROM current player TOWARD the locked position (which was near the mob).
+            // Note: NOT current - locked, which would point away from the mob.
+            float ldx = _approachEscapeLockedRecordedW.X - currentW.X;
+            float ldy = _approachEscapeLockedRecordedW.Y - currentW.Y;
+            float llen = Sqrt(ldx * ldx + ldy * ldy);
+            if (llen >= 0.5f)
+            {
+                dx = ldx;
+                dy = ldy;
+                directionFound = true;
+                logger.LogInformation("[NAV] ApproachEscape: single locked position — projecting toward it.");
+            }
+            // else: character is on the locked position — degenerate, fall through
         }
         else if (_approachPrevRecordedW != default && _approachRecordedW != default)
         {
-            // No locked positions yet — use current recorded positions.
             dx = _approachRecordedW.X - _approachPrevRecordedW.X;
             dy = _approachRecordedW.Y - _approachPrevRecordedW.Y;
+            directionFound = true;
             logger.LogInformation("[NAV] ApproachEscape: using current recorded positions for direction.");
         }
-        else if (_chaseProgTarget != default)
+
+        if (!directionFound && _chaseProgTarget != default)
         {
             dx = _chaseProgTarget.X - currentW.X;
             dy = _chaseProgTarget.Y - currentW.Y;
-            logger.LogInformation("[NAV] ApproachEscape: no recorded positions — using chase target for direction.");
+            directionFound = true;
+            logger.LogInformation("[NAV] ApproachEscape: no position data — using chase target for direction.");
         }
-        else
+
+        if (!directionFound)
         {
-            // Last resort: facing direction. playerReader.Direction is in map angular
-            // space so Cos/Sin may not align perfectly with world axes.
             float facing = playerReader.Direction;
             dx = Cos(facing);
             dy = Sin(facing);
-            logger.LogInformation("[NAV] ApproachEscape: no position data — using facing direction as last resort.");
+            logger.LogInformation("[NAV] ApproachEscape: no direction data — using facing direction as last resort.");
         }
 
         float len = Sqrt(dx * dx + dy * dy);

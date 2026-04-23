@@ -120,7 +120,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
         stuckDetector.Reset();
-        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive)
+            navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
 
         if (mountHandler.IsMounted())
         {
@@ -150,7 +151,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
-        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
+        if (!navigation.IsApproachEscapeActive)
+            navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
 
         if (requiresNpcNameFinder)
         {

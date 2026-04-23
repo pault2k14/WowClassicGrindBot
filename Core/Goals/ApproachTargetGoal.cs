@@ -134,8 +134,13 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         initialMinRange = playerReader.MinRange();
 
         approachStart = GetTimestamp();
-        SetNextStuckTimeCheck();
-        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
+        // Use MIN_TIME_TILL_IDLE for the first stuck check rather than STUCK_INTERVAL_MS.
+        // After a plan transition bits.Moving() may still be false due to server latency
+        // from the prior goal, and the shared StuckDetector may have been reset by Pull.
+        // 2000ms gives the character time to actually start moving before we declare stuck.
+        nextStuckCheckTime = MIN_TIME_TILL_IDLE;
+        if (!navigation.IsApproachEscapeActive)
+            navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
         _rangeStuckLastMinRange = float.MaxValue;
         _rangeStuckCheckAtMs = RangeStuckIntervalMs;
 
@@ -145,8 +150,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
-        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
-        // Temporarily disable due to navigation supression updates
+        if (!navigation.IsApproachEscapeActive)
+            navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
         input.StopForward(false);
     }
 
@@ -282,11 +287,21 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             if (navigation.IsApproachEscapeActive)
             {
                 navigation.Update(CancellationToken.None);
-                // Re-check after Update — StopAndResetAtDestination may have just
-                // completed the escape. Only call TryUnstuck if still active (to
-                // check the timeout), otherwise let normal approach resume next tick.
                 if (navigation.IsApproachEscapeActive)
+                {
                     navigation.TryUnstuck();
+                }
+                else
+                {
+                    // Escape just completed — reset the approach timer, range-progress
+                    // snapshot, and initialMinRange so neither MAX_APPROACH_DURATION_MS,
+                    // the range-stuck check, nor the going-away check fires immediately.
+                    // The escape moved the character; give it fresh baselines.
+                    approachStart = GetTimestamp();
+                    initialMinRange = playerReader.MinRange();
+                    _rangeStuckLastMinRange = playerReader.MinRange();
+                    _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+                }
                 return;
             }
 
@@ -384,6 +399,26 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (!bits.Combat() && !targetInBlacklist)
         {
+            // If escape is active here it means Approach was on cooldown so the
+            // IsApproachEscapeActive check in the approach block was never reached.
+            // Drive Navigation and skip NonCombatApproach entirely.
+            if (navigation.IsApproachEscapeActive)
+            {
+                navigation.Update(CancellationToken.None);
+                if (navigation.IsApproachEscapeActive)
+                {
+                    navigation.TryUnstuck();
+                }
+                else
+                {
+                    approachStart = GetTimestamp();
+                    initialMinRange = playerReader.MinRange();
+                    _rangeStuckLastMinRange = playerReader.MinRange();
+                    _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+                }
+                return;
+            }
+
             NonCombatApproach();
             RandomJump();
         }
@@ -448,10 +483,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 Log($"No range progress after {RangeStuckIntervalMs}ms ({_rangeStuckLastMinRange:0.0} -> {currentRange:0.0}y) — attempting pather escape.");
                 navigation.TryUnstuck();
                 wait.Update();
+                return;
             }
             else
             {
-                // Made progress — update snapshot and push the next check window.
                 _rangeStuckLastMinRange = currentRange;
             }
             _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
