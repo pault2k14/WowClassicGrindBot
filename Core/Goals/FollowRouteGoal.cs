@@ -846,6 +846,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         targetFinder.Reset();
                         Interlocked.Exchange(ref _pauseNavRequested, 1);
                     }
+                    else
+                    {
+                        // Target exists but isn't in range yet (e.g. navigation is still
+                        // closing the gap). Pause the side thread rather than spinning in
+                        // a tight loop logging "Found target!" on every cycle.
+                        // sideActivityManualReset.Set() in Update() will re-enable it once
+                        // the main thread decides to resume target searching.
+                        sideActivityManualReset.Reset();
+                        targetFinder.Reset();
+                        Interlocked.Exchange(ref _pauseNavRequested, 1);
+                    }
                 }
             }
 
