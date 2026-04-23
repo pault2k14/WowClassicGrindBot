@@ -1,10 +1,10 @@
-﻿@inject IJSRuntime JSRuntime
+@inject IJSRuntime JSRuntime
 
 @inject BagReader bagReader
 
 @implements IDisposable
 
-@if (NewItems.Count() > 0)
+@if (NewItems.Count > 0)
 {
     <Card>
         <CardHeader>
@@ -40,14 +40,20 @@
 
     private Timer timer = null!;
 
-    private IEnumerable<BagItem> NewItems { get; set; } = null!;
+    // Must be a materialized List, not a deferred IEnumerable/LINQ iterator.
+    // The render thread enumerates this while the game-data thread may be
+    // updating bagReader.BagItems — a lazy Where() iterator holds a live
+    // reference to that List and throws InvalidOperationException if it is
+    // modified mid-walk. ToList() snapshots the filtered results so the
+    // render thread always walks an independent copy.
+    private List<BagItem> NewItems { get; set; } = new();
 
     private Currency TotalMoneyChange { get; set; } = Currency.Empty;
 
     protected override void OnInitialized()
     {
         NewItems = bagReader.BagItems
-            .Where(WasRecentlyUpdated).Take(MaxItemToShow);
+            .Where(WasRecentlyUpdated).Take(MaxItemToShow).ToList();
 
         bagReader.DataChanged += OnBagReaderDataChanged;
 
@@ -84,22 +90,28 @@
 
     public void OnBagReaderDataChanged()
     {
-        NewItems = bagReader.BagItems.Where(WasRecentlyUpdated);
+        var snapshot = bagReader.BagItems
+            .Where(WasRecentlyUpdated).Take(MaxItemToShow).ToList();
 
-        if (NewItems.Count() > MaxItemToShow)
+        if (snapshot.Count > MaxItemToShow)
         {
-            NewItems = NewItems.Take(MaxItemToShow);
+            snapshot = snapshot.Take(MaxItemToShow).ToList();
             int i = 0;
-            foreach (var item in NewItems)
+            foreach (var item in snapshot)
             {
                 item.LastUpdated -= TimeSpan.FromSeconds(i / 4);
                 i++;
             }
         }
 
+        TotalMoneyChange = ItemPrice.ToSellPrice(snapshot.Sum(ItemValue));
+
+        // Assign the completed snapshot before invoking render so the
+        // render thread never sees a partially-built collection.
+        NewItems = snapshot;
+
         CalculateNextTimerTick();
 
-        TotalMoneyChange = ItemPrice.ToSellPrice(NewItems.Sum(ItemValue));
         base.InvokeAsync(StateHasChanged);
     }
 
@@ -117,6 +129,13 @@
         }
 
         if (nextCall != DateTime.MaxValue)
-            timer.Change(nextCall - DateTime.UtcNow, Timeout.InfiniteTimeSpan);
+        {
+            TimeSpan delay = nextCall - DateTime.UtcNow;
+            // Clamp to zero if the expiry has already passed — a negative TimeSpan
+            // (other than Timeout.InfiniteTimeSpan) throws ArgumentOutOfRangeException.
+            if (delay < TimeSpan.Zero)
+                delay = TimeSpan.Zero;
+            timer.Change(delay, Timeout.InfiniteTimeSpan);
+        }
     }
 }

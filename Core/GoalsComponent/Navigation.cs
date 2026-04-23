@@ -1292,8 +1292,12 @@ public sealed partial class Navigation : IDisposable
         _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
-        _approachEscapeLockedRecordedW = default;
-        _approachEscapeLockedPrevRecordedW = default;
+        // NOTE: _approachEscapeLockedRecordedW/Prev are intentionally NOT cleared here.
+        // After exhausting all attempts, the locked direction is still the best available
+        // direction toward the mob — clearing it causes subsequent escapes to use a facing
+        // fallback from a different position, which often points the wrong way.
+        // Locked direction is only cleared when the target changes (ResetApproachEscapeForTarget
+        // with a different GUID) or when the goal fully resets for a new engagement.
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
         _approachEscapeStartUtc = DateTime.MinValue;
         _approachEscapeStartPos = default;
@@ -1321,13 +1325,22 @@ public sealed partial class Navigation : IDisposable
             _approachEscapeLastAttemptUtc = DateTime.MinValue;
             _approachEscapeStartUtc = DateTime.MinValue;
             _approachEscapeStartPos = default;
+            _approachEscapeLastProgressPos = default;
+            _approachEscapeLastProgressUtc = DateTime.MinValue;
             logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction.");
         }
         else
         {
-            // Different target or unknown — full reset.
+            // Different target or unknown — full reset including locked direction.
             ResetApproachEscape();
-            _approachEscapeTargetGuid = targetGuid;
+            _approachEscapeLockedRecordedW = default;
+            _approachEscapeLockedPrevRecordedW = default;
+            // Only update the stored GUID if we have a real one. If targetGuid is 0
+            // (playerReader.TargetGuid momentarily cleared during a rapid plan transition),
+            // keep the previous GUID so the next call with the real GUID can still match
+            // and preserve escalation state rather than resetting to 0y.
+            if (targetGuid != 0)
+                _approachEscapeTargetGuid = targetGuid;
         }
     }
 

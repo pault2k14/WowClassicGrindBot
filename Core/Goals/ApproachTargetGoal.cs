@@ -289,16 +289,30 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 navigation.Update(CancellationToken.None);
                 if (navigation.IsApproachEscapeActive)
                 {
-                    navigation.TryUnstuck();
+                    // TryUnstuck returns false when the escape timed out and cleared.
+                    // Reset timers in that case too — approachStart has been accumulating
+                    // through the whole escape and would immediately trigger MAX_APPROACH_DURATION_MS.
+                    if (!navigation.TryUnstuck())
+                    {
+                        approachStart = GetTimestamp();
+                        // Use float.MaxValue so the going-away check doesn't fire on stale
+                        // pre-escape range data. It re-seeds naturally when approach presses
+                        // record a closer reading after the escape.
+                        initialMinRange = float.MaxValue;
+                        _rangeStuckLastMinRange = playerReader.MinRange();
+                        _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+                    }
                 }
                 else
                 {
-                    // Escape just completed — reset the approach timer, range-progress
-                    // snapshot, and initialMinRange so neither MAX_APPROACH_DURATION_MS,
-                    // the range-stuck check, nor the going-away check fires immediately.
-                    // The escape moved the character; give it fresh baselines.
+                    // Escape just completed. Reset the approach timer and range-progress
+                    // snapshot. Use float.MaxValue for initialMinRange — playerReader.MinRange()
+                    // is stale here (still reflects pre-escape range) and would immediately
+                    // trigger the going-away check when the addon data refreshes to the real
+                    // post-escape distance. MaxValue disables the going-away check until the
+                    // first approach press records the genuine new minimum range.
                     approachStart = GetTimestamp();
-                    initialMinRange = playerReader.MinRange();
+                    initialMinRange = float.MaxValue;
                     _rangeStuckLastMinRange = playerReader.MinRange();
                     _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
                 }
@@ -407,12 +421,18 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 navigation.Update(CancellationToken.None);
                 if (navigation.IsApproachEscapeActive)
                 {
-                    navigation.TryUnstuck();
+                    if (!navigation.TryUnstuck())
+                    {
+                        approachStart = GetTimestamp();
+                        initialMinRange = float.MaxValue;
+                        _rangeStuckLastMinRange = playerReader.MinRange();
+                        _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+                    }
                 }
                 else
                 {
                     approachStart = GetTimestamp();
-                    initialMinRange = playerReader.MinRange();
+                    initialMinRange = float.MaxValue;
                     _rangeStuckLastMinRange = playerReader.MinRange();
                     _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
                 }
@@ -481,7 +501,21 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             if (currentRange >= _rangeStuckLastMinRange)
             {
                 Log($"No range progress after {RangeStuckIntervalMs}ms ({_rangeStuckLastMinRange:0.0} -> {currentRange:0.0}y) — attempting pather escape.");
-                navigation.TryUnstuck();
+                // Reset the check window BEFORE calling TryUnstuck so that if
+                // TryUnstuck exhausts all attempts and returns false, the check
+                // doesn't fire again on the very next tick from a different code path.
+                _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+                bool stillActive = navigation.TryUnstuck();
+                if (!stillActive)
+                {
+                    // Exhausted all escape attempts — reset the approach timer so
+                    // MAX_APPROACH_DURATION_MS doesn't fire immediately, and reset
+                    // range snapshot so the progress check gives a fresh 3s window.
+                    approachStart = GetTimestamp();
+                    initialMinRange = float.MaxValue;
+                    _rangeStuckLastMinRange = playerReader.MinRange();
+                    _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+                }
                 wait.Update();
                 return;
             }
@@ -495,6 +529,15 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         {
             // First tick — seed the initial range snapshot.
             _rangeStuckLastMinRange = playerReader.MinRange();
+        }
+
+        // Re-seed initialMinRange from the first genuine post-escape range reading.
+        // After escape completion it is set to float.MaxValue (to avoid a false
+        // going-away fire on stale pre-escape data). Once the character starts
+        // closing the gap, record the new minimum so going-away detection is accurate.
+        if (initialMinRange == float.MaxValue)
+        {
+            initialMinRange = playerReader.MinRange();
         }
 
         if (ApproachDurationMs > MAX_APPROACH_DURATION_MS)
