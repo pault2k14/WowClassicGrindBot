@@ -294,6 +294,25 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     // through the whole escape and would immediately trigger MAX_APPROACH_DURATION_MS.
                     if (!navigation.TryUnstuck())
                     {
+                        // If the character made zero movement, pather routes can't help —
+                        // the terrain is physically trapping them. Inject a jump + brief
+                        // backward movement to escape the geometry, matching the manual
+                        // "turn around and jump" technique that works for terrain traps.
+                        if (navigation.IsApproachEscapePhysicallyStuck)
+                        {
+                            navigation.IsApproachEscapePhysicallyStuck = false;
+                            logger.LogWarning("[ATG] Physically trapped in terrain — injecting jump + reverse to escape.");
+                            input.StopForward(false);
+                            input.PressJump();
+                            wait.Update(400);
+                            input.StartBackward(false);
+                            input.PressJump();
+                            wait.Update(600);
+                            input.PressJump();
+                            wait.Update(400);
+                            input.StopBackward(false);
+                        }
+
                         approachStart = GetTimestamp();
                         // Use float.MaxValue so the going-away check doesn't fire on stale
                         // pre-escape range data. It re-seeds naturally when approach presses
