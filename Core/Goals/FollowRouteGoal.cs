@@ -815,7 +815,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     targetFinder.Reset();
                     Interlocked.Exchange(ref _pauseNavRequested, 1);
                 }
-                else if (bits.Target() && targetBlacklist.Is())
+                else if (bits.Target() && (targetBlacklist.Is() || playerReader.IsIgnored(playerReader.TargetGuid)))
                 {
                     Log("Blacklisted target found, clearing target");
 

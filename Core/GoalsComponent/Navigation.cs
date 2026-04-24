@@ -102,6 +102,8 @@ public sealed partial class Navigation : IDisposable
     private readonly List<BlacklistRect> _stuckWorldRects = new();
 
     // Half-size in world yards of the box placed around a stuck position.
+    // Large enough that after a 10y escape the player is outside the rect,
+    // allowing path validation to catch routes back through it.
     private const float StuckRectHalfSizeY = 5f;
 
     /// <summary>How far outside a forbidden rect detour points are placed (WORLD units).</summary>
@@ -1188,28 +1190,49 @@ public sealed partial class Navigation : IDisposable
     /// Records a path segment as bad — the character got physically stuck while
     /// traversing from <paramref name="fromW"/> toward <paramref name="toW"/>.
     /// <summary>
-    /// Boxes the given world position as a blacklisted area so the pather routes
-    /// around it on future requests. Called when the character makes zero movement
-    /// during a pather escape — indicating physical terrain trapping.
+    /// Boxes a region around the stuck position as a blacklisted area so the pather
+    /// routes around it on future requests. The center is offset forward in the
+    /// direction of travel so the rect captures more of the actual blocking geometry
+    /// ahead of the player rather than the already-navigated clear ground behind.
     /// </summary>
-    private void AddStuckRect(Vector3 posW)
+    private void AddStuckRect(Vector3 posW, Vector3 forwardDir = default)
     {
+        Vector3 center = posW;
+
+        if (forwardDir != default)
+        {
+            float len = MathF.Sqrt(forwardDir.X * forwardDir.X + forwardDir.Y * forwardDir.Y);
+            if (len > 0.01f)
+            {
+                // The rect is axis-aligned (AABB). For a diagonal approach the player
+                // can be inside the AABB even when they are 6y from the center, because
+                // the AABB check tests each axis independently. Worst case is 45° where
+                // the minimum safe offset is halfSize * sqrt(2) ≈ 7.07y. Use 8y to
+                // guarantee the player is outside regardless of approach angle.
+                float offsetY = 8f;
+                center = new Vector3(
+                    posW.X + (forwardDir.X / len) * offsetY,
+                    posW.Y + (forwardDir.Y / len) * offsetY,
+                    0f);
+            }
+        }
+
         var rect = new BlacklistRect(
-            posW.X - StuckRectHalfSizeY, posW.Y - StuckRectHalfSizeY,
-            posW.X + StuckRectHalfSizeY, posW.Y + StuckRectHalfSizeY
+            center.X - StuckRectHalfSizeY, center.Y - StuckRectHalfSizeY,
+            center.X + StuckRectHalfSizeY, center.Y + StuckRectHalfSizeY
         ).Normalized();
 
         // Deduplicate — don't add if we already have an overlapping rect.
         foreach (var r in _stuckWorldRects)
         {
-            if (r.Contains(new System.Numerics.Vector2(posW.X, posW.Y)))
+            if (r.Contains(new System.Numerics.Vector2(center.X, center.Y)))
                 return;
         }
 
         _stuckWorldRects.Add(rect);
         _areaBlacklist = new CompositeAreaBlacklist(_staticAreaBlacklist, new RectBlacklist(_stuckWorldRects));
         logger.LogWarning(
-            $"[NAV] StuckRect added at {posW} ±{StuckRectHalfSizeY}y " +
+            $"[NAV] StuckRect added: center={center} (player={posW}) ±{StuckRectHalfSizeY}y " +
             $"(total={_stuckWorldRects.Count})");
     }
 
@@ -1282,7 +1305,6 @@ public sealed partial class Navigation : IDisposable
                 {
                     IsApproachEscapePhysicallyStuck = true;
                     logger.LogWarning($"[NAV] ApproachEscape: zero movement ({totalDisplacement:0.00}y) — character physically trapped in terrain.");
-                    AddStuckRect(_approachEscapeStartPos);
                 }
 
                 _approachEscapeActive = false;
@@ -1315,6 +1337,18 @@ public sealed partial class Navigation : IDisposable
             _approachEscapeLockedPrevRecordedW = _approachPrevRecordedW;
             logger.LogInformation($"[NAV] ApproachEscape: locking approach direction from recorded positions " +
                 $"prev={_approachEscapeLockedPrevRecordedW} curr={_approachEscapeLockedRecordedW}");
+
+            // Record a blacklist rect immediately — before any escape attempt is made.
+            // This is the most accurate stuck position we have. The rect center is offset
+            // forward in the direction of travel so it captures more of the blocking
+            // geometry ahead rather than the clear ground already navigated behind.
+            Vector3 approachDir = (_approachRecordedW != default && _approachPrevRecordedW != default)
+                ? new Vector3(
+                    _approachRecordedW.X - _approachPrevRecordedW.X,
+                    _approachRecordedW.Y - _approachPrevRecordedW.Y,
+                    0f)
+                : default;
+            AddStuckRect(Nav2D(playerReader.WorldPos), approachDir);
         }
 
         if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
