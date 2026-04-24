@@ -366,7 +366,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             sideActivityCts = new();
         }
-        sideActivityManualReset.Set();
+
+        // Don't re-enable the target finder if we're still inside a suppression window
+        // (e.g. evade fired during ATG/PTG and we're now transitioning back to FRG).
+        if (_suppressTargetFinderUntilUtc == DateTime.MinValue || DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
+        {
+            sideActivityManualReset.Set();
+        }
+        else
+        {
+            logger.LogInformation($"[FRG] Resume: target finder still suppressed for {(_suppressTargetFinderUntilUtc - DateTime.UtcNow).TotalMilliseconds:F0}ms — not re-enabling side thread.");
+        }
 
         logger.LogInformation(
             $"[FRG] Resume: HasWaypoint={navigation.HasWaypoint()} HasNext={navigation.HasNext()} " +
