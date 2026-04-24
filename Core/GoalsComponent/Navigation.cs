@@ -78,7 +78,31 @@ public sealed partial class Navigation : IDisposable
     private int failedAttempt;
     private Vector3 lastFailedDestination;
 
-    public IAreaBlacklist? AreaBlacklist { get; set; }
+    // The effective blacklist used by all Navigation queries.
+    // May be a CompositeAreaBlacklist when stuck rects have been added.
+    private IAreaBlacklist? _areaBlacklist;
+    public IAreaBlacklist? AreaBlacklist
+    {
+        get => _areaBlacklist;
+        set
+        {
+            // Callers (FRG Resume, constructor) set the static route blacklist.
+            // Store it separately so we can re-composite it with stuck rects.
+            _staticAreaBlacklist = value;
+            _areaBlacklist = _stuckWorldRects.Count > 0
+                ? new CompositeAreaBlacklist(value, new RectBlacklist(_stuckWorldRects))
+                : value;
+        }
+    }
+
+    // The static blacklist set by route configuration (never contains stuck rects).
+    private IAreaBlacklist? _staticAreaBlacklist;
+
+    // Runtime stuck rects recorded when the character makes zero movement during an escape.
+    private readonly List<BlacklistRect> _stuckWorldRects = new();
+
+    // Half-size in world yards of the box placed around a stuck position.
+    private const float StuckRectHalfSizeY = 5f;
 
     /// <summary>How far outside a forbidden rect detour points are placed (WORLD units).</summary>
     public float DetourMargin { get; set; } = 12f;
@@ -139,6 +163,15 @@ public sealed partial class Navigation : IDisposable
     /// interrupting Navigation while it is routing around an obstacle.
     /// </summary>
     public bool IsApproachEscapeActive => _approachEscapeActive;
+
+    /// <summary>
+    /// Set to true after an escape clears due to no-progress AND the character
+    /// made less than 0.5y of total movement — meaning the terrain is physically
+    /// trapping the character and pather-based routes can't help. The goal should
+    /// respond with a jump + backward movement to physically escape. Reset by the
+    /// goal after it handles the condition.
+    /// </summary>
+    public bool IsApproachEscapePhysicallyStuck { get; set; }
 
     // --- Approach-vector pather escape ---
     // Goals call RecordApproachPosition() each time they press the Approach/Interact key.
@@ -1152,6 +1185,35 @@ public sealed partial class Navigation : IDisposable
     }
 
     /// <summary>
+    /// Records a path segment as bad — the character got physically stuck while
+    /// traversing from <paramref name="fromW"/> toward <paramref name="toW"/>.
+    /// <summary>
+    /// Boxes the given world position as a blacklisted area so the pather routes
+    /// around it on future requests. Called when the character makes zero movement
+    /// during a pather escape — indicating physical terrain trapping.
+    /// </summary>
+    private void AddStuckRect(Vector3 posW)
+    {
+        var rect = new BlacklistRect(
+            posW.X - StuckRectHalfSizeY, posW.Y - StuckRectHalfSizeY,
+            posW.X + StuckRectHalfSizeY, posW.Y + StuckRectHalfSizeY
+        ).Normalized();
+
+        // Deduplicate — don't add if we already have an overlapping rect.
+        foreach (var r in _stuckWorldRects)
+        {
+            if (r.Contains(new System.Numerics.Vector2(posW.X, posW.Y)))
+                return;
+        }
+
+        _stuckWorldRects.Add(rect);
+        _areaBlacklist = new CompositeAreaBlacklist(_staticAreaBlacklist, new RectBlacklist(_stuckWorldRects));
+        logger.LogWarning(
+            $"[NAV] StuckRect added at {posW} ±{StuckRectHalfSizeY}y " +
+            $"(total={_stuckWorldRects.Count})");
+    }
+
+    /// <summary>
     /// Called by goals when their own stuck detection fires (e.g. !stuckDetector.IsMoving()).
     /// Attempts to find a pather path by projecting a waypoint along the approach vector,
     /// starting at 10 yards and incrementing by 1 up to 30 yards (21 attempts).
@@ -1209,6 +1271,20 @@ public sealed partial class Navigation : IDisposable
                     ? $"no progress for {sinceProgressSec:0.0}s (stuck at {currentPos})"
                     : $"total time {escapeSec:0.0}s exceeded {timeoutSec:0.0}s budget for {_approachEscapeCurrentYards:0}y";
                 logger.LogWarning($"[NAV] ApproachEscape: escape stuck ({reason}) — clearing to retry at larger distance.");
+
+                // If the character made essentially zero total movement during this escape,
+                // the terrain is physically trapping them — pather routes can't help.
+                // Signal the goal so it can inject a jump + reverse-direction nudge.
+                // Also record the stuck segment so future paths routing through the same
+                // geometry are rejected before the character wastes time on them.
+                float totalDisplacement = currentPos.WorldDistanceXYTo(_approachEscapeStartPos);
+                if (totalDisplacement < 0.5f)
+                {
+                    IsApproachEscapePhysicallyStuck = true;
+                    logger.LogWarning($"[NAV] ApproachEscape: zero movement ({totalDisplacement:0.00}y) — character physically trapped in terrain.");
+                    AddStuckRect(_approachEscapeStartPos);
+                }
+
                 _approachEscapeActive = false;
                 _approachEscapeStartUtc = DateTime.MinValue;
                 Stop();
@@ -1304,6 +1380,7 @@ public sealed partial class Navigation : IDisposable
         _approachEscapeLastProgressPos = default;
         _approachEscapeLastProgressUtc = DateTime.MinValue;
         _approachEscapeTargetGuid = 0;
+        IsApproachEscapePhysicallyStuck = false;
     }
 
     /// <summary>
