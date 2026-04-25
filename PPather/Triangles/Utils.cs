@@ -1,4 +1,4 @@
-/*
+﻿/*
   This file is part of ppather.
 
     PPather is free software: you can redistribute it and/or modify
@@ -18,8 +18,11 @@
 
  */
 
+using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 using static System.MathF;
 using static System.Numerics.Vector3;
@@ -28,6 +31,7 @@ namespace WowTriangles;
 
 public static class Utils
 {
+    private const float ParallelEpsilon = 1e-6f;
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool SegmentTriangleIntersect(
@@ -35,61 +39,77 @@ public static class Utils
         in Vector3 t0, in Vector3 t1, in Vector3 t2,
         out Vector3 I)
     {
-        Vector3 u = t1 - t0; // triangle vector 1
-        Vector3 v = t2 - t0; // triangle vector 2
-        Vector3 n = Cross(u, v); // triangle normal
+        // Segment direction
+        Vector3 dir = p1 - p0;
 
-        Vector3 dir = p1 - p0; // ray direction vector
-        Vector3 w0 = p0 - t0;
-        float a = -Dot(n, w0);
-        float b = Dot(n, dir);
+        // Triangle edges
+        Vector3 e1 = t1 - t0;
+        Vector3 e2 = t2 - t0;
 
-        // Avoid repeating Dot(n, dir)
-        if (Abs(b) < float.Epsilon)
+        // Begin calculating determinant
+        Vector3 pvec = Cross(dir, e2);
+        float det = Dot(e1, pvec);
+
+        // If determinant is near zero → ray is parallel to triangle plane
+        if (Abs(det) < ParallelEpsilon)
         {
             I = default;
-            return false; // parallel
+            return false;
         }
 
-        // get intersect point of ray with triangle plane
-        float r = a / b;
-        if (r < 0.0f || r > 1.0f)
+        float invDet = 1.0f / det;
+
+        // Calculate distance from t0 to ray origin
+        Vector3 tvec = p0 - t0;
+
+        // Calculate u parameter and test bounds
+        float u = Dot(tvec, pvec) * invDet;
+        if (u is < 0.0f or > 1.0f)
         {
             I = default;
-            return false; // outside of segment bounds
+            return false;
         }
 
-        I = p0 + (dir * r); // intersect point of line and plane
+        // Prepare to test v parameter
+        Vector3 qvec = Cross(tvec, e1);
 
-        // Avoid re-calculating things by merging conditions
-        float uu = Dot(u, u);
-        float uv = Dot(u, v);
-        float vv = Dot(v, v);
-        Vector3 w = I - t0;
-        float wu = Dot(w, u);
-        float wv = Dot(w, v);
-        float D = uv * uv - uu * vv;
+        float v = Dot(dir, qvec) * invDet;
+        if (v < 0.0f || u + v > 1.0f)
+        {
+            I = default;
+            return false;
+        }
 
-        // Parametric coordinates test
-        float s = (uv * wv - vv * wu) / D;
-        if (s < 0.0f || s > 1.0f) return false;
+        // At this stage we know the line intersects the triangle
+        float t = Dot(e2, qvec) * invDet;
 
-        float t = (uv * wu - uu * wv) / D;
-        return !(t < 0.0f || (s + t) > 1.0f);
+        // For segment intersection: require t ∈ [0,1]
+        if (t is < 0.0f or > 1.0f)
+        {
+            I = default;
+            return false;
+        }
+
+        // Compute intersection point only now (after passing all tests)
+        I = p0 + (dir * t);
+        return true;
     }
 
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float PointDistanceToSegment(in Vector3 p0, in Vector3 x1, in Vector3 x2)
     {
-        Vector3 L = x2 - x1; // the segment vector
-        float l2 = Dot(L, L); // square length of the segment
-        Vector3 D = p0 - x1; // vector from point to segment start
-        float d = Dot(D, L); // projection factor [x2-x1].[p0-x1]lear
+        Vector3 L = x2 - x1;           // segment vector
+        float l2 = Dot(L, L);          // squared segment length
+        Vector3 D = p0 - x1;           // vector from point to x1
+        float d = Dot(D, L);           // projection scalar
 
-        // Optimized return for closest segment point
-        if (d < 0.0f) return D.Length();
-        return ((d > l2 ? D - L : D - (L * (d / l2))).Length());
+        // Clamp projection between [0, l2] without branching
+        float t = Math.Clamp(d, 0.0f, l2);
+
+        // Compute projection point and distance
+        Vector3 proj = D - (L * (t / l2));
+        return proj.Length();
     }
 
     [SkipLocalsInit]
@@ -108,12 +128,19 @@ public static class Utils
     {
         Vector3 u = Subtract(t1, t0); // triangle vector 1
         Vector3 v = Subtract(t2, t0); // triangle vector 2
-        Vector3 n = Cross(u, v); // triangle normal
-        n *= -1E6f;
+        Vector3 n = Cross(u, v);      // unnormalized triangle normal
 
-        if (SegmentTriangleIntersect(p0, n, t0, t1, t2, out Vector3 intersect))
+        float normalLenSq = Dot(n, n);
+        if (normalLenSq >= 1e-12f)
         {
-            return Subtract(intersect, p0).Length();
+            Vector3 normalDir = n * (1.0f / Sqrt(normalLenSq));
+            Vector3 above = p0 + normalDir * 1E6f;
+            Vector3 below = p0 - normalDir * 1E6f;
+
+            if (SegmentTriangleIntersect(above, below, t0, t1, t2, out Vector3 intersect))
+            {
+                return Subtract(intersect, p0).Length();
+            }
         }
 
         float d0 = PointDistanceToSegment(p0, t0, t1);
@@ -144,6 +171,78 @@ public static class Utils
             AxesIntersectTriangleBox(v0, v1, v2, boxExtents, f0, f1, f2) &&
             TriangleVerticesInsideBox(v0, v1, v2, boxExtents) &&
             TrianglePlaneIntersectBox(f0, f1, v0, boxExtents);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool TriangleBoxIntersect_SIMD(
+        in Vector3 a, in Vector3 b, in Vector3 c,
+        in Vector3 boxCenter, in Vector3 boxExtents)
+    {
+        // Move triangle to box space
+        Vector3 v0 = a - boxCenter;
+        Vector3 v1 = b - boxCenter;
+        Vector3 v2 = c - boxCenter;
+
+        ReadOnlySpan<Vector3> vs = [v0, v1, v2];
+        ReadOnlySpan<Vector3> fs = [v1 - v0, v2 - v1, v0 - v2];
+
+        if (Sse.IsSupported)
+        {
+            for (int edge = 0; edge < 3; edge++)
+            {
+                var f = fs[edge];
+
+                // Prepare vectors for v0, v1, v2
+                var vx = Vector128.Create(vs[0].X, vs[1].X, vs[2].X, 0f);
+                var vy = Vector128.Create(vs[0].Y, vs[1].Y, vs[2].Y, 0f);
+                var vz = Vector128.Create(vs[0].Z, vs[1].Z, vs[2].Z, 0f);
+
+                // Axis 1: Z * f.Y - Y * f.Z
+                var fY = Vector128.Create(f.Y);
+                var fZ = Vector128.Create(f.Z);
+                var p = Sse.Subtract(
+                    Sse.Multiply(vz, fY),
+                    Sse.Multiply(vy, fZ)
+                );
+                float r = boxExtents.Y * Abs(f.Z) + boxExtents.Z * Abs(f.Y);
+                float p0 = p.GetElement(0), p1 = p.GetElement(1), p2 = p.GetElement(2);
+                if (Max3(p0, p1, p2) < -r || Min3(p0, p1, p2) > r) return false;
+
+                // Axis 2: X * f.Z - Z * f.X
+                var fX = Vector128.Create(f.X);
+                p = Sse.Subtract(
+                    Sse.Multiply(vx, fZ),
+                    Sse.Multiply(vz, fX)
+                );
+                r = boxExtents.X * Abs(f.Z) + boxExtents.Z * Abs(f.X);
+                p0 = p.GetElement(0); p1 = p.GetElement(1); p2 = p.GetElement(2);
+                if (Max3(p0, p1, p2) < -r || Min3(p0, p1, p2) > r) return false;
+
+                // Axis 3: Y * f.X - X * f.Y
+                p = Sse.Subtract(
+                    Sse.Multiply(vy, fX),
+                    Sse.Multiply(vx, fY)
+                );
+                r = boxExtents.X * Abs(f.Y) + boxExtents.Y * Abs(f.X);
+                p0 = p.GetElement(0); p1 = p.GetElement(1); p2 = p.GetElement(2);
+                if (Max3(p0, p1, p2) < -r || Min3(p0, p1, p2) > r) return false;
+            }
+        }
+        else
+        {
+            if (!AxesIntersectTriangleBox(v0, v1, v2, boxExtents, fs[0], fs[1], fs[2]))
+            {
+                return false;
+            }
+        }
+
+        if (!TriangleVerticesInsideBox(v0, v1, v2, boxExtents))
+        {
+            return false;
+        }
+
+        return TrianglePlaneIntersectBox(fs[0], fs[1], v0, boxExtents);
     }
 
     [SkipLocalsInit]
@@ -267,5 +366,52 @@ public static class Utils
     public static float Max4(float a, float b, float c, float d)
     {
         return Max(Max(a, b), Max(c, d));
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector3 ClosestPointOnSegment(in Vector3 p0, in Vector3 x1, in Vector3 x2)
+    {
+        Vector3 L = x2 - x1;
+        float l2 = Dot(L, L);
+        if (l2 < 1e-12f)
+            return x1;
+
+        float t = Math.Clamp(Dot(p0 - x1, L) / l2, 0.0f, 1.0f);
+        return x1 + (L * t);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector3 ClosestPointOnTriangle(in Vector3 p0, in Vector3 t0, in Vector3 t1, in Vector3 t2)
+    {
+        Vector3 u = Subtract(t1, t0);
+        Vector3 v = Subtract(t2, t0);
+        Vector3 n = Cross(u, v);
+
+        float normalLenSq = Dot(n, n);
+        if (normalLenSq >= 1e-12f)
+        {
+            Vector3 normalDir = n * (1.0f / Sqrt(normalLenSq));
+            Vector3 above = p0 + normalDir * 1E6f;
+            Vector3 below = p0 - normalDir * 1E6f;
+
+            if (SegmentTriangleIntersect(above, below, t0, t1, t2, out Vector3 intersect))
+            {
+                return intersect;
+            }
+        }
+
+        Vector3 c0 = ClosestPointOnSegment(p0, t0, t1);
+        Vector3 c1 = ClosestPointOnSegment(p0, t1, t2);
+        Vector3 c2 = ClosestPointOnSegment(p0, t2, t0);
+
+        float d0 = Subtract(c0, p0).LengthSquared();
+        float d1 = Subtract(c1, p0).LengthSquared();
+        float d2 = Subtract(c2, p0).LengthSquared();
+
+        if (d0 <= d1 && d0 <= d2) return c0;
+        if (d1 <= d2) return c1;
+        return c2;
     }
 }

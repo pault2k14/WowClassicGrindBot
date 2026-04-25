@@ -48,7 +48,7 @@ public sealed partial class Navigation : IDisposable
     private float lastWorldDistance = float.MaxValue;
 
     private const float minAngleToTurn = PI / 35f;              // 5.14 degree
-    private const float minAngleToStopBeforeTurn = PI / 2f;     // 90 degree
+    private const float minAngleToStopBeforeTurn = PI / 3f;     // 60 degree
 
     private readonly Stack<Vector3> wayPoints = new();
     private readonly Stack<Vector3> routeToNextWaypoint = new();
@@ -61,6 +61,7 @@ public sealed partial class Navigation : IDisposable
     public event Action? OnWayPointReached;
     public event Action? OnDestinationReached;
     public event Action? OnAnyPointReached;
+    public event Action? OnNoPathFound;
     public event Action<Vector3, Vector3>? OnPathFailed; // (startW, endW)
     public bool SimplifyRouteToWaypoint { get; set; } = true;
 
@@ -2074,6 +2075,8 @@ public sealed partial class Navigation : IDisposable
                 failedAttempt = 0;
                 stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(result.EndW));
                 stuckDetector.Update(StuckOwnerId);
+
+                OnNoPathFound?.Invoke();
             }
 
             return;

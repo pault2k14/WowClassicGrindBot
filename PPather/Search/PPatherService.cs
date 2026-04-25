@@ -39,7 +39,7 @@ public sealed class PPatherService
     public Vector3 ClosestLocation => search?.PathGraph?.ClosestSpot?.Loc ?? Vector3.Zero;
     public Vector3 PeekLocation => search?.PathGraph?.PeekSpot?.Loc ?? Vector3.Zero;
 
-    public HashSet<Vector3> TestPoints => search?.PathGraph?.TestPoints ?? [];
+    public HashSet<Vector4> TestPoints => search?.PathGraph?.TestPoints ?? [];
 
     public HashSet<Vector3> BlockedPoints => search?.PathGraph?.BlockedPoints ?? [];
 
@@ -62,10 +62,17 @@ public sealed class PPatherService
         search = null;
     }
 
-    private void Initialise(float mapId)
+    public void Initialise(float mapId)
     {
         if (search != null && mapId == search.MapId)
+        {
             return;
+        }
+
+        if (search != null && mapId != search.MapId)
+        {
+            Reset();
+        }
 
         search = new Search(mapId, logger, dataConfig);
         search.PathGraph.triangleWorld.NotifyChunkAdded = ChunkAdded;
@@ -80,13 +87,22 @@ public sealed class PPatherService
             return false;
         }
 
-        logger.LogInformation($"MPQ files exist. {string.Join(' ', mpqFiles)}");
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("MPQ files exist. {MpqFiles}", string.Join(' ', mpqFiles));
+
         return true;
     }
 
     public TriangleCollection GetChunkAt(int grid_x, int grid_y)
     {
         return search.PathGraph.triangleWorld.GetChunkAt(grid_x, grid_y);
+    }
+
+    public ChunkedTriangleCollection TriangleWorld => search.PathGraph.triangleWorld;
+
+    public IEnumerable<Spot> GetSpots()
+    {
+        return search.PathGraph.SpotManager.AllSpots();
     }
 
     public void ChunkAdded(ChunkEventArgs e)
@@ -118,17 +134,17 @@ public sealed class PPatherService
 
         Initialise(wma.MapID);
 
-        return search.CreateWorldLocation(worldX, worldY, z, wma.MapID);
+        return search.CreateWorldLocation(worldX, worldY, z, wma.MapID, null);
     }
 
-    public Vector4 ToWorldZ(int uiMap, float x, float y, float z)
+    public Vector4 ToWorldZ(int uiMap, float x, float y, float z, bool? startIndoors = null)
     {
         if (!worldMapAreaDB.TryGet(uiMap, out WorldMapArea wma))
             return Vector4.Zero;
 
         Initialise(wma.MapID);
 
-        return search.CreateWorldLocation(x, y, z, wma.MapID);
+        return search.CreateWorldLocation(x, y, z, wma.MapID, startIndoors);
     }
 
     public int GetMapId(int uiMap)
@@ -159,7 +175,7 @@ public sealed class PPatherService
         search.PathGraph.Save();
 
         if (logger.IsEnabled(LogLevel.Trace))
-            logger.LogTrace($"Saved GraphChunks {GetElapsedTime(timestamp).TotalMilliseconds} ms");
+            logger.LogTrace("Saved GraphChunks {ElapsedMs} ms", GetElapsedTime(timestamp).TotalMilliseconds);
     }
 
     public void SetLocations(Vector4 from, Vector4 to)
@@ -221,5 +237,10 @@ public sealed class PPatherService
         }
 
         OnPathCreated?.Invoke(new(spots));
+    }
+
+    public (int, float) GetAreaIdAndZ(Vector3 location)
+    {
+        return search.GetAreaIdAndZ(location);
     }
 }

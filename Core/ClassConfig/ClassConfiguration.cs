@@ -46,6 +46,8 @@ public sealed partial class ClassConfiguration
     public bool AllowPvP { get; set; }
     public bool AutoPetAttack { get; set; } = true;
 
+    public bool CrossZoneSearch { get; set; }
+
     // Keeping this for backward compatibility
     // The following properties are consolidated under PathSettings
     public string PathFilename { get; set; } = string.Empty;

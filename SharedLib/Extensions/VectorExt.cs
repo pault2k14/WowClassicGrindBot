@@ -93,11 +93,6 @@ public static class VectorExt
         return totalDistance;
     }
 
-    public static Vector2 AsVector2(this Vector3 v3)
-    {
-        return new Vector2(v3.X, v3.Y);
-    }
-
     public static void Deconstruct(this Vector3 v3, out float x, out float y, out float z)
     {
         x = v3.X;
@@ -109,5 +104,10 @@ public static class VectorExt
     {
         x = v2.X;
         y = v2.Y;
+    }
+
+    public static string ToStringF(this Vector3 v)
+    {
+        return $"({v.X} {v.Y} {v.Z})";
     }
 }

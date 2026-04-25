@@ -25,4 +25,5 @@ public static class ActionMask
     public const int CrowdControl = 1 << 18;
     public const int UseWithForcedFollow = 1 << 19;
     public const int ChangeTargetTo = 1 << 20;
+    public const int UseMount = 1 << 21;
 }

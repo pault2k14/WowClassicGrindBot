@@ -37,6 +37,16 @@ public sealed class DataConfig
     public string ExpHistory => Join(Root, "History", Exp);
     [JsonIgnore]
     public string ExpExperience => Join(Root, "experience", Exp);
+
+    [JsonIgnore]
+    public string Leaflet => Join(Root, "leaflet", Exp);
+
+    [JsonIgnore]
+    public string NpcSpawnLocations => Join(Root, "npcspawnlocations", Exp);
+
+    [JsonIgnore]
+    public string MailboxLocations => Join(Root, "mailboxlocations", Exp);
+
     [JsonIgnore]
     public string NpcLocations => Join(Root, "npclocations", Exp);
 

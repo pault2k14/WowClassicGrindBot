@@ -5,16 +5,18 @@ using Game;
 
 using Microsoft.Extensions.Logging;
 
+using SharedLib;
+using SharedLib.Data;
 using SharedLib.Extensions;
 using SharedLib.NpcFinder;
 
 using System;
 using System.Buffers;
+using System.Collections.Frozen;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Threading;
-
-using WowheadDB;
 
 #pragma warning disable 162
 
@@ -29,13 +31,20 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         Finished,
     }
 
+    private enum MerchantResult
+    {
+        Success,
+        Failed,
+        TryNextNPC,
+    }
+
     private const bool debug = false;
 
     private const int MAX_TIME_TO_REACH_MELEE = 10000;
     private const int TIMEOUT = 5000;
+    private const int MAX_SELL_NOTHING_RETRIES = 2;
 
-    private static readonly SearchValues<string> vendorNpcPattern =
-        SearchValues.Create([NPCType.Vendor.ToStringF(), "Sell"], StringComparison.OrdinalIgnoreCase);
+    private readonly FrozenDictionary<NpcFlags, SearchValues<string>> npcSearchPatterns;
 
     public override float Cost => key.Cost;
 
@@ -54,11 +63,17 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
     private readonly ExecGameCommand execGameCommand;
     private readonly GossipReader gossipReader;
     private readonly AreaDB areaDB;
+    private readonly BagReader bagReader;
+    private readonly SessionStat sessionStat;
 
-    private PathState pathState;
+    private PathState pathState = PathState.Finished;
 
     private readonly bool tryFindClosestNPC;
-    private NPC? npc;
+    private Creature npc;
+    private NpcSearchResult[] searchResult = [];
+    private int searchCount;
+    private int searchIndex;
+    private int sellNothingCount;
 
     #region IRouteProvider
 
@@ -90,6 +105,7 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         Wait wait, PlayerReader playerReader, GossipReader gossipReader, AddonBits bits,
         Navigation navigation, StopMoving stopMoving, AreaDB areaDB,
         NpcNameTargeting npcNameTargeting, ClassConfiguration classConfig,
+        BagReader bagReader, SessionStat sessionStat,
         IMountHandler mountHandler, ExecGameCommand exec, CancellationTokenSource cts)
         : base(nameof(AdhocNPCGoal))
     {
@@ -103,6 +119,8 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         this.areaDB = areaDB;
         this.npcNameTargeting = npcNameTargeting;
         this.classConfig = classConfig;
+        this.bagReader = bagReader;
+        this.sessionStat = sessionStat;
         this.mountHandler = mountHandler;
         token = cts.Token;
         this.execGameCommand = exec;
@@ -111,6 +129,7 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         this.navigation = navigation;
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
         navigation.OnWayPointReached += Navigation_OnWayPointReached;
+        navigation.OnNoPathFound += Navigation_OnNoPathFound;
 
         if (bool.TryParse(key.InCombat, out bool result))
         {
@@ -121,6 +140,18 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         }
 
         Keys = [key];
+
+        npcSearchPatterns = Enum.GetValues<NpcFlags>().Select(static flag =>
+        {
+            string[] strings = flag switch
+            {
+                NpcFlags.Vendor => [flag.ToString(), "Sell"],
+                _ => [flag.ToString()]
+            };
+
+            return new KeyValuePair<NpcFlags, SearchValues<string>>(flag, SearchValues.Create(strings, StringComparison.OrdinalIgnoreCase));
+        })
+        .ToFrozenDictionary(pair => pair.Key, pair => pair.Value);
 
         tryFindClosestNPC = key.Path.Length == 0;
     }
@@ -136,27 +167,22 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
     {
         if (e.GetType() == typeof(ResumeEvent))
         {
-            navigation.ResetStuckParameters();
-            MountIfPossible();
+            Resume();
+
         }
         else if (e.GetType() == typeof(AbortEvent))
         {
-            pathState = PathState.Finished;
+            Abort();
         }
     }
 
-
-    public override void OnEnter()
+    private void Resume()
     {
-        if (tryFindClosestNPC)
+        if (tryFindClosestNPC && !TryAutoSelectNPCAndSetPath())
         {
-            bool found = TryAutoSelectNPCAndSetPath();
-            if (!found)
-            {
-                pathState = PathState.Finished;
-                LogWarn("No NPC with the criteria!");
-                return;
-            }
+            pathState = PathState.Finished;
+            LogWarn("No NPC with the criteria!");
+            return;
         }
 
         input.PressClearTarget();
@@ -164,12 +190,14 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
 
         SetClosestWaypoint();
 
+        navigation.Resume();
+
         pathState = PathState.ApproachPathStart;
 
         MountIfPossible();
     }
 
-    public override void OnExit()
+    private void Abort()
     {
         navigation.StopMovement();
         navigation.Stop();
@@ -178,9 +206,17 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         if (tryFindClosestNPC)
         {
             key.Path = [];
-            npc = null;
+            npc = default;
+            searchResult = [];
+            searchCount = 0;
+            searchIndex = 0;
         }
     }
+
+
+    public override void OnEnter() => Resume();
+
+    public override void OnExit() => Abort();
 
     public override void Update()
     {
@@ -196,39 +232,89 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
 
     private void SetClosestWaypoint()
     {
-        Vector3 playerMap = playerReader.MapPos;
+        Span<Vector3> path = stackalloc Vector3[key.Path.Length];
+        key.Path.CopyTo(path);
 
-        Span<Vector3> pathMap = stackalloc Vector3[key.Path.Length];
-        key.Path.CopyTo(pathMap);
+        bool isWorldCoords = IsWorldCoords(path);
 
-        float mapDistanceToFirst = playerMap.MapDistanceXYTo(pathMap[0]);
-        float mapDistanceToLast = playerMap.MapDistanceXYTo(pathMap[^1]);
-
+        Vector3 playerPos;
         int closestIndex = 0;
-        Vector3 mapClosestPoint = Vector3.Zero;
+        Vector3 closestPoint = Vector3.Zero;
         float distance = float.MaxValue;
 
-        for (int i = 0; i < pathMap.Length; i++)
+        if (isWorldCoords)
         {
-            Vector3 p = pathMap[i];
-            float d = playerMap.MapDistanceXYTo(p);
-            if (d < distance)
-            {
-                distance = d;
-                closestIndex = i;
-                mapClosestPoint = p;
-            }
-        }
+            playerPos = playerReader.WorldPos;
 
-        if (mapClosestPoint == pathMap[0] || mapClosestPoint == pathMap[^1])
-        {
-            navigation.SetWayPoints(pathMap);
+            for (int i = 0; i < path.Length; i++)
+            {
+                float d = playerPos.WorldDistanceXYTo(path[i]);
+                if (d < distance)
+                {
+                    distance = d;
+                    closestIndex = i;
+                    closestPoint = path[i];
+                }
+            }
         }
         else
         {
-            Span<Vector3> points = pathMap[closestIndex..];
+            playerPos = playerReader.MapPos;
+
+            for (int i = 0; i < path.Length; i++)
+            {
+                float d = playerPos.MapDistanceXYTo(path[i]);
+                if (d < distance)
+                {
+                    distance = d;
+                    closestIndex = i;
+                    closestPoint = path[i];
+                }
+            }
+        }
+
+        if (closestPoint == path[0] || closestPoint == path[^1])
+        {
+            navigation.SetWayPoints(path);
+        }
+        else
+        {
+            Span<Vector3> points = path[closestIndex..];
             navigation.SetWayPoints(points);
         }
+    }
+
+    private static bool IsWorldCoords(ReadOnlySpan<Vector3> path)
+    {
+        for (int i = 0; i < path.Length; i++)
+        {
+            Vector3 p = path[i];
+            if (p.X is < 0 or > 100 || p.Y is < 0 or > 100)
+                return true;
+        }
+        return false;
+    }
+
+    private void UpdateClosestNPC(NpcFlags npcFlag)
+    {
+        if (searchResult.Length == 0 || searchCount == 0)
+            return;
+
+        npc = searchResult[searchIndex].Creature;
+        Vector3 worldPos = searchResult[searchIndex].WorldPosition;
+        key.Path = [worldPos];
+
+        LogFoundCloesestNPCByType(logger, npc.Name, npcFlag, worldPos);
+    }
+
+    private void Navigation_OnNoPathFound()
+    {
+        if (pathState != PathState.ApproachPathStart || token.IsCancellationRequested)
+            return;
+
+        logger.LogError("No path found!");
+
+        Resume();
     }
 
     private void Navigation_OnWayPointReached()
@@ -246,18 +332,20 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
             return;
 
         LogDebug("Reached defined path end");
+        navigation.StopMovement();
         stopMoving.Stop();
+        wait.Update();
 
         input.PressClearTarget();
         wait.Update();
 
-        if (tryFindClosestNPC && npc != null)
+        if (tryFindClosestNPC && npc != default)
         {
-            execGameCommand.Run($"/target {npc.name}");
+            execGameCommand.Run($"/target {npc.Name}");
             wait.Update();
         }
 
-        bool found = bits.Target();
+        bool hasTarget = bits.Target();
 
         if (bits.SoftInteract() &&
             !bits.SoftInteract_Hostile())
@@ -267,31 +355,32 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
 
             LogWarn($"Soft Interact found NPC with id {playerReader.SoftInteract_Id}");
 
-            found = MoveToTargetAndReached();
+            hasTarget = MoveToTargetAndReached();
         }
 
-        if (!found && !input.KeyboardOnly)
+        if (!hasTarget && !input.KeyboardOnly)
         {
             npcNameTargeting.ChangeNpcType(NpcNames.Friendly | NpcNames.Neutral);
             npcNameTargeting.WaitForUpdate();
 
             ReadOnlySpan<CursorType> types = [
+                CursorType.Loot,
                 CursorType.Vendor,
                 CursorType.Repair,
                 CursorType.Innkeeper,
                 CursorType.Speak
             ];
 
-            found = npcNameTargeting.FindBy(types, token);
+            hasTarget = npcNameTargeting.FindBy(types, token);
             wait.Update();
 
-            if (!found)
+            if (!hasTarget)
             {
-                LogWarn($"No target found by cursor({CursorType.Vendor.ToStringF()}, {CursorType.Repair.ToStringF()}, {CursorType.Innkeeper.ToStringF()})!");
+                LogWarn($"No target found by cursor({CursorType.Vendor.ToString()}, {CursorType.Repair.ToString()}, {CursorType.Innkeeper.ToString()})!");
             }
         }
 
-        if (!found)
+        if (!hasTarget)
         {
             Log($"Use KeyAction.Key macro to acquire target");
             input.PressRandom(key);
@@ -310,17 +399,34 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         input.PressInteract();
         wait.Update();
 
-        if (!OpenMerchantWindow())
+        MerchantResult merchantResult = OpenMerchantWindow();
+        if (merchantResult == MerchantResult.TryNextNPC && tryFindClosestNPC)
+        {
+            input.PressClearTarget();
+            Resume();
             return;
+        }
+
+        if (merchantResult != MerchantResult.Success)
+            return;
+
+        // Signal that vendor/repair completed successfully
+        // MailGoal uses this to know it can run
+        sessionStat.VendoredOrRepairedRecently = true;
 
         input.PressRandom(ConsoleKey.Escape, InputDuration.DefaultPress);
         input.PressClearTarget();
         wait.Update();
 
-        Span<Vector3> reverseMapPath = stackalloc Vector3[key.Path.Length];
-        key.Path.CopyTo(reverseMapPath);
-        reverseMapPath.Reverse();
-        navigation.SetWayPoints(reverseMapPath);
+        return;
+        // The following code no longer needed as we know for a fact we are close to an NPC spawnpoint
+        // thus we know the world coordinate and Z/height component
+        // then the pathfinder can reliable locate the player exact location
+
+        Span<Vector3> reversePath = stackalloc Vector3[key.Path.Length];
+        key.Path.CopyTo(reversePath);
+        reversePath.Reverse();
+        navigation.SetWayPoints(reversePath);
 
         pathState++;
 
@@ -363,7 +469,7 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
     {
         float totalDistance = VectorExt.TotalDistance<Vector3>(navigation.TotalRoute, VectorExt.WorldDistanceXY);
 
-        if (classConfig.UseMount && mountHandler.CanMount() &&
+        if ((classConfig.UseMount || key.UseMount) && mountHandler.CanMount() &&
             (MountHandler.ShouldMount(totalDistance) ||
             (navigation.TotalRoute.Length > 0 &&
             mountHandler.ShouldMount(navigation.TotalRoute[^1]))
@@ -375,7 +481,7 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         }
     }
 
-    private bool OpenMerchantWindow()
+    private MerchantResult OpenMerchantWindow()
     {
         float e = wait.Until(TIMEOUT, gossipReader.GossipStartOrMerchantWindowOpened);
         if (gossipReader.MerchantWindowOpened())
@@ -388,72 +494,87 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
             if (e < 0)
             {
                 LogWarn($"Gossip - {nameof(gossipReader.GossipEnd)} not fired after {e}ms");
-                return false;
+                return MerchantResult.Failed;
             }
             else
             {
                 if (gossipReader.Gossips.TryGetValue(Gossip.Vendor, out int orderNum))
                 {
-                    Log($"Picked {orderNum}th for {Gossip.Vendor.ToStringF()}");
+                    Log($"Picked {orderNum}th for {Gossip.Vendor.ToString()}");
                     execGameCommand.Run($"/run SelectGossipOption({orderNum})--");
                 }
                 else
                 {
-                    LogWarn($"Target({playerReader.TargetId}) has no {Gossip.Vendor.ToStringF()} option!");
-                    return false;
+                    LogWarn($"Target({playerReader.TargetId}) has no {Gossip.Vendor.ToString()} option!");
+                    return MerchantResult.TryNextNPC;
                 }
             }
         }
 
         Log($"Merchant window opened after {e}ms");
 
-        // Sell custom items via macro
-        input.PressRandom(key);
+        if (key.ConsoleKey != default)
+            input.PressRandom(key);
 
-        e = wait.Until(TIMEOUT, gossipReader.MerchantWindowSelling);
-        if (e >= 0)
+        if (bagReader.AnyGreyItem())
         {
+            e = wait.Until(TIMEOUT, gossipReader.MerchantWindowSelling);
+            if (e < 0)
+            {
+                sellNothingCount++;
+                if (sellNothingCount >= MAX_SELL_NOTHING_RETRIES)
+                {
+                    LogWarn($"Merchant sell nothing {sellNothingCount} times! Skip to next NPC.");
+                    sellNothingCount = 0;
+                    return MerchantResult.TryNextNPC;
+                }
+
+                Log($"Merchant sell nothing! {e}ms");
+                goto exit;
+            }
+
+            sellNothingCount = 0;
             Log($"Merchant sell grey items started after {e}ms");
 
             e = wait.Until(TIMEOUT, gossipReader.MerchantWindowSellingFinished);
             if (e >= 0)
             {
                 Log($"Merchant sell grey items finished, took {e}ms");
-                return true;
             }
             else
             {
                 Log($"Merchant sell grey items timeout! Too many items to sell?! Increase {nameof(TIMEOUT)} - {e}ms");
-                return true;
             }
         }
-        else
+
+    exit:
+        if (!string.IsNullOrEmpty(key.MacroText))
         {
-            Log($"Merchant sell nothing! {e}ms");
-            return true;
+            string text = key.Macro();
+            execGameCommand.Run(text);
+            wait.Update();
         }
+
+        return MerchantResult.Success;
     }
 
     private bool TryAutoSelectNPCAndSetPath()
     {
-        NPCType npcType = NPCType.None;
-
-        ReadOnlySpan<char> name = key.Name;
-
-        if (name.Contains(NPCType.Repair.ToStringF(), StringComparison.OrdinalIgnoreCase))
-            npcType = NPCType.Repair;
-        else if (name.Contains(NPCType.Innkeeper.ToStringF(), StringComparison.OrdinalIgnoreCase))
-            npcType = NPCType.Innkeeper;
-        else if (name.Contains(NPCType.Flightmaster.ToStringF(), StringComparison.OrdinalIgnoreCase))
-            npcType = NPCType.Flightmaster;
-        else if (name.Contains(NPCType.Trainer.ToStringF(), StringComparison.OrdinalIgnoreCase))
-            npcType = NPCType.Trainer;
-        else if (name.ContainsAny(vendorNpcPattern))
-            npcType = NPCType.Vendor;
-
         if (areaDB.CurrentArea == null)
         {
             return false;
+        }
+
+        ReadOnlySpan<char> name = key.Name;
+
+        NpcFlags npcFlag = NpcFlags.None;
+        foreach ((NpcFlags type, SearchValues<string> pattern) in npcSearchPatterns)
+        {
+            if (name.ContainsAny(pattern))
+            {
+                npcFlag = type;
+                break;
+            }
         }
 
         string[] allowedNames = [];
@@ -468,19 +589,43 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
                 .ToString()
                 .Split('|', options: StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-            if (allowedNames.Length > 0)
-                logger.LogInformation($"Search for {npcType} like {string.Join(',', allowedNames)}");
+            if (allowedNames.Length > 0 && logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Search for {NpcFlag} like {AllowedNames}", npcFlag, string.Join(',', allowedNames));
         }
 
-        if (!areaDB.TryGetNearestNPC(playerReader.Faction, npcType, playerReader.WorldPos, allowedNames, out npc, out Vector3 pos))
+        if (searchResult.Length == 0)
         {
+            searchResult = new NpcSearchResult[8];
+
+            int found = areaDB.GetNearestNpcs(playerReader.Faction, npcFlag, playerReader.WorldPos, allowedNames, searchResult.AsSpan(), out searchCount, classConfig.CrossZoneSearch);
+            if (found == 0 || searchCount == 0)
+            {
+                return false;
+            }
+
+            LogFoundPotentialNPCByType(logger, searchCount, npcFlag);
+            searchIndex = 0;
+        }
+        else
+        {
+            searchIndex++;
+        }
+
+        if (searchIndex >= searchCount)
+        {
+            pathState = PathState.Finished;
+            LogWarn("No more NPC to try!");
+
+            searchIndex = 0;
+            searchResult = [];
+            searchCount = 0;
+
             return false;
         }
 
-        Vector3 mapPos = pos;
-        key.Path = [mapPos];
+        LogWarn($"Try next closest NPC -- {searchIndex}");
 
-        LogFoundCloesestNPCByType(logger, npc.name, npcType.ToStringF(), mapPos);
+        UpdateClosestNPC(npcFlag);
 
         return true;
     }
@@ -509,7 +654,13 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         EventId = 0300,
         Level = LogLevel.Information,
         Message = "Closest NPC found {type} {name} at {pos}")]
-    static partial void LogFoundCloesestNPCByType(ILogger logger, string name, string type, Vector3 pos);
+    static partial void LogFoundCloesestNPCByType(ILogger logger, string name, NpcFlags type, Vector3 pos);
+
+    [LoggerMessage(
+        EventId = 0301,
+        Level = LogLevel.Information,
+        Message = "Found {count} potential {type} NPC.")]
+    static partial void LogFoundPotentialNPCByType(ILogger logger, int count, NpcFlags type);
 
 
     #endregion

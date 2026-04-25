@@ -1,9 +1,12 @@
 {
   "ClassName": "Priest",
   "Loot": true,
-  "PathFilename": "_pack\\1-20\\Draenei\\1-5_Azuremyst Isle.json",
-  "PathThereAndBack": true,
-  "PathReduceSteps": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/1-20/Troll.Orc/01-04_Durotar_Valley of Trials.json",
+  "PathThereAndBack": false,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
   "Wait": {
     "Sequence": [
       {
@@ -26,16 +29,6 @@
   "Combat": {
     "Sequence": [
       {
-        "Name": "Gift of the Naaru",
-        "Key": "4",
-        "HasCastBar": true,
-        "WhenUsable": true,
-        "Requirements": [
-          "Race:Draenei",
-          "Health%<50"
-        ]
-      },
-      {
         "Name": "Lesser Heal",
         "Key": "3",
         "Requirement": "Health%<40",
@@ -52,10 +45,19 @@
         ]
       },
       {
-        "Name": "AutoAttack"
+        "Name": "AutoAttack",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "!AutoAttacking"
+        ]
       },
       {
         "Name": "Approach",
+        "Requirements": [
+          "!InMeleeRange",
+          "!Casting"
+        ],
         "Log": false
       }
     ]

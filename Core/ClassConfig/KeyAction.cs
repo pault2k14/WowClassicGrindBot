@@ -37,6 +37,8 @@ public sealed partial class KeyAction
     public int SlotIndex { get; private set; }
     public int SpellId { get; set; }
 
+    public string MacroText { get; set; } = string.Empty;
+    public Func<string> Macro { get; set; } = () => "";
     public int PressDuration { get; set; } = InputDuration.DefaultPress;
 
     // enabled by default
@@ -161,6 +163,12 @@ public sealed partial class KeyAction
     {
         get => features[ActionMask.CancelOnInterrupt];
         set => features[ActionMask.CancelOnInterrupt] = value;
+    }
+
+    public bool UseMount
+    {
+        get => features[ActionMask.UseMount];
+        set => features[ActionMask.UseMount] = value;
     }
 
     public string ChangeTargetTo { get; set; } = string.Empty;

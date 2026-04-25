@@ -263,6 +263,8 @@ public static class GoalFactory
                 x.GetRequiredService<AreaDB>(),
                 x.GetRequiredService<NpcNameTargeting>(),
                 x.GetRequiredService<ClassConfiguration>(),
+                x.GetRequiredService<BagReader>(),
+                x.GetRequiredService<SessionStat>(),
                 x.GetRequiredService<IMountHandler>(),
                 x.GetRequiredService<ExecGameCommand>(),
                 x.GetRequiredService<CancellationTokenSource>()));

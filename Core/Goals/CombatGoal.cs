@@ -218,8 +218,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool targetGuidChanged = false;
         bool castOnTargetThisUpdate = false;
         wait.Update();
-        logger.LogInformation("In CombatGoals Update!");
-        logger.LogInformation("consecutiveApproach: " + consecutiveApproach);
 
         if (chatReader.ForcedFollow)
         {
@@ -537,11 +535,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         if(playerReader.TargetGuid != lastTargetGuid)
         {
             targetGuidChanged = true;
+            logger.LogInformation($"Target Changed To: {playerReader.TargetGuid}");
         }
 
         lastTargetGuid = playerReader.TargetGuid;
-
-        logger.LogInformation($"targetGuidCHange: {targetGuidChanged}");
 
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)

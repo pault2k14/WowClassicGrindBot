@@ -98,7 +98,13 @@ public static class DependencyInjection
         s.ForwardSingleton<WowProcessInput>(sp);
         s.ForwardSingleton<IMouseInput>(sp);
         s.ForwardSingleton<IMouseOverReader>(sp);
+        s.AddSingleton<INpcResetEvent, NpcResetEvent>();
 
+        s.AddSingleton<IScreenImageProvider>(x => new NullScreenImageProvider());
+
+        s.AddSingleton<CpuLineSegmentProvider>();
+        s.AddSingleton<INpcLineSegmentProvider>(x =>
+            x.GetRequiredService<CpuLineSegmentProvider>());
         s.ForwardSingleton<NpcNameFinder>(sp);
         s.ForwardSingleton<NpcNameTargetingLocations>(sp);
         s.ForwardSingleton<IWowScreen>(sp);
@@ -110,12 +116,24 @@ public static class DependencyInjection
 
         s.ForwardSingleton<DataConfig>(sp);
 
+        s.AddSingleton<WorldMapAreaDB>();
+        s.AddSingleton<CreatureDB>();
+        s.AddSingleton<FactionTemplateDB>();
+        s.AddSingleton<AreaDB>();
+        s.AddSingleton<SpellDB>();
+        s.AddSingleton<IconDB>();
+        s.AddSingleton<ItemDB>();
+        s.AddSingleton<TalentDB>();
+
         s.ForwardSingleton<AreaDB>(sp);
         s.ForwardSingleton<WorldMapAreaDB>(sp);
         s.ForwardSingleton<ItemDB>(sp);
         s.ForwardSingleton<CreatureDB>(sp);
+        s.ForwardSingleton<FactionTemplateDB>(sp);
         s.ForwardSingleton<SpellDB>(sp);
+        s.ForwardSingleton<IconDB>(sp);
         s.ForwardSingleton<TalentDB>(sp);
+        s.ForwardSingleton<MailboxDB>(sp);
 
         s.ForwardSingleton<AddonReader>(sp);
         s.ForwardSingleton<PlayerReader>(sp);
@@ -206,8 +224,11 @@ public static class DependencyInjection
         s.AddSingleton<WorldMapAreaDB>();
         s.AddSingleton<ItemDB>();
         s.AddSingleton<CreatureDB>();
+        s.AddSingleton<FactionTemplateDB>();
         s.AddSingleton<SpellDB>();
+        s.AddSingleton<IconDB>();
         s.AddSingleton<TalentDB>();
+        s.AddSingleton<MailboxDB>();
 
         s.AddAddonComponents();
 
@@ -216,7 +237,7 @@ public static class DependencyInjection
         return s;
     }
 
-    public static IServiceCollection AddCoreBase(this IServiceCollection s)
+    public static IServiceCollection AddCoreBase(this IServiceCollection s, ILogger log)
     {
         s.AddSingleton<ManualResetEventSlim>(x => new(false));
         s.AddSingleton<Wait>();
@@ -225,7 +246,9 @@ public static class DependencyInjection
         s.AddSingleton<DataConfig>(x => DataConfig.Load(
             x.GetRequiredService<StartupClientVersion>().Path));
 
-        s.ForwardSingleton<IWowScreen, IScreenImageProvider, IMinimapImageProvider, WowScreenDXGI>();
+        s.AddSingleton<IWowScreen>(x => CreateWowScreen(x.GetRequiredService<IServiceProvider>(), log));
+        s.AddSingleton<IScreenImageProvider>(x => x.GetRequiredService<IWowScreen>());
+        s.AddSingleton<IMinimapImageProvider>(x => x.GetRequiredService<IWowScreen>());
 
         s.ForwardSingleton<WowProcessInput, IMouseInput>();
 
@@ -235,12 +258,58 @@ public static class DependencyInjection
         s.AddSingleton<FrameConfigurator>();
 
         s.AddSingleton<INpcResetEvent, NpcResetEvent>();
+        s.AddSingleton<CpuLineSegmentProvider>();
+        s.AddSingleton<INpcLineSegmentProvider>(x =>
+        {
+            CpuLineSegmentProvider cpuProvider = x.GetRequiredService<CpuLineSegmentProvider>();
+
+            StartupConfigReader config = x.GetRequiredService<IOptions<StartupConfigReader>>().Value;
+            IWowScreen screen = x.GetRequiredService<IWowScreen>();
+
+            if (config.UseGpu && screen is IGpuTextureProvider gpuTextureProvider)
+            {
+                ILogger gpuLogger = x.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger<GpuLineSegmentProvider>();
+                return new GpuLineSegmentProvider(gpuLogger, gpuTextureProvider, cpuProvider);
+            }
+
+            return cpuProvider;
+        });
         s.AddSingleton<NpcNameFinder>();
 
         s.AddSingleton<NpcNameTargetingLocations>();
 
         return s;
     }
+
+    private static IWowScreen CreateWowScreen(IServiceProvider sp, ILogger log)
+    {
+        var scr = sp.GetRequiredService<IOptions<StartupConfigReader>>().Value;
+        var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+        var process = sp.GetRequiredService<WowProcess>();
+        var frames = sp.GetRequiredService<DataFrame[]>();
+
+        // Use WGC if configured and supported (Windows 10 2004+)
+        if (scr.ReaderType == AddonDataProviderType.WGC)
+        {
+            if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041) &&
+                GraphicsCaptureInterop.IsSupported)
+            {
+                var wgcLogger = loggerFactory.CreateLogger<WowScreenWGC>();
+                log.LogInformation("Using WGC (Windows Graphics Capture) - supports background capture");
+                return new WowScreenWGC(wgcLogger, process, frames);
+            }
+
+            log.LogWarning(
+                "WGC requested but not supported (requires Windows 10 2004+). Falling back to DXGI.");
+        }
+
+        // Default: DXGI
+        var dxgiLogger = loggerFactory.CreateLogger<WowScreenDXGI>();
+        log.LogInformation("Using DXGI Desktop Duplication");
+        return new WowScreenDXGI(dxgiLogger, process, frames);
+    }
+
 
 
     public static bool AddWoWProcess(

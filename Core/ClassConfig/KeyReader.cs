@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Core.Database;
+using Microsoft.Extensions.Logging;
 
 using System;
 using System.Collections.Generic;
@@ -7,6 +8,18 @@ namespace Core;
 
 public static class KeyReader
 {
+    /// <summary>
+    /// Static reference to IconDB for spell name to texture lookup.
+    /// Set during initialization.
+    /// </summary>
+    public static IconDB? IconDB { get; set; }
+
+    /// <summary>
+    /// Static reference to ItemDB for item alias (Food/Drink) resolution.
+    /// Set during initialization.
+    /// </summary>
+    public static ItemDB? ItemDB { get; set; }
+
     // Bottom Right Action Bar
     public const string BR = "N";
     public const int BRIdx = 48; //49 - 1

@@ -267,7 +267,7 @@ public sealed class FrameConfigurator : IDisposable
                 {
                     if (auto)
                     {
-                        logger.LogInformation($"Found {clientVersion.ToStringF()} {race.ToStringF()} {@class.ToStringF()}!");
+                        logger.LogInformation($"Found {clientVersion} {race.ToStringF()} {@class.ToStringF()}!");
                     }
 
                     stage++;

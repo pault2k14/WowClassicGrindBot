@@ -28,7 +28,7 @@
              <param name="y2" example="38.9">to Y</param>
              <response code="200">List of <see cref="T:System.Numerics.Vector3"/> minimap coordinates.</response>
         </member>
-        <member name="M:PathingAPI.Controllers.PPatherController.WorldRoute(System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Single)">
+        <member name="M:PathingAPI.Controllers.PPatherController.WorldRoute(System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Boolean)">
             <summary>
             Allows a route to be calculated from one point to another using world coordinates.
             </summary>
@@ -44,9 +44,10 @@
             <param name="y2" example="-2596">to Y</param>
             <param name="z2" example="96">to Z</param>
             <param name="mapid" example="1">ContientID ["Azeroth=0", "Kalimdor=1", "Outland/Expansion01=530", "Northrend=571"]</param>
+            <param name="reverse" example="true">Reverse the start and end points</param>
             <response code="200">List of <see cref="T:System.Numerics.Vector3"/> world coordinates.</response>
         </member>
-        <member name="M:PathingAPI.Controllers.PPatherController.WorldRoute2(System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Int32)">
+        <member name="M:PathingAPI.Controllers.PPatherController.WorldRoute2(System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Int32,System.Nullable{System.Boolean})">
             <summary>
             Allows a route to be calculated from one point to another using world coords.
             </summary>
@@ -62,6 +63,7 @@
             <param name="y2" example="-2596">to Y</param>
             <param name="z2" example="96">to Z</param>
             <param name="uimap" example="1413">The Barrens [uimap ID](https://wago.tools/db2/UiMap)</param>
+            <param name="startindoors" example="false">If true, the search will prefer lower - underground values - otherwise the higher ones.</param>
             <response code="200">List of <see cref="T:System.Numerics.Vector3"/> world coordinates.</response>
         </member>
         <member name="M:PathingAPI.Controllers.PPatherController.MapToWorldRoute(System.Single,System.Single,System.Single,System.Single,System.Single,System.Single,System.Int32)">
@@ -158,6 +160,22 @@
             </remarks>
             <param name="r" example="{&#34;uiMapId&#34;:1426, &#34;path&#34;:[{&#34;x&#34;:42.30905,&#34;y&#34;:59.866},{&#34;x&#34;:42.802,&#34;y&#34;:59.483},{&#34;x&#34;:43.40704,&#34;y&#34;:59.327},{&#34;x&#34;:43.69,&#34;y&#34;:58.779},{&#34;x&#34;:43.994,&#34;y&#34;:58.245999999999995},{&#34;x&#34;:44.596999999999994,&#34;y&#34;:58.038999999999994},{&#34;x&#34;:43.96,&#34;y&#34;:58.150999999999996},{&#34;x&#34;:43.585,&#34;y&#34;:58.6861},{&#34;x&#34;:43.04,&#34;y&#34;:58.958999999999996},{&#34;x&#34;:42.561,&#34;y&#34;:59.434},{&#34;x&#34;:41.961,&#34;y&#34;:59.54704},{&#34;x&#34;:41.46,&#34;y&#34;:59.156},{&#34;x&#34;:40.91004,&#34;y&#34;:58.8691},{&#34;x&#34;:40.271,&#34;y&#34;:58.958999999999996},{&#34;x&#34;:39.824,&#34;y&#34;:59.409},{&#34;x&#34;:39.42,&#34;y&#34;:59.915},{&#34;x&#34;:38.999,&#34;y&#34;:60.405},{&#34;x&#34;:38.949,&#34;y&#34;:61.025},{&#34;x&#34;:39.512,&#34;y&#34;:61.27},{&#34;x&#34;:40.11,&#34;y&#34;:61.196},{&#34;x&#34;:40.694,&#34;y&#34;:61.05004},{&#34;x&#34;:41.152,&#34;y&#34;:60.633}]}"></param> 
             <returns>An <see cref="T:Microsoft.AspNetCore.Mvc.IActionResult"/> representing the result of the operation. If successful, returns a <see cref="T:Microsoft.AspNetCore.Mvc.StatusCodeResult"/> with status code 202 (Accepted).</returns>
+        </member>
+        <member name="M:PathingAPI.Controllers.PPatherController.Reset">
+            <summary>
+            
+            Resets the ppather service, clearing any cached data or state.
+            
+            </summary>
+        </member>
+        <member name="M:PathingAPI.Pages.Index.WR(System.Double,System.Double,System.Double,System.Double,System.Double,System.Double,System.Int32,System.Boolean)">
+            <summary>WorldRoute: coordinates + mapId</summary>
+        </member>
+        <member name="M:PathingAPI.Pages.Index.WR2(System.Double,System.Double,System.Double,System.Double,System.Double,System.Double,System.Int32,System.Nullable{System.Int32},System.Boolean)">
+            <summary>WorldRoute2: coordinates + uiMap</summary>
+        </member>
+        <member name="M:PathingAPI.Pages.Index.MR(System.Int32,System.Double,System.Double,System.Int32,System.Double,System.Double)">
+            <summary>MapRoute: uiMap coordinates</summary>
         </member>
     </members>
 </doc>

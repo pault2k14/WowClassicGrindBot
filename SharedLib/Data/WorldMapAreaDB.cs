@@ -12,8 +12,14 @@ namespace SharedLib;
 public sealed class WorldMapAreaDB
 {
     private readonly FrozenDictionary<int, WorldMapArea> wmas;
+    private readonly WorldMapArea[] areasByNameLengthDesc;
+    private readonly WorldMapArea[] subzonesByNameLengthDesc;
+
+    public const int AreaIDOffset = 1000000;
 
     public IEnumerable<WorldMapArea> Values => wmas.Values;
+
+    public FrozenDictionary<int, WorldMapArea> AreaHitbox;
 
     public WorldMapAreaDB(DataConfig dataConfig)
     {
@@ -22,11 +28,35 @@ public sealed class WorldMapAreaDB
                 File.ReadAllText(
                     Path.Join(dataConfig.ExpDbc, "WorldMapArea.json")));
 
+
+        Dictionary<int, WorldMapArea> areahitbox = [];
         Dictionary<int, WorldMapArea> wmas = [];
+        List<WorldMapArea> subzones = [];
         for (int i = 0; i < span.Length; i++)
+        {
+            if (span[i].AreaID > AreaIDOffset)
+            {
+                areahitbox.TryAdd(span[i].AreaID, span[i]);
+            }
+
+            if (span[i].UIMapId == 0)
+            {
+                if (span[i].ParentAreaId > 0 && span[i].AreaName.Length > 0)
+                    subzones.Add(span[i]);
+                continue;
+            }
             wmas.Add(span[i].UIMapId, span[i]);
+        }
 
         this.wmas = wmas.ToFrozenDictionary();
+        this.AreaHitbox = areahitbox.ToFrozenDictionary();
+
+        areasByNameLengthDesc = [.. this.wmas.Values
+            .Where(static w => w.AreaName.Length > 0)
+            .OrderByDescending(static w => w.AreaName.Length)];
+
+        subzones.Sort(static (a, b) => b.AreaName.Length.CompareTo(a.AreaName.Length));
+        subzonesByNameLengthDesc = [.. subzones];
     }
 
     public int GetAreaId(int uiMap)
@@ -127,6 +157,51 @@ public sealed class WorldMapAreaDB
         }
 
         return maps.First();
+    }
+
+    public bool TryFindByAreaName(ReadOnlySpan<char> input, out WorldMapArea result)
+    {
+        ReadOnlySpan<WorldMapArea> areas = areasByNameLengthDesc;
+        for (int i = 0; i < areas.Length; i++)
+        {
+            if (input.Contains(areas[i].AreaName, StringComparison.OrdinalIgnoreCase))
+            {
+                result = areas[i];
+                return true;
+            }
+        }
+
+        result = default;
+        return false;
+    }
+
+    public bool TryFindBySubzoneName(ReadOnlySpan<char> input, out WorldMapArea parentZone)
+    {
+        ReadOnlySpan<WorldMapArea> subzones = subzonesByNameLengthDesc;
+        for (int i = 0; i < subzones.Length; i++)
+        {
+            if (input.Contains(subzones[i].AreaName, StringComparison.OrdinalIgnoreCase))
+            {
+                parentZone = GetByAreaId(subzones[i].ParentAreaId);
+                if (parentZone.UIMapId > 0)
+                    return true;
+            }
+        }
+
+        parentZone = default;
+        return false;
+    }
+
+    public WorldMapArea GetByAreaId(int areaId)
+    {
+        return wmas.Values.FirstOrDefault(x => x.AreaID == areaId);
+    }
+
+    public WorldMapArea GetByAreaIdHit(int areaIdHit)
+    {
+        return AreaHitbox.TryGetValue(areaIdHit + AreaIDOffset, out WorldMapArea wma)
+            ? wma
+            : wmas.Values.FirstOrDefault(x => x.AreaID == areaIdHit);
     }
 
 }

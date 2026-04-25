@@ -1,10 +1,10 @@
 ﻿@page "/Watch"
 
 @using static System.Text.Json.JsonSerializer
-@using Microsoft.AspNetCore.SignalR;
-@using System.Buffers;
-@using static System.Diagnostics.Stopwatch;
-@using System.Collections.Concurrent;
+@using Microsoft.AspNetCore.SignalR
+@using System.Buffers
+@using static System.Diagnostics.Stopwatch
+@using System.Collections.Concurrent
 
 @inject IJSRuntime jsRuntime
 @inject PPatherService pPatherService
@@ -16,10 +16,9 @@
 
 @implements IAsyncDisposable
 
-
-<div style="position: absolute; top: 0; left: 250px; width: -webkit-fill-available; height: 30px;
+<div id="watchtopbar" style="position: absolute; top: 0; left: 250px; width: -webkit-fill-available; height: 30px;
     background-color: black; color: white; display: flex;
-    align-items: center; justify-content: space-between; padding: 0 10px; z-index: 10;">
+    align-items: center; justify-content: space-between; padding: 0 10px; z-index: 1000;">
     <div id="canvasText" style="display:inline-block; float: left">
         ...
     </div>
@@ -27,37 +26,53 @@
         <button @onclick="ClearCache">
             <span style="color: red;">Cache Clear</span>
         </button>
-        <button @onclick="() => ToggleSceneExplorer()">
-            <span style="@(SceneExplorerEnabled ? "color: green;" : "")">Explorer</span>
-        </button>
+
+        @if (BabylonJs)
+        {
+            <button @onclick="() => ToggleSceneExplorer()">
+                <span style="@(SceneExplorerEnabled ? "color: green;" : "")">Explorer</span>
+            </button>
+        }
+
         <button @onclick="() => DrawTestPoints = !DrawTestPoints">
             <span style="@(DrawTestPoints ? "color: green;" : "")">TestPoints</span>
         </button>
-        <button @onclick="() => ToggleLayer(TriangleType.Model)">
-            <span style="@(IsLayerEnabled(TriangleType.Model) ? "color: green;" : "")">Model</span>
-        </button>
-        <button @onclick="() => ToggleLayer(TriangleType.Object)">
-            <span style="@(IsLayerEnabled(TriangleType.Object) ? "color: green;" : "")">Object</span>
-        </button>
-        <button @onclick="() => ToggleLayer(TriangleType.Water)">
-            <span style="@(IsLayerEnabled(TriangleType.Water) ? "color: green;" : "")">Water</span>
-        </button>
-        <button @onclick="() => ToggleLayer(TriangleType.Terrain)">
-            <span style="@(IsLayerEnabled(TriangleType.Terrain) ? "color: green;" : "")">Terrain</span>
-        </button>
-        <button @onclick="ToggleWireFrame">
-            <span style="@(WireFrameEnabled ? "color: green;" : "")">Wire</span>
-        </button>
-        <button @onclick="() => LoadGeometry = !LoadGeometry">
-            <span style="@(LoadGeometry ? "color: green;" : "")">Show3D</span>
-        </button>
+
+        @if (BabylonJs)
+        {
+            <button @onclick="() => ToggleLayer(TriangleType.Model)">
+                <span style="@(IsLayerEnabled(TriangleType.Model) ? "color: green;" : "")">Model</span>
+            </button>
+            <button @onclick="() => ToggleLayer(TriangleType.Object)">
+                <span style="@(IsLayerEnabled(TriangleType.Object) ? "color: green;" : "")">Object</span>
+            </button>
+            <button @onclick="() => ToggleLayer(TriangleType.Water)">
+                <span style="@(IsLayerEnabled(TriangleType.Water) ? "color: green;" : "")">Water</span>
+            </button>
+            <button @onclick="() => ToggleLayer(TriangleType.Terrain)">
+                <span style="@(IsLayerEnabled(TriangleType.Terrain) ? "color: green;" : "")">Terrain</span>
+            </button>
+            <button @onclick="ToggleWireFrame">
+                <span style="@(WireFrameEnabled ? "color: green;" : "")">Wire</span>
+            </button>
+            <button @onclick="CycleGeometryMode">
+                <span style="@(CurrentGeometryMode != GeometryMode.Off ? "color: " + GetGeometryModeColor() + ";" : "")">
+                    @GetGeometryModeText()
+                </span>
+            </button>
+        }
         <button @onclick="async () => await Reset()">
             <span>Reset</span>
         </button>
     </div>
 </div>
-<canvas id="renderCanvas" style="background:black">
-</canvas>
+
+@if (BabylonJs)
+{
+    <canvas id="renderCanvas" style="background:black">
+    </canvas>
+}
+
 @code {
 
     public enum Color
@@ -73,7 +88,17 @@
         Magenta
     }
 
+    public enum GeometryMode
+    {
+        Off = 0,              // No geometry
+        SparseFromSpots,      // Only explored triangles (70-90% reduction)
+        WalkableOnly,         // Pre-filtered walkable areas (50-80% reduction)
+        ExploredArea,         // Bounding box of explored spots (30-70% reduction)
+        All                   // Full mesh (current behavior)
+    }
+
     private const int RefreshTimeMs = 50;
+    private const float WalkableSearchRadius = 20.0f;
 
     [Parameter]
     public int PathColour { get; set; } = (int)Color.Red;
@@ -84,6 +109,9 @@
     [Parameter]
     public bool ClearPath { get; set; } = true;
 
+    [Parameter]
+    public bool BabylonJs { get; set; } = true;
+
     private bool firstRender = false;
 
     private Thread thread;
@@ -91,7 +119,7 @@
 
     private ConcurrentQueue<ChunkEventArgs> chunkEventArgs = new();
 
-    private bool LoadGeometry { get; set; } = true;
+    private GeometryMode CurrentGeometryMode { get; set; } = GeometryMode.All;
 
     private bool DrawTestPoints { get; set; } = false;
 
@@ -117,7 +145,9 @@
         this.firstRender = true;
 
         await SendLog("Waiting for first search from the API...", Token);
-        await SendCreateScene(Token);
+
+        if (BabylonJs)
+            await SendCreateScene(Token);
 
         //loggerSink.OnLog += OnLog;
 
@@ -143,6 +173,8 @@
 
         await Reset();
 
+        searchCts?.Dispose();
+
         base.Dispose();
     }
 
@@ -154,8 +186,15 @@
 
     private async void ToggleLayer(TriangleType layer)
     {
+        if (!BabylonJs) { return; }
+
         ToggleLayers[layer.ToIndex()] = !ToggleLayers[layer.ToIndex()];
-        await jsRuntime.InvokeVoidAsync("toggleLayer", Token, layer);
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("toggleLayer", Token, layer);
+        }
+        catch (Exception) when (Token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private bool IsLayerEnabled(TriangleType layer)
@@ -166,13 +205,63 @@
     private async void ToggleWireFrame()
     {
         WireFrameEnabled = !WireFrameEnabled;
-        await jsRuntime.InvokeVoidAsync("toggleWireFrame", Token);
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("toggleWireFrame", Token);
+        }
+        catch (Exception) when (Token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async void ToggleSceneExplorer()
     {
         SceneExplorerEnabled = !SceneExplorerEnabled;
-        await jsRuntime.InvokeVoidAsync("toggleSceneExplorer", Token, SceneExplorerEnabled);
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("toggleSceneExplorer", Token, SceneExplorerEnabled);
+        }
+        catch (Exception) when (Token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
+    }
+
+    private void CycleGeometryMode()
+    {
+        // Cycle through modes: Off -> SparseFromSpots -> WalkableOnly -> ExploredArea -> All -> Off
+        CurrentGeometryMode = CurrentGeometryMode switch
+        {
+            GeometryMode.Off => GeometryMode.SparseFromSpots,
+            GeometryMode.SparseFromSpots => GeometryMode.WalkableOnly,
+            GeometryMode.WalkableOnly => GeometryMode.ExploredArea,
+            GeometryMode.ExploredArea => GeometryMode.All,
+            GeometryMode.All => GeometryMode.Off,
+            _ => GeometryMode.All
+        };
+    }
+
+    private string GetGeometryModeText()
+    {
+        return CurrentGeometryMode switch
+        {
+            GeometryMode.Off => "3D:Off",
+            GeometryMode.SparseFromSpots => "3D:Sparse",
+            GeometryMode.WalkableOnly => "3D:Walk",
+            GeometryMode.ExploredArea => "3D:Area",
+            GeometryMode.All => "3D:All",
+            _ => "3D"
+        };
+    }
+
+    private string GetGeometryModeColor()
+    {
+        return CurrentGeometryMode switch
+        {
+            GeometryMode.Off => "gray",
+            GeometryMode.SparseFromSpots => "cyan",      // Most precise - cyan
+            GeometryMode.WalkableOnly => "yellow",       // Pre-filtered - yellow
+            GeometryMode.ExploredArea => "orange",       // Bounding box - orange
+            GeometryMode.All => "green",                 // Full mesh - green
+            _ => "white"
+        };
     }
 
     private async ValueTask Reset()
@@ -229,12 +318,12 @@
             }
 
             // This can be causes issues for really big path
-            if (PathGraph.DelayMs > 0 && DrawTestPoints)
+            if (PathGraph.DelayMs > 0 && DrawTestPoints && BabylonJs)
             {
                 if (testPointsCount != pPatherService.TestPoints.Count)
                 {
                     testPointsCount = pPatherService.TestPoints.Count;
-                    await SendDrawLines(pPatherService.TestPoints.ToHashSet(), Color.Green, "debug", token);
+                    await SendDrawWeightedLines(pPatherService.TestPoints, "debug", token);
                 }
 
                 if (blockedPointsCount != pPatherService.BlockedPoints.Count)
@@ -274,7 +363,9 @@
 
     private async Task DrawGeometry(CancellationToken token)
     {
-        while (LoadGeometry &&
+        if (!BabylonJs) { return; }
+
+        while (CurrentGeometryMode != GeometryMode.Off &&
             !token.IsCancellationRequested &&
             chunkEventArgs.TryDequeue(out var e))
         {
@@ -284,51 +375,66 @@
 
     private async void OnDrawFinalPath(Path spotPath)
     {
-        if (spotPath != null)
+        try
         {
-            while (thread != null || Token.IsCancellationRequested)
+            if (spotPath != null)
             {
-                Token.WaitHandle.WaitOne(RefreshTimeMs);
+                while (thread != null || Token.IsCancellationRequested)
+                {
+                    Token.WaitHandle.WaitOne(RefreshTimeMs);
+                }
             }
+
+            await DrawGeometry(Token);
+
+            if (DrawTestPoints && BabylonJs)
+            {
+                await SendDrawWeightedLines(pPatherService.TestPoints, "debug", Token);
+                await SendDrawLines(pPatherService.BlockedPoints, Color.Red, "debug2", Token);
+            }
+
+            await SendDrawLine(lastFrom.AsVector3(), PathGraph.toonHeight, Color.Green, "start", Token);
+
+            await SendDrawLine(lastTo.AsVector3(), PathGraph.toonHeight, Color.Blue, "end", Token);
+
+            if (spotPath == null || spotPath.locations.Count == 0)
+            {
+                Log("No path found");
+                return;
+            }
+
+            await SendRemoveMesh("search", Token);
+
+            await SendDrawPath(spotPath.locations, (Color)PathColour, Name, Token);
         }
-
-        await DrawGeometry(Token);
-
-        if (DrawTestPoints)
-        {
-            await SendDrawLines(pPatherService.TestPoints, Color.Green, "debug", Token);
-            await SendDrawLines(pPatherService.BlockedPoints, Color.Red, "debug2", Token);
-        }
-
-        await SendDrawLine(lastFrom.AsVector3(), PathGraph.toonHeight, Color.Green, "start", Token);
-
-        await SendDrawLine(lastTo.AsVector3(), PathGraph.toonHeight, Color.Blue, "end", Token);
-
-        if (spotPath == null || spotPath.locations.Count == 0)
-        {
-            Log("No path found");
-            return;
-        }
-
-        await SendRemoveMesh("search", Token);
-
-        await SendDrawPath(spotPath.locations, (Color)PathColour, Name, Token);
+        catch (Exception) when (Token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async void OnDrawSphere(SphereEventArgs e)
     {
-        await jsRuntime.InvokeVoidAsync("drawSphere", Token,
-            Serialize(e.Location, options), e.Colour, e.Name);
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("drawSphere", Token,
+                Serialize(e.Location, options), e.Colour, e.Name);
+        }
+        catch (Exception) when (Token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async void OnDrawLines(LinesEventArgs e)
     {
-        await DrawGeometry(Token);
+        try
+        {
+            await DrawGeometry(Token);
 
-        await SendRemoveMesh(Name, Token);
+            await SendRemoveMesh(Name, Token);
 
-        await jsRuntime.InvokeVoidAsync("drawPath", Token, Serialize(e.Locations, options), e.Colour, e.Name);
-        //await SendDrawPath(e.Locations, (Color)e.Colour, e.Name, Token);
+            await jsRuntime.InvokeVoidAsync("drawPath", Token, Serialize(e.Locations, options), e.Colour, e.Name);
+            //await SendDrawPath(e.Locations, (Color)e.Colour, e.Name, Token);
+        }
+        catch (Exception) when (Token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private /*async*/ void OnChunkAdded(ChunkEventArgs e)
@@ -343,40 +449,15 @@
         {
             TriangleCollection chunks = pPatherService.GetChunkAt(e.GridX, e.GridY);
 
-            var pooler = ArrayPool<int>.Shared;
-
-            int count = chunks.TriangleCount * 3;
-
-            var array1 = pooler.Rent(count);
-            var array2 = pooler.Rent(count);
-            var array3 = pooler.Rent(count);
-            var array4 = pooler.Rent(count);
-
-            try
+            if (CurrentGeometryMode == GeometryMode.All)
             {
-                var c1 = MeshFactory.CreateTriangles(TriangleType.Terrain, chunks, array1);
-                var c2 = MeshFactory.CreateTriangles(TriangleType.Water, chunks, array2);
-                var c3 = MeshFactory.CreateTriangles(TriangleType.Object, chunks, array3);
-                var c4 = MeshFactory.CreateTriangles(TriangleType.Model, chunks, array4);
-
-                int i = 0;
-                Memory<int>[] models = new Memory<int>[4];
-                models[i++] = array1.AsMemory(0, c1);
-                models[i++] = array2.AsMemory(0, c2);
-                models[i++] = array3.AsMemory(0, c3);
-                models[i++] = array4.AsMemory(0, c4);
-
-                var positions = MeshFactory.CreatePoints(chunks);
-
-                await hubContext.Clients.All.SendAsync("addModels", models, positions, token);
-                //await SendDrawBoundBox(chunks.Min, chunks.Max, Color.Magenta, $"boundbox_{e.GridX}_{e.GridY}", token);
+                // Original behavior: Load full mesh
+                await LoadFullMesh(chunks, token);
             }
-            finally
+            else
             {
-                pooler.Return(array1);
-                pooler.Return(array2);
-                pooler.Return(array3);
-                pooler.Return(array4);
+                // Sparse mesh variants: Load only used vertices
+                await LoadSparseMesh(chunks, token);
             }
         }
         catch (OperationCanceledException)
@@ -390,47 +471,238 @@
         }
     }
 
+    private async ValueTask LoadFullMesh(TriangleCollection chunks, CancellationToken token)
+    {
+        var pooler = ArrayPool<int>.Shared;
+        int count = chunks.TriangleCount * 3;
+
+        var array1 = pooler.Rent(count);
+        var array2 = pooler.Rent(count);
+        var array3 = pooler.Rent(count);
+        var array4 = pooler.Rent(count);
+
+        try
+        {
+            var c1 = MeshFactory.CreateTriangles(TriangleType.Terrain, chunks, array1);
+            var c2 = MeshFactory.CreateTriangles(TriangleType.Water, chunks, array2);
+            var c3 = MeshFactory.CreateTriangles(TriangleType.Object, chunks, array3);
+            var c4 = MeshFactory.CreateTriangles(TriangleType.Model, chunks, array4);
+
+            int i = 0;
+            Memory<int>[] models = new Memory<int>[4];
+            models[i++] = array1.AsMemory(0, c1);
+            models[i++] = array2.AsMemory(0, c2);
+            models[i++] = array3.AsMemory(0, c3);
+            models[i++] = array4.AsMemory(0, c4);
+
+            var positions = MeshFactory.CreatePoints(chunks);
+
+            await hubContext.Clients.All.SendAsync("addModels", models, positions, token);
+        }
+        finally
+        {
+            pooler.Return(array1);
+            pooler.Return(array2);
+            pooler.Return(array3);
+            pooler.Return(array4);
+        }
+    }
+
+    private async ValueTask LoadSparseMesh(TriangleCollection chunks, CancellationToken token)
+    {
+        List<Vector3> vertices;
+        List<int> indices;
+
+        // OPTIMIZATION: Filter spots to only those within chunk bounds
+        // This reduces O(all_spots × triangles) to O(chunk_spots × triangles)
+        var allSpots = pPatherService.GetSpots();
+        var spotsInChunk = FilterSpotsInChunkBounds(allSpots, chunks);
+
+        // Early exit: If no spots in chunk for spot-based modes
+        if (spotsInChunk.Count == 0 &&
+            (CurrentGeometryMode == GeometryMode.SparseFromSpots ||
+             CurrentGeometryMode == GeometryMode.ExploredArea))
+        {
+            // Send empty mesh
+            await SendEmptyMesh(token);
+            return;
+        }
+
+        switch (CurrentGeometryMode)
+        {
+            case GeometryMode.SparseFromSpots:
+                // Most precise: Only triangles with spots
+                (vertices, indices) = MeshFactory.CreateSparseFromSpots(
+                    chunks, spotsInChunk,
+                    toonHeight: 2.0f, toonSize: 0.5f);
+                break;
+
+            case GeometryMode.WalkableOnly:
+                // Pre-filtered: Only walkable areas near explored spots
+                // OPTIMIZED: Only tests vertices within searchRadius of discovered spots
+                (vertices, indices) = MeshFactory.CreateWalkableOnly(
+                    chunks, pPatherService.TriangleWorld,
+                    toonHeight: 2.0f, toonSize: 0.5f,
+                    nearbySpots: spotsInChunk,
+                    searchRadius: WalkableSearchRadius);
+                break;
+
+            case GeometryMode.ExploredArea:
+                // Bounding box: Explored region
+                (vertices, indices) = MeshFactory.CreateExploredArea(
+                    chunks, spotsInChunk,
+                    expandRadius: 10.0f);
+                break;
+
+            default:
+                return; // Off mode - do nothing
+        }
+
+        // Send sparse mesh to client
+        // We'll send all as terrain type for simplicity
+        Memory<int>[] models = new Memory<int>[4];
+        models[0] = indices.ToArray().AsMemory();  // Terrain
+        models[1] = Array.Empty<int>().AsMemory(); // Water
+        models[2] = Array.Empty<int>().AsMemory(); // Object
+        models[3] = Array.Empty<int>().AsMemory(); // Model
+
+        await hubContext.Clients.All.SendAsync("addModels", models, vertices, token);
+    }
+
+    private List<Spot> FilterSpotsInChunkBounds(IEnumerable<Spot> spots, TriangleCollection chunks)
+    {
+        // Get chunk bounds with some padding
+        const float PADDING = 5.0f; // Include spots slightly outside chunk
+        float minX = chunks.Min.X - PADDING;
+        float minY = chunks.Min.Y - PADDING;
+        float maxX = chunks.Max.X + PADDING;
+        float maxY = chunks.Max.Y + PADDING;
+
+        List<Spot> filtered = new();
+        foreach (var spot in spots)
+        {
+            if (spot.IsBlocked())
+                continue;
+
+            Vector3 loc = spot.Loc;
+            if (loc.X >= minX && loc.X <= maxX &&
+                loc.Y >= minY && loc.Y <= maxY)
+            {
+                filtered.Add(spot);
+            }
+        }
+
+        return filtered;
+    }
+
+    private async Task SendEmptyMesh(CancellationToken token)
+    {
+        try
+        {
+            Memory<int>[] models = new Memory<int>[4];
+            models[0] = Array.Empty<int>().AsMemory();
+            models[1] = Array.Empty<int>().AsMemory();
+            models[2] = Array.Empty<int>().AsMemory();
+            models[3] = Array.Empty<int>().AsMemory();
+
+            List<Vector3> emptyVertices = new();
+            await hubContext.Clients.All.SendAsync("addModels", models, emptyVertices, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
+    }
+
     // SignalR methods to babylonjs.js
 
     private async Task SendLog(string message, CancellationToken token)
     {
-        await jsRuntime.InvokeVoidAsync("log", token, message);
-        //await hubContext.Clients.All.SendAsync("log", message, token);
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("log", token, message);
+            //await hubContext.Clients.All.SendAsync("log", message, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async Task SendCreateScene(CancellationToken token)
     {
-        await jsRuntime.InvokeVoidAsync("createScene", token);
-        // await hubContext.Clients.All.SendAsync("createScene", token);
+        try
+        {
+            await jsRuntime.InvokeVoidAsync("createScene", token);
+            // await hubContext.Clients.All.SendAsync("createScene", token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async Task SendClear(CancellationToken token)
     {
-        await hubContext.Clients.All.SendAsync("clear", token);
+        try
+        {
+            await hubContext.Clients.All.SendAsync("clear", token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async Task SendDrawPath(IEnumerable<Vector3> points, Color color, string name, CancellationToken token)
     {
-        await hubContext.Clients.All.SendAsync("drawPath", points, (int)color, name, token);
+        try
+        {
+            await hubContext.Clients.All.SendAsync("drawPath", points, (int)color, name, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async Task SendDrawLine(Vector3 point, float height, Color color, string name, CancellationToken token)
     {
-        await hubContext.Clients.All.SendAsync("drawLine", point, height, (int)color, name, token);
+        try
+        {
+            await hubContext.Clients.All.SendAsync("drawLine", point, height, (int)color, name, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async Task SendDrawBoundBox(Vector3 min, Vector3 max, Color color, string name, CancellationToken token)
     {
-        await hubContext.Clients.All.SendAsync("drawBoundBox", min, max, (int)color, name, token);
+        try
+        {
+            await hubContext.Clients.All.SendAsync("drawBoundBox", min, max, (int)color, name, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async Task SendDrawLines(IEnumerable<Vector3> points, Color color, string name, CancellationToken token)
     {
-        await hubContext.Clients.All.SendAsync("drawLines", points, (int)color, name, token);
+        try
+        {
+            await hubContext.Clients.All.SendAsync("drawLines", points, (int)color, name, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
+    }
+
+    private async Task SendDrawWeightedLines(IEnumerable<Vector4> points, string name, CancellationToken token)
+    {
+        try
+        {
+            await hubContext.Clients.All.SendAsync("drawWeightedLines", points, name, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 
     private async Task SendRemoveMesh(string name, CancellationToken token)
     {
-        await hubContext.Clients.All.SendAsync("removeMesh", name, token);
+        try
+        {
+            await hubContext.Clients.All.SendAsync("removeMesh", name, token);
+        }
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (JSDisconnectedException) { }
     }
 }

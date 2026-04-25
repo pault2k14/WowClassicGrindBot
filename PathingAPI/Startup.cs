@@ -1,27 +1,28 @@
 using Core.Database;
 
+using Frontend;
+
 using MatBlazor;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http.Json;
-using Microsoft.AspNetCore.Routing.Matching;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Microsoft.OpenApi.Models;
-
-using PathingAPI.Pages;
+using Microsoft.OpenApi;
 
 using PPather;
 
 using Serilog;
 using Serilog.Events;
+using Serilog.Templates;
+using Serilog.Templates.Themes;
 
 using SharedLib;
+using SharedLib.Logging;
 using SharedLib.Converters;
 
 using System;
@@ -49,19 +50,19 @@ public sealed class Startup
             PathingAPILoggerSink sink = new();
             builder.Services.AddSingleton(sink);
 
-            const string outputTemplate = "[{Timestamp:HH:mm:ss:fff} {Level:u1}] {Message:lj}{NewLine}{Exception}";
-
             Log.Logger = new LoggerConfiguration()
                 //.MinimumLevel.Debug()
                 //.MinimumLevel.Verbose()
                 .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
                 .MinimumLevel.Override("Microsoft.Hosting.Lifetime", LogEventLevel.Information)
+                .Enrich.FromLogContext()
+                .Enrich.With<ShortSourceContextEnricher>()
                 .WriteTo.Sink(sink)
-                .WriteTo.File("out.log",
-                    rollingInterval: RollingInterval.Day,
-                    outputTemplate: outputTemplate)
-                .WriteTo.Debug(outputTemplate: outputTemplate)
-                .WriteTo.Console(outputTemplate: outputTemplate)
+                .WriteTo.File(new ExpressionTemplate(LogOutputTemplates.Default),
+                    "out.log",
+                    rollingInterval: RollingInterval.Day)
+                .WriteTo.Debug(new ExpressionTemplate(LogOutputTemplates.Default))
+                .WriteTo.Console(new ExpressionTemplate(LogOutputTemplates.Default, theme: TemplateTheme.Literate))
                 .CreateLogger();
 
             ILoggerFactory logFactory = LoggerFactory.Create(builder =>
@@ -74,7 +75,9 @@ public sealed class Startup
 
         Log.Information(DateTimeOffset.Now.ToString());
 
-        string exp = configuration["exp"] ?? Environment.GetEnvironmentVariable("exp") ?? "wrath";
+        string exp = configuration["exp"]
+            ?? Environment.GetEnvironmentVariable("exp")
+            ?? ClientVersion.SoM.ToString().ToLower(System.Globalization.CultureInfo.InvariantCulture);
 
         Log.Information($"Expansion: {exp}");
 
@@ -85,6 +88,8 @@ public sealed class Startup
         services.AddSingleton<DataConfig>(x => DataConfig.Load(exp));
         services.AddSingleton<WorldMapAreaDB>();
         services.AddSingleton<PPatherService>();
+        services.AddSingleton<FactionTemplateDB>();
+        services.AddSingleton<CreatureDB>();
         services.AddSingleton<AreaDB>();
 
         services.AddSingleton(provider =>
@@ -154,12 +159,7 @@ public sealed class Startup
         app.UseHttpsRedirection();
         app.UseStaticFiles();
 
-        DataConfig dataConfig = app.ApplicationServices.GetRequiredService<DataConfig>();
-        app.UseStaticFiles(new StaticFileOptions
-        {
-            FileProvider = new PhysicalFileProvider(Path.Combine(env.ContentRootPath, dataConfig.Path)),
-            RequestPath = "/path"
-        });
+        app.UseCustomStaticFiles(env);
 
         app.UseRouting();
 
@@ -169,6 +169,7 @@ public sealed class Startup
             endpoints.MapBlazorHub();
             endpoints.MapFallbackToPage("/_Host");
             endpoints.MapControllers();
+            endpoints.MapRazorPages();
         });
     }
 }
