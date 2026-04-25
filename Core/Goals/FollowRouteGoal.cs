@@ -665,6 +665,19 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             sideActivityManualReset.Set();
         }
 
+        // Watchdog: if the side-activity thread is paused but there is no active
+        // suppression and no current target, re-enable it. This recovers from the
+        // race where "Found target!" fired but GOAP never transitioned away from FRG
+        // (e.g. the target was already dead by the time the planner evaluated), leaving
+        // the thread paused indefinitely since OnEnter/Resume never gets called again.
+        if (!sideActivityManualReset.IsSet &&
+            _suppressTargetFinderUntilUtc == DateTime.MinValue &&
+            !bits.Target())
+        {
+            logger.LogInformation("[FRG] Thread watchdog: side-activity paused with no target and no suppression — re-enabling.");
+            sideActivityManualReset.Set();
+        }
+
         // 2) Determine whether we WANT navigation paused this tick
         bool wantNavPaused = bits.Target() && bits.Target_Hostile()
             && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()

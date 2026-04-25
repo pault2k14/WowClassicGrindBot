@@ -39,6 +39,7 @@
         "Name": "Smite",
         "Key": "2",
         "HasCastBar": true,
+        "BeforeCastFaceTarget": true,
         "Requirements": [
           "!InMeleeRange",
           "Mana%>50"
@@ -49,7 +50,7 @@
         "BeforeCastFaceTarget": true,
         "Requirements": [
           "InMeleeRange",
-          "!AutoAttacking"
+          //"!AutoAttacking"
         ]
       },
       {

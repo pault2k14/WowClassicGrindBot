@@ -145,7 +145,7 @@ public sealed partial class Navigation : IDisposable
 
     // Hard backoff so we don't spam Refill() every tick when route is empty
     private DateTime emptyRouteRefillCooldownUntilUtc = DateTime.MinValue;
-    private const int EmptyRouteRefillMinIntervalMs = 250; // tune: 150–400
+    private const int EmptyRouteRefillMinIntervalMs = 250; // tune: 150-400
 
     private const int StuckOwnerId = 1;
 
@@ -198,12 +198,27 @@ public sealed partial class Navigation : IDisposable
     private DateTime _approachEscapeLastAttemptUtc = DateTime.MinValue;
     private DateTime _approachEscapeStartUtc = DateTime.MinValue;
     // Locked approach direction: captured from _approachRecordedW/_approachPrevRecordedW
-    // at the moment TryUnstuck first fires, so all escalation attempts (10y→30y) use
+    // at the moment TryUnstuck first fires, so all escalation attempts (10y->30y) use
     // the same world-space direction toward the mob rather than compounding arc errors
     // from positions recorded after each escape movement.
     private Vector3 _approachEscapeLockedRecordedW;
     private Vector3 _approachEscapeLockedPrevRecordedW;
     private int _approachEscapeTargetGuid;
+
+    // Pather-based route escape — tried before stuckDetector.Update() when the bot
+    // gets stuck while following the patrol route. Uses the player's facing direction
+    // to project escape targets at 10y -> 20y -> 30y ahead, same escalation as approach escape.
+    private const float RouteEscapeStartYards = 10f;
+    private const float RouteEscapeEndYards = 30f;
+    private const double RouteEscapeTimeoutSecPerYard = 0.8;
+    private const double RouteEscapeNoMovementSec = 3.0;
+    private bool _routeEscapeActive;
+    private float _routeEscapeCurrentYards;
+    private DateTime _routeEscapeLastAttemptUtc = DateTime.MinValue;
+    private DateTime _routeEscapeStartUtc = DateTime.MinValue;
+    private Vector3 _routeEscapeStartPos;
+    private Vector3 _routeEscapeLastProgressPos;
+    private DateTime _routeEscapeLastProgressUtc = DateTime.MinValue;
 
     // Backoff to prevent request spam on repeated blacklist rejections
     private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
@@ -592,10 +607,6 @@ public sealed partial class Navigation : IDisposable
                $"blCd={(blacklistRejectCooldownUntilUtc - DateTime.UtcNow).TotalMilliseconds:0}ms " +
                $"npCd={(noProgressRefillCooldownUntilUtc - DateTime.UtcNow).TotalMilliseconds:0}ms");
 
-        // Fix #8: Navigation only rebuilds blacklist from pathSettings when FRG has not set a custom one.
-        // FRG sets AreaBlacklist directly via the property in Resume(), which takes precedence.
-        // We only auto-build here if AreaBlacklist is null AND pathSettings has rects (covers the case
-        // where Navigation is used without FRG, e.g. tests or other goals).
         if (AreaBlacklist == null && pathSettings.MapBlacklistRects is { Length: > 0 })
         {
             AreaBlacklist = BlacklistConversion.BuildWorldBlacklistFromMapRects(
@@ -606,9 +617,6 @@ public sealed partial class Navigation : IDisposable
             DetourMargin = 12f;
             MaxDetourAttemptsPerTarget = 6;
         }
-        // NOTE: We intentionally do NOT null AreaBlacklist when rects are empty here,
-        // because FRG may have set it to null itself already in Resume(). Nulling it here
-        // would be redundant and could race with a FRG Resume() that just set a custom instance.
 
         if (escapeInsertCooldownTicks > 0)
             escapeInsertCooldownTicks--;
@@ -628,14 +636,6 @@ public sealed partial class Navigation : IDisposable
 
             if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
                 return;
-
-            // NOTE: Do NOT call ClearDestinationLatch() here.
-            // At this point SetWayPoints was just called by OnDestinationReached's callback,
-            // but those waypoints may be immediately popped by wpAlreadyReached_pop before
-            // any real route is built. Clearing the latch here would allow noWork to fire
-            // OnDestinationReached again on the very next tick, creating a tight loop.
-            // The latch is cleared further below, only after TryRefillRouteNow has
-            // successfully produced a non-empty route that actually moves the player.
         }
 
         SkipBlacklistedWaypoints();
@@ -741,7 +741,6 @@ public sealed partial class Navigation : IDisposable
                     return;
 
                 // Refill produced a real route — safe to clear the latch now.
-                // This is the earliest point where we know nav has actual work ahead.
                 ClearDestinationLatch();
             }
         }
@@ -992,7 +991,12 @@ public sealed partial class Navigation : IDisposable
 
             if (HasBeenActiveRecently())
             {
-                stuckDetector.Update(StuckOwnerId, token);
+                // Try pather-based escape (10y -> 20y -> 30y forward) before falling
+                // back to the random turn+move unstuck.
+                if (!TryRouteUnstuck(token))
+                {
+                    stuckDetector.Update(StuckOwnerId, token);
+                }
             }
         }
 
@@ -1110,19 +1114,6 @@ public sealed partial class Navigation : IDisposable
     public void SetWayPoints(Span<Vector3> points)
     {
         active = true;
-        // NOTE: Do NOT call ClearDestinationLatch() here.
-        //
-        // Clearing the latch on every SetWayPoints call causes an infinite loop when
-        // the player is at or past the last waypoint on the route:
-        //   noWork (latch clear) -> OnDestinationReached -> RefillWaypoints
-        //   -> SetWayPoints -> ClearDestinationLatch -> wpAlreadyReached_pop
-        //   -> wp=0, route=0 -> noWork (latch clear again) -> repeat forever.
-        //
-        // The latch is cleared by Resume(), Stop(), and ClearAllRoutes() which are the
-        // genuine "start fresh" entry points. SetWayPoints is feeding new work to an
-        // already-active session and must not reset the latch.
-        // The latch will be cleared by RefillRouteToNextWaypoint once it successfully
-        // builds a real route to a point that is actually ahead of the player.
         SetLastSafeAnchor(playerReader.WorldPos);
         wayPoints.Clear();
         routeToNextWaypoint.Clear();
@@ -1163,6 +1154,7 @@ public sealed partial class Navigation : IDisposable
     public void ResetStuckParameters()
     {
         stuckDetector.Reset(StuckOwnerId);
+        ResetRouteEscape();
     }
 
     /// <summary>
@@ -1187,9 +1179,6 @@ public sealed partial class Navigation : IDisposable
         }
     }
 
-    /// <summary>
-    /// Records a path segment as bad — the character got physically stuck while
-    /// traversing from <paramref name="fromW"/> toward <paramref name="toW"/>.
     /// <summary>
     /// Boxes a region around the stuck position as a blacklisted area so the pather
     /// routes around it on future requests. The center is offset forward in the
@@ -1240,39 +1229,26 @@ public sealed partial class Navigation : IDisposable
     /// <summary>
     /// Called by goals when their own stuck detection fires (e.g. !stuckDetector.IsMoving()).
     /// Attempts to find a pather path by projecting a waypoint along the approach vector,
-    /// starting at 10 yards and incrementing by 1 up to 30 yards (21 attempts).
+    /// starting at 10 yards and incrementing by 10 up to 30 yards (3 attempts).
     /// Each call advances one step — returns true while an escape attempt is in progress
     /// so the goal knows to skip its own unstuck handling.
     /// Falls back to stuckDetector.Update() once all attempts are exhausted.
     /// </summary>
     public bool TryUnstuck(CancellationToken token = default)
     {
-        // If escape is already active, Navigation is executing the route.
-        // StopAndResetAtDestination() will clear _approachEscapeActive when the
-        // route completes. If active is false, navigation was stopped externally.
         if (_approachEscapeActive)
         {
             if (!active)
             {
-                // Navigation stopped externally (e.g. Stop() called) — clear escape.
                 logger.LogInformation("[NAV] ApproachEscape: navigation stopped externally — clearing escape.");
                 ResetApproachEscape();
                 return false;
             }
 
-            // Two-phase timeout:
-            // 1. Rolling no-progress check (short): if the character hasn't moved >2y
-            //    from their last known progress position within ApproachEscapeNoMovementSec,
-            //    the escape is stuck — escalate immediately. This catches both the case
-            //    where the character never moved from escape start AND where they got
-            //    stuck mid-route after making initial progress.
-            // 2. Completion timeout (scaled): if the character IS making progress
-            //    but the route still hasn't finished, give it the full time budget.
             var now2 = DateTime.UtcNow;
             Vector3 currentPos = Nav2D(playerReader.WorldPos);
             double escapeSec = (now2 - _approachEscapeStartUtc).TotalSeconds;
 
-            // Update rolling progress position whenever the character moves >2y from it.
             if (_approachEscapeLastProgressPos == default)
             {
                 _approachEscapeLastProgressPos = currentPos;
@@ -1296,11 +1272,6 @@ public sealed partial class Navigation : IDisposable
                     : $"total time {escapeSec:0.0}s exceeded {timeoutSec:0.0}s budget for {_approachEscapeCurrentYards:0}y";
                 logger.LogWarning($"[NAV] ApproachEscape: escape stuck ({reason}) — clearing to retry at larger distance.");
 
-                // If the character made essentially zero total movement during this escape,
-                // the terrain is physically trapping them — pather routes can't help.
-                // Signal the goal so it can inject a jump + reverse-direction nudge.
-                // Also record the stuck segment so future paths routing through the same
-                // geometry are rejected before the character wastes time on them.
                 float totalDisplacement = currentPos.WorldDistanceXYTo(_approachEscapeStartPos);
                 if (totalDisplacement < 0.5f)
                 {
@@ -1319,19 +1290,12 @@ public sealed partial class Navigation : IDisposable
 
         var now = DateTime.UtcNow;
 
-        // Throttle to one new attempt per 200ms so the pather has time to respond.
         if ((now - _approachEscapeLastAttemptUtc).TotalMilliseconds < 200)
             return false;
 
         _approachEscapeLastAttemptUtc = now;
-
         _approachEscapeCurrentYards += 10f;
 
-        // Lock the approach direction from the recorded positions on the first escape
-        // attempt. These are world-space positions from actual movement toward the mob,
-        // so the direction is correct regardless of coordinate axis conventions.
-        // Locking prevents compound arc errors from positions recorded after each
-        // escape movement updating the direction away from the mob.
         if (_approachEscapeLockedRecordedW == default)
         {
             _approachEscapeLockedRecordedW = _approachRecordedW;
@@ -1339,10 +1303,6 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation($"[NAV] ApproachEscape: locking approach direction from recorded positions " +
                 $"prev={_approachEscapeLockedPrevRecordedW} curr={_approachEscapeLockedRecordedW}");
 
-            // Record a blacklist rect immediately — before any escape attempt is made.
-            // This is the most accurate stuck position we have. The rect center is offset
-            // forward in the direction of travel so it captures more of the blocking
-            // geometry ahead rather than the clear ground already navigated behind.
             Vector3 approachDir = (_approachRecordedW != default && _approachPrevRecordedW != default)
                 ? new Vector3(
                     _approachRecordedW.X - _approachPrevRecordedW.X,
@@ -1354,7 +1314,6 @@ public sealed partial class Navigation : IDisposable
 
         if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
         {
-            // All pather attempts exhausted — fall back to stuckDetector.Update().
             logger.LogWarning(
                 "[NAV] ApproachEscape: all pather attempts exhausted — falling back to random unstuck.");
             ResetApproachEscape();
@@ -1367,15 +1326,11 @@ public sealed partial class Navigation : IDisposable
 
         Vector3 projection = ProjectApproachEscapeTarget(_approachEscapeCurrentYards);
 
-        // Validate the projected point is within the nav mesh area (0-100 map coords).
-        // Points outside this range have no mesh data and will crash the pather.
         Vector3 projectionMap = WorldMapAreaDB.ToMap_FlipXY(projection, playerReader.WorldMapArea);
         if (projectionMap.X is < 0 or > 100 || projectionMap.Y is < 0 or > 100)
         {
             logger.LogWarning(
                 $"[NAV] ApproachEscape: projected target at {_approachEscapeCurrentYards:0}y is outside map bounds {projectionMap} — skipping.");
-            // Don't queue — let the next TryUnstuck call try a different direction
-            // or exhaust attempts and fall back to stuckDetector.
             _approachEscapeActive = false;
             return false;
         }
@@ -1393,22 +1348,110 @@ public sealed partial class Navigation : IDisposable
     }
 
     /// <summary>
+    /// Pather-based unstuck for route following. Projects escape targets at 10y -> 20y -> 30y
+    /// ahead in the player's current facing direction and requests a pather path to each.
+    /// Called before stuckDetector.Update() so we try to route around the obstacle first.
+    /// Returns true while an escape route is in progress, false when exhausted or timed out.
+    /// </summary>
+    public bool TryRouteUnstuck(CancellationToken token = default)
+    {
+        if (_routeEscapeActive)
+        {
+            if (!active)
+            {
+                logger.LogInformation("[NAV] RouteEscape: navigation stopped externally — clearing escape.");
+                ResetRouteEscape();
+                return false;
+            }
+
+            var now2 = DateTime.UtcNow;
+            Vector3 currentPos = Nav2D(playerReader.WorldPos);
+            double escapeSec = (now2 - _routeEscapeStartUtc).TotalSeconds;
+
+            if (_routeEscapeLastProgressPos == default)
+            {
+                _routeEscapeLastProgressPos = currentPos;
+                _routeEscapeLastProgressUtc = now2;
+            }
+            else if (currentPos.WorldDistanceXYTo(_routeEscapeLastProgressPos) >= 2.0f)
+            {
+                _routeEscapeLastProgressPos = currentPos;
+                _routeEscapeLastProgressUtc = now2;
+            }
+
+            double sinceProgressSec = (now2 - _routeEscapeLastProgressUtc).TotalSeconds;
+            bool noProgress = sinceProgressSec >= RouteEscapeNoMovementSec;
+            double timeoutSec = _routeEscapeCurrentYards * RouteEscapeTimeoutSecPerYard;
+            bool timedOut = escapeSec >= timeoutSec;
+
+            if (noProgress || timedOut)
+            {
+                string reason = noProgress
+                    ? $"no progress for {sinceProgressSec:0.0}s"
+                    : $"timed out after {escapeSec:0.0}s at {_routeEscapeCurrentYards:0}y";
+                logger.LogWarning($"[NAV] RouteEscape: escape stuck ({reason}) — escalating.");
+                _routeEscapeActive = false;
+                Stop();
+                return false;
+            }
+
+            return true;
+        }
+
+        var now = DateTime.UtcNow;
+
+        if ((now - _routeEscapeLastAttemptUtc).TotalMilliseconds < 200)
+            return false;
+
+        _routeEscapeLastAttemptUtc = now;
+        _routeEscapeCurrentYards += 10f;
+
+        if (_routeEscapeCurrentYards > RouteEscapeEndYards)
+        {
+            logger.LogWarning("[NAV] RouteEscape: all pather attempts exhausted — falling back to random unstuck.");
+            ResetRouteEscape();
+            return false;
+        }
+
+        // Project escape target in the player's current facing direction.
+        float facing = playerReader.Direction;
+        Vector3 playerW = Nav2D(playerReader.WorldPos);
+        Vector3 escapeW = new Vector3(
+            playerW.X + Cos(facing) * _routeEscapeCurrentYards,
+            playerW.Y + Sin(facing) * _routeEscapeCurrentYards,
+            0f);
+
+        logger.LogInformation($"[NAV] RouteEscape: attempt {_routeEscapeCurrentYards:0}y -> {escapeW}");
+
+        SetSingleWaypoint(escapeW);
+        _routeEscapeActive = true;
+        _routeEscapeStartUtc = now;
+        _routeEscapeStartPos = playerW;
+        _routeEscapeLastProgressPos = default;
+        _routeEscapeLastProgressUtc = DateTime.MinValue;
+        return true;
+    }
+
+    public void ResetRouteEscape()
+    {
+        _routeEscapeActive = false;
+        _routeEscapeCurrentYards = RouteEscapeStartYards - 10f;
+        _routeEscapeLastAttemptUtc = DateTime.MinValue;
+        _routeEscapeStartUtc = DateTime.MinValue;
+        _routeEscapeStartPos = default;
+        _routeEscapeLastProgressPos = default;
+        _routeEscapeLastProgressUtc = DateTime.MinValue;
+    }
+
+    /// <summary>
     /// Resets approach escape state. Call when the goal exits or target changes.
     /// </summary>
     public void ResetApproachEscape()
     {
         _approachEscapeActive = false;
-        // Pre-incremented by 10 in TryUnstuck before use, so reset to Start-10
-        // so the first attempt fires at exactly ApproachEscapeStartYards (10y).
         _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
-        // NOTE: _approachEscapeLockedRecordedW/Prev are intentionally NOT cleared here.
-        // After exhausting all attempts, the locked direction is still the best available
-        // direction toward the mob — clearing it causes subsequent escapes to use a facing
-        // fallback from a different position, which often points the wrong way.
-        // Locked direction is only cleared when the target changes (ResetApproachEscapeForTarget
-        // with a different GUID) or when the goal fully resets for a new engagement.
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
         _approachEscapeStartUtc = DateTime.MinValue;
         _approachEscapeStartPos = default;
@@ -1420,17 +1463,11 @@ public sealed partial class Navigation : IDisposable
 
     /// <summary>
     /// Conditionally resets approach escape state on goal re-entry.
-    /// If the target GUID matches the previous escape, preserves the current yards
-    /// and locked direction so escalation continues from where it left off rather
-    /// than restarting at 10y. Only resets recorded positions (not locked ones) so
-    /// fresh approach presses can update the direction if needed.
     /// </summary>
     public void ResetApproachEscapeForTarget(int targetGuid)
     {
         if (targetGuid != 0 && targetGuid == _approachEscapeTargetGuid)
         {
-            // Same target re-entered — preserve yards and locked direction,
-            // just clear active flag and timing so a new attempt can start.
             _approachEscapeActive = false;
             _approachRecordedW = default;
             _approachPrevRecordedW = default;
@@ -1443,14 +1480,9 @@ public sealed partial class Navigation : IDisposable
         }
         else
         {
-            // Different target or unknown — full reset including locked direction.
             ResetApproachEscape();
             _approachEscapeLockedRecordedW = default;
             _approachEscapeLockedPrevRecordedW = default;
-            // Only update the stored GUID if we have a real one. If targetGuid is 0
-            // (playerReader.TargetGuid momentarily cleared during a rapid plan transition),
-            // keep the previous GUID so the next call with the real GUID can still match
-            // and preserve escalation state rather than resetting to 0y.
             if (targetGuid != 0)
                 _approachEscapeTargetGuid = targetGuid;
         }
@@ -1459,10 +1491,6 @@ public sealed partial class Navigation : IDisposable
     /// <summary>
     /// Projects a world-space waypoint along the approach direction by the given
     /// number of world units beyond the current player position.
-    /// Primary: locked world-space positions from actual approach movement toward the
-    /// mob, captured at first TryUnstuck. Using world positions avoids the coordinate
-    /// axis convention issue with Cos/Sin of playerReader.Direction (which is in map
-    /// angular space due to ToMap_FlipXY). Falls back to chase target, then facing.
     /// </summary>
     private Vector3 ProjectApproachEscapeTarget(float yards)
     {
@@ -1471,11 +1499,6 @@ public sealed partial class Navigation : IDisposable
         float dx = 0f, dy = 0f;
         bool directionFound = false;
 
-        // Minimum displacement required to treat the two-position vector as reliable.
-        // If the character barely moved between the two recorded approach positions
-        // (e.g. bouncing against an obstacle or on a slope), the resulting direction
-        // is noise and will send the escape the wrong way. 3y is enough to establish
-        // a meaningful direction; below that we fall through to the chase-target.
         const float MinLockDisplacementY = 3.0f;
 
         if (_approachEscapeLockedPrevRecordedW != default && _approachEscapeLockedRecordedW != default)
@@ -1492,16 +1515,11 @@ public sealed partial class Navigation : IDisposable
             else
             {
                 logger.LogWarning($"[NAV] ApproachEscape: locked positions only {disp:0.0}y apart — too noisy, preferring chase-target.");
-                // Fall through — chase target tried below, noisy positions used as last resort if needed.
-                // Store the noisy vector so we can use it if chase target is also unavailable.
                 dx = ldx2;
                 dy = ldy2;
-                // directionFound stays false — chase target gets priority.
             }
         }
-        // Chase target: try this BEFORE single/current recorded positions because it points
-        // directly at the mob — far more reliable than a 0.5y locked position offset or
-        // noisy approach recordings. Only skip it if we already have a good two-position vector.
+
         if (!directionFound && _chaseProgTarget != default)
         {
             dx = _chaseProgTarget.X - currentW.X;
@@ -1512,8 +1530,6 @@ public sealed partial class Navigation : IDisposable
 
         if (!directionFound && _approachEscapeLockedRecordedW != default)
         {
-            // Point FROM current player TOWARD the locked position (which was near the mob).
-            // Note: NOT current - locked, which would point away from the mob.
             float ldx = _approachEscapeLockedRecordedW.X - currentW.X;
             float ldy = _approachEscapeLockedRecordedW.Y - currentW.Y;
             float llen = Sqrt(ldx * ldx + ldy * ldy);
@@ -1524,7 +1540,6 @@ public sealed partial class Navigation : IDisposable
                 directionFound = true;
                 logger.LogInformation("[NAV] ApproachEscape: single locked position — projecting toward it.");
             }
-            // else: character is on the locked position — degenerate, fall through
         }
 
         if (!directionFound && _approachPrevRecordedW != default && _approachRecordedW != default)
@@ -1535,11 +1550,8 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation("[NAV] ApproachEscape: using current recorded positions for direction.");
         }
 
-        // Noisy two-position vector stored in dx/dy from the rejected displacement check above
-        // — use it as a last resort before facing if nothing better was found.
         if (!directionFound && (_approachEscapeLockedPrevRecordedW != default && _approachEscapeLockedRecordedW != default))
         {
-            // dx/dy already contain the noisy vector from above — just accept it.
             directionFound = true;
             logger.LogInformation("[NAV] ApproachEscape: noisy locked positions — using as last resort before facing.");
         }
@@ -1733,8 +1745,6 @@ public sealed partial class Navigation : IDisposable
 
             if (!SkipBlacklistedWaypoints())
             {
-                // Fix #1: removed duplicate OnDestinationReached?.Invoke() here.
-                // CompleteDestinationReached() already fires the event internally.
                 RefillExit("SkipBlacklistedWaypoints_false_destinationReached");
                 logger.LogInformation("[NAV] Refill: SkipBlacklistedWaypoints returned false -> destination reached");
                 CompleteDestinationReached();
@@ -1771,21 +1781,6 @@ public sealed partial class Navigation : IDisposable
 
                 if (wayPoints.Count == 0)
                 {
-                    // Do NOT call CompleteDestinationReached / OnDestinationReached here.
-                    //
-                    // Firing OnDestinationReached from inside RefillRouteToNextWaypoint creates
-                    // an unbreakable feedback loop:
-                    //   OnDestinationReached -> Navigation_OnDestinationReached
-                    //   -> RefillWaypoints -> SetWayPoints(closePoint)
-                    //   -> wpAlreadyReached_pop fires again -> OnDestinationReached -> repeat
-                    //
-                    // Instead, leave wp=0 route=0. The very next Update() tick enters the
-                    // noWork block (wp=0 && route=0) which fires CompleteDestinationReached
-                    // exactly once under the latch, cleanly breaking the loop.
-                    //
-                    // FRG is responsible for ensuring the waypoints it provides via
-                    // SetWayPoints are actually ahead of the player (world-distance checked
-                    // against Navigation.POP_DIST before calling SetWayPoints).
                     RefillExit("wpAlreadyReached_pop_noWpLeft");
                     _phase = "exit_wpAlreadyReached_pop_noWpLeft";
                     goto REFILL_EXIT;
@@ -1815,7 +1810,6 @@ public sealed partial class Navigation : IDisposable
             if (usePather)
             {
                 _phase = "exit_enqueuePathRequest";
-                // Committing to a pather request means we have real work ahead — clear latch.
                 ClearDestinationLatch();
                 stopMoving.Stop();
 
@@ -1853,7 +1847,6 @@ public sealed partial class Navigation : IDisposable
             noProgressSinceUtc = DateTime.MinValue;
             noProgressTargetW = routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek() : default;
 
-            // Route is real and ahead of the player — safe to clear the latch now.
             ClearDestinationLatch();
             SyncRouteStateToTop(false);
 
@@ -2121,8 +2114,6 @@ public sealed partial class Navigation : IDisposable
             $"player={playerReader.WorldPos}"
             );
 
-        // If this was an escape path, reset the no-progress timer so the watchdog
-        // gives the player a full second to start moving before it can re-trigger.
         if (escapeRouteInProgress)
             escapeNoProgressSinceUtc = DateTime.UtcNow;
 
@@ -2226,7 +2217,6 @@ public sealed partial class Navigation : IDisposable
             return;
         }
 
-        // Route from pather is real and ahead of the player — safe to clear the latch now.
         ClearDestinationLatch();
         SyncRouteStateToTop(false);
 
@@ -2818,8 +2808,6 @@ public sealed partial class Navigation : IDisposable
 
         float d = playerPos.WorldDistanceXYTo(routeTop);
 
-        // If this is the FINAL route node, align pop threshold with waypoint reach logic
-        // so route pop and waypoint pop stay consistent and don't create a refill loop.
         float popDist = POP_DIST;
 
         if (routeToNextWaypoint.Count == 1 && wayPoints.Count > 0)
@@ -2839,11 +2827,6 @@ public sealed partial class Navigation : IDisposable
 
         return false;
     }
-
-    // Fix #3: removed dead TryPopWaypointTopIfReached (used POP_DIST_SQ inconsistently with TryConsumeReachedWaypoint)
-    // Fix #11: removed dead _dbgBestWpDist, _dbgWpSinceUtc, _dbgWpTarget fields
-    // Fix #12: removed dead EscapePointFromRect method
-    // Fix #13: removed dead ShouldTreatAsReached method and its fields (reachLatchTarget, reachLatched, reachLatchUntilTicks)
 
     #region Logging
 
