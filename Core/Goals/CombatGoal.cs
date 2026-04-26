@@ -40,29 +40,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private int consecutiveNoAction;
     private bool debug;
 
-    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
-    // Checked at the top of Update() to force an immediate exit so the
-    // planner can re-evaluate — without this, a goal already running
-    // would not exit until its own Update() returned normally.
     private bool _evadeRecoveryActive;
 
-    // Ghost combat detection: triggered when both bots are stuck in combat with no hostile
-    // target and no damage dealt or taken for GhostCombatTimeoutSec. This handles bugged
-    // mobs that hold the combat flag indefinitely without ever attacking.
-    // Uses a combined DamageDoneCount + DamageTakenCount snapshot so prior kills
-    // in the same session don't mask the fact that nothing is happening right now.
     private const double GhostCombatTimeoutSec = 20.0;
     private DateTime _ghostCombatSinceUtc = DateTime.MinValue;
     private bool _ghostCombatActive;
     private int _ghostCombatDamageSnapshot;
 
-    // Geometry trap detection: tracks how long we've been stuck approaching
-    // without dealing any new damage. If the character is pinned at the base of
-    // a slope or ledge the mob is on, consecutiveApproach keeps resetting via
-    // StuckDetector but DamageDoneCount doesn't increase. After UnreachableMobTimeoutSec
-    // of this pattern we disengage — stop attack, clear target, then call
-    // navigation.TryUnstuck() which projects a waypoint along the approach vector
-    // (10-30 yards) to route around the obstacle before falling back to random movement.
     private const double UnreachableMobTimeoutSec = 18.0;
     private DateTime _stuckApproachingSinceUtc = DateTime.MinValue;
     private bool _stuckApproachingActive;
@@ -96,14 +80,12 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             AddPrecondition(GoapKey.partymembercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
-            // Lock out combat during evade recovery so assist doesn't re-engage.
             AddPrecondition(GoapKey.evadeRecovery, false);
         }
         else if(classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.partyleadercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
-            // Lock out combat during evade recovery so leader doesn't re-engage.
             AddPrecondition(GoapKey.evadeRecovery, false);
         }
         else
@@ -113,15 +95,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             AddPrecondition(GoapKey.hastarget, true);
             AddPrecondition(GoapKey.targetisalive, true);
             AddPrecondition(GoapKey.targethostile, true);
-            //AddPrecondition(GoapKey.targettargetsus, true);
             AddPrecondition(GoapKey.incombatrange, true);
             AddPrecondition(GoapKey.evadeRecovery, false);
         }
-
-        // Removed this due to if getting attack in combat while
-        // moving back to the assist location would not be able to fight
-        // back and assist also won't fight back.
-        //AddPrecondition(GoapKey.assistrequestreturn, false);
 
         if(classConfig.Loot)
         {
@@ -144,16 +120,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             if (s.Key == GoapKey.producedcorpse)
             {
-                // have to check range
-                // ex. target died far away have to consider the range and approximate
                 float distance = (lastMaxDistance + lastMinDistance) / 2f;
                 SendGoapEvent(new CorpseEvent(GetCorpseLocation(distance), distance, playerReader.Direction));
             }
             else if (s.Key == GoapKey.evadeRecovery)
             {
-                // GoapAgent broadcasts this when an evading mob is detected.
-                // We set a flag so Update() can exit immediately on the next tick,
-                // allowing the planner to re-evaluate and avoid re-selecting this goal.
                 _evadeRecoveryActive = s.Value;
             }
         }
@@ -189,12 +160,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         input.PressDisableSoftInteract();
         wait.Update();
 
-        // Reset geometry-trap detection for the new fight.
         _stuckApproachingActive = false;
         _stuckApproachingSinceUtc = DateTime.MinValue;
         _stuckApproachingDamageSnapshot = 0;
 
-        // Reset ghost combat detection for the new fight.
         _ghostCombatActive = false;
         _ghostCombatSinceUtc = DateTime.MinValue;
         _ghostCombatDamageSnapshot = 0;
@@ -218,8 +187,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool targetGuidChanged = false;
         bool castOnTargetThisUpdate = false;
         wait.Update();
-        logger.LogInformation("In CombatGoals Update!");
-        logger.LogInformation("consecutiveApproach: " + consecutiveApproach);
 
         if (chatReader.ForcedFollow)
         {
@@ -227,7 +194,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // If an evading mob was detected via GoapEvent broadcast, exit immediately.
         if (_evadeRecoveryActive)
         {
             logger.LogInformation("[CombatGoal] Evade recovery active — exiting combat goal.");
@@ -239,13 +205,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Primary in-combat evade detection: check if the current target has been
-        // flagged as evading by the combat log. This covers the case where a mob
-        // starts evading while we are already inside CombatGoal — none of the other
-        // goals are running at this point so we must catch it here.
-        // Firing EvadeBlacklistEvent causes GoapAgent to set _evadeRecoveryUntilUtc,
-        // broadcast evadeRecovery=true to all goals (including back to us via OnGoapEvent),
-        // stop movement, press N2 to notify the assist, and suppress the target finder.
         if (classConfig.Mode == Mode.PartyLeader
             && bits.Target()
             && playerReader.TargetGuid != 0
@@ -265,10 +224,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Assist-side evade handling: the leader pressed N2 and ChatReader parsed
-        // "blacklist target: {guid}". FollowFocusGoal handles this when the assist is
-        // following, but if the assist is mid-combat in CombatGoal, FollowFocusGoal
-        // is not running. Check the flag here so the assist also exits cleanly.
         if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
         {
             int blacklistGuid = chatReader.LeaderBlacklistTargetId;
@@ -287,25 +242,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
             stopMoving.Stop();
 
-            // Fire EvadeBlacklistEvent regardless of guid — for guid=0 (ghost combat)
-            // GoapAgent skips IgnoreTarget but otherwise runs the same stop-wait-coordinate
-            // flow: leader waits, assist presses N5 to send position, leader navigates to
-            // assist (or assist navigates to leader via N8/N9), then both continue route.
             SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
 
-            // Set AssistRequestReturn=true immediately so FollowFocusGoal is selectable
-            // before the N5 echo arrives from chat. N5 delivers real coordinates to leader.
             chatReader.AssistRequestReturn = true;
             input.PressAssistCantFollow();
             return;
         }
 
-        // Ghost combat detection: if neither this bot nor its focus has a hostile target
-        // and no damage (dealt or taken) has occurred since the snapshot was taken,
-        // the combat flag is being held by a bugged mob. After 20s, fire
-        // EvadeBlacklistEvent(0) — this sets evadeRecovery=true for 15s in GoapAgent,
-        // unblocking FollowRouteGoal so both bots travel out of range.
-        // The cycle repeats until a real hostile target is acquired or damage begins.
         if (classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
         {
             bool noHostileTarget = !bits.Target_Hostile() && !bits.FocusTarget_Hostile();
@@ -322,7 +265,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 }
                 else if (currentCombinedDamage > _ghostCombatDamageSnapshot)
                 {
-                    // Damage occurred — real combat is happening, reset the timer.
                     logger.LogInformation($"[CombatGoal] Ghost combat timer reset — damage increased ({_ghostCombatDamageSnapshot} -> {currentCombinedDamage}).");
                     _ghostCombatActive = false;
                     _ghostCombatSinceUtc = DateTime.MinValue;
@@ -350,7 +292,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
             else
             {
-                // A hostile target is acquired — reset the ghost combat timer.
                 if (_ghostCombatActive)
                 {
                     logger.LogInformation("[CombatGoal] Ghost combat timer reset — hostile target acquired.");
@@ -401,10 +342,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation("StuckDetector: We aren't moving");
                 stuckDetector.Update();
 
-                // Start the geometry-trap timer if not already running.
-                // Snapshot DamageDoneCount now — we watch for any increase from this
-                // value rather than checking for zero, so that damage dealt to other
-                // mobs earlier in the same combat session doesn't mask being stuck.
                 if (!_stuckApproachingActive)
                 {
                     _stuckApproachingActive = true;
@@ -414,8 +351,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 }
                 else
                 {
-                    // If DamageDoneCount has increased since the snapshot, damage is
-                    // landing — reset the timer and take a new snapshot.
                     int currentDamage = combatLog.DamageDoneCount();
                     if (currentDamage > _stuckApproachingDamageSnapshot)
                     {
@@ -456,7 +391,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             else
             {
                 logger.LogInformation("StuckDetector: We are moving");
-                // If we're moving again, reset the geometry trap timer.
                 if (_stuckApproachingActive)
                 {
                     _stuckApproachingActive = false;
@@ -471,7 +405,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             consecutiveApproach = 0;
             logger.LogInformation("StuckDetector: Reset consecutiveApproach");
-            // Damage is landing — not a geometry trap, reset the timer.
             if (_stuckApproachingActive)
             {
                 _stuckApproachingActive = false;
@@ -486,8 +419,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
-        // If we have no target or our target is dead we should
-        // try to figure out why we are still in combat
         if(!bits.Target() || !bits.Target_Alive())
         {
             if(debug)
@@ -502,7 +433,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation("bits.FocusTarget_Alive(): " + bits.FocusTarget_Alive());
                 logger.LogInformation("bits.FocusTarget_Hostile(): " + bits.FocusTarget_Hostile());
             }
-            
 
             if (bits.FocusTarget() && bits.Focus_Combat()
                 && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile()
@@ -544,11 +474,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         if(playerReader.TargetGuid != lastTargetGuid)
         {
             targetGuidChanged = true;
+            logger.LogInformation($"Target Changed To: {playerReader.TargetGuid}");
         }
 
         lastTargetGuid = playerReader.TargetGuid;
-
-        logger.LogInformation($"targetGuidCHange: {targetGuidChanged}");
 
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)
@@ -754,9 +683,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 if(keyAction.Name.Equals("Approach"))
                 {
-                    // If a pather-based escape is in progress, drive Navigation rather than
-                    // pressing Approach. TryUnstuck() checks for completion and clears the
-                    // escape when the route finishes so normal approach can resume.
                     if (navigation.IsApproachEscapeActive)
                     {
                         navigation.Update(CancellationToken.None);
@@ -765,7 +691,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                         return;
                     }
 
-                    // Record position for pather-based stuck escape direction tracking.
                     navigation.RecordApproachPosition(playerReader.WorldPos);
                     consecutiveApproach = consecutiveApproach + 1;
                 }
@@ -781,7 +706,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 break;
             }
 
-            // After performing the action restore our previous target
             if (validChangeToTarget)
             {
                 input.PressLastTarget();

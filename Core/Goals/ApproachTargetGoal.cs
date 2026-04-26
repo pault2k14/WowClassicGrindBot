@@ -214,7 +214,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (navigation.IsInBlacklistArea())
+        // Skip blacklist bail-out while an escape is in progress — the mob being
+        // in the blacklist area is exactly WHY the escape was triggered.
+        if (!navigation.IsApproachEscapeActive && navigation.IsInBlacklistArea())
         {
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
             // Broadcast to assist so they also ignore + clear this evading mob.
@@ -225,6 +227,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             input.PressClearTarget();
             wait.Update();
             stopMoving.StopForward();
+            // Clear any in-progress escape navigation so FRG doesn't inherit a
+            // stale escape waypoint pointing away from the patrol route.
+            navigation.Stop();
+            navigation.ResetApproachEscape();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
@@ -238,7 +244,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if(!bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
+        if(!navigation.IsApproachEscapeActive && !bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
         {
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
 
@@ -254,6 +260,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             input.PressClearTarget();
             wait.Update();
             stopMoving.StopForward();
+            // Clear any in-progress escape navigation so FRG doesn't inherit a
+            // stale escape waypoint pointing away from the patrol route.
+            navigation.Stop();
+            navigation.ResetApproachEscape();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
@@ -403,7 +413,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             }
             else
             {
-                if (!bits.Combat() && (targetInBlacklist || navigation.IsInBlacklistArea()))
+                if (!navigation.IsApproachEscapeActive && !bits.Combat() && (targetInBlacklist || navigation.IsInBlacklistArea()))
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
                     if (navigation.IsInBlacklistArea())
@@ -418,6 +428,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     input.PressClearTarget();
                     wait.Update();
                     stopMoving.StopForward();
+                    // Clear any in-progress escape navigation so FRG doesn't inherit a
+                    // stale escape waypoint pointing away from the patrol route.
+                    navigation.Stop();
+                    navigation.ResetApproachEscape();
                     wait.Update(playerReader.DoubleNetworkLatency);
                     wait.Update();
                     return;
@@ -588,7 +602,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
             if (bits.Target() && playerReader.TargetGuid != initialTargetGuid)
             {
-                if (targetBlacklist.Is() || navigation.IsInBlacklistArea())
+                if (!navigation.IsApproachEscapeActive && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
 
@@ -604,6 +618,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     input.PressClearTarget();
                     wait.Update();
                     stopMoving.StopForward();
+                    // Clear any in-progress escape navigation so FRG doesn't inherit a
+                    // stale escape waypoint pointing away from the patrol route.
+                    navigation.Stop();
+                    navigation.ResetApproachEscape();
                     wait.Update(playerReader.DoubleNetworkLatency);
                     wait.Update();
                     return;

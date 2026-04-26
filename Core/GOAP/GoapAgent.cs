@@ -498,6 +498,7 @@ public sealed partial class GoapAgent : IDisposable
                            )));
         logger.LogInformation("GoapKey.evadeRecovery: " + (DateTime.UtcNow < _evadeRecoveryUntilUtc));
         logger.LogInformation("GoapKey.partyleadercanfollowroute: " + CanPartyLeaderFollowRoute());
+        logger.LogInformation("GoapKey.approachEscapeActive: " + navigation.IsApproachEscapeActive);
     }
 
     private GoapGoal? NextGoal()
@@ -594,6 +595,11 @@ public sealed partial class GoapAgent : IDisposable
 
         // Compound gate for PartyLeader FollowRouteGoal — see CanPartyLeaderFollowRoute().
         WorldState[GoapKey.partyleadercanfollowroute] = CanPartyLeaderFollowRoute();
+
+        // True while Navigation has an active pather-based approach escape in progress.
+        // PullTargetGoal requires this to be false — locking the planner onto
+        // ApproachTargetGoal for the duration of the escape so ATG/PTG don't thrash.
+        WorldState[GoapKey.approachEscapeActive] = navigation.IsApproachEscapeActive;
     }
 
     public bool PartyInCombat()

@@ -1302,12 +1302,34 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation($"[NAV] ApproachEscape: locking approach direction from recorded positions " +
                 $"prev={_approachEscapeLockedPrevRecordedW} curr={_approachEscapeLockedRecordedW}");
 
-            Vector3 approachDir = (_approachRecordedW != default && _approachPrevRecordedW != default)
-                ? new Vector3(
+            // Compute approach direction for stuck rect placement.
+            // Priority: recorded prev→curr vector > chase target > facing direction.
+            // Never leave approachDir as default — that places the rect center on the
+            // player, putting the player immediately inside their own blacklist area
+            // and triggering an escape-first route away from the mob.
+            Vector3 approachDir;
+            if (_approachRecordedW != default && _approachPrevRecordedW != default)
+            {
+                approachDir = new Vector3(
                     _approachRecordedW.X - _approachPrevRecordedW.X,
                     _approachRecordedW.Y - _approachPrevRecordedW.Y,
-                    0f)
-                : default;
+                    0f);
+            }
+            else if (_chaseProgTarget != default)
+            {
+                Vector3 currentW = Nav2D(playerReader.WorldPos);
+                approachDir = new Vector3(
+                    _chaseProgTarget.X - currentW.X,
+                    _chaseProgTarget.Y - currentW.Y,
+                    0f);
+                logger.LogInformation("[NAV] ApproachEscape: using chase target for stuck rect direction.");
+            }
+            else
+            {
+                float facing = playerReader.Direction;
+                approachDir = new Vector3(Cos(facing), Sin(facing), 0f);
+                logger.LogInformation("[NAV] ApproachEscape: using facing direction for stuck rect placement.");
+            }
             AddStuckRect(Nav2D(playerReader.WorldPos), approachDir);
         }
 
@@ -1467,6 +1489,13 @@ public sealed partial class Navigation : IDisposable
     {
         if (targetGuid != 0 && targetGuid == _approachEscapeTargetGuid)
         {
+            // Preserve escape active flag if escape is currently in progress.
+            // When ATG re-enters via OnEnter() while PTG had an active escape,
+            // clearing _approachEscapeActive would drop the WorldState[approachEscapeActive]=true
+            // gate on the very next tick, allowing PTG to be selected again and
+            // causing ATG/PTG thrashing for the duration of the escape.
+            // ATG's Update() checks IsApproachEscapeActive and drives the escape correctly.
+            bool wasActive = _approachEscapeActive;
             _approachEscapeActive = false;
             _approachRecordedW = default;
             _approachPrevRecordedW = default;
@@ -1475,7 +1504,8 @@ public sealed partial class Navigation : IDisposable
             _approachEscapeStartPos = default;
             _approachEscapeLastProgressPos = default;
             _approachEscapeLastProgressUtc = DateTime.MinValue;
-            logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction.");
+            _approachEscapeActive = wasActive; // restore — escape stays live
+            logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction{(wasActive ? " (escape ACTIVE — keeping lock)" : "")}.");
         }
         else
         {
@@ -1794,16 +1824,28 @@ public sealed partial class Navigation : IDisposable
 
             if (directBlocked)
             {
-                if (TryInsertDetour(startW, targetW, r))
+                // During approach escape, skip the detour shortcut and go straight to
+                // the pather. The detour margin (12y) is designed for large static
+                // blacklists on patrol routes — for small 4y dynamic stuck rects it
+                // produces waypoints far in the wrong direction relative to the mob.
+                // The pather handles the obstacle correctly with actual map geometry.
+                if (_approachEscapeActive)
+                {
+                    logger.LogInformation($"[NAV] Refill: approach escape active — skipping detour, forcing pather for start={startW} end={targetW}");
+                    usePather = true;
+                }
+                else if (TryInsertDetour(startW, targetW, r))
                 {
                     logger.LogInformation($"[NAV] Refill: detour inserted for blocked segment start={startW} end={targetW}");
                     RefillExit("tryForwardDetour");
                     _phase = "exit_tryForwardDetour";
                     goto REFILL_EXIT;
                 }
-
-                logger.LogInformation($"[NAV] Refill: detour failed -> forcing pather start={startW} end={targetW}");
-                usePather = true;
+                else
+                {
+                    logger.LogInformation($"[NAV] Refill: detour failed -> forcing pather start={startW} end={targetW}");
+                    usePather = true;
+                }
             }
 
             if (usePather)

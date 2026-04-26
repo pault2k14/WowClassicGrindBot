@@ -68,6 +68,17 @@ public enum GoapKey
     /// </summary>
     partyleadercanfollowroute,
 
+    /// <summary>
+    /// True while a pather-based approach escape is actively in progress.
+    /// Set from Navigation.IsApproachEscapeActive each tick in UpdateWorldState.
+    /// PullTargetGoal requires this to be false — preventing it from being
+    /// selected while ApproachTargetGoal owns an in-progress escape route,
+    /// eliminating the ATG/PTG thrashing that occurs during escape navigation.
+    /// ApproachTargetGoal has no such precondition so it can run during both
+    /// normal approach and escape ownership.
+    /// </summary>
+    approachEscapeActive,
+
     LENGTH
 }
 
@@ -122,6 +133,7 @@ public static class GoapKey_Extension
         GoapKey.leaderWaitingForAssist => "leader waiting for assist",
         GoapKey.evadeRecovery => "evade recovery",
         GoapKey.partyleadercanfollowroute => "leader can follow route",
+        GoapKey.approachEscapeActive => "approach escape active",
         _ => unknown
     };
 
@@ -172,6 +184,7 @@ public static class GoapKey_Extension
         GoapKey.leaderWaitingForAssist => "!leader waiting for assist",
         GoapKey.evadeRecovery => "!evade recovery",
         GoapKey.partyleadercanfollowroute => "!leader can follow route",
+        GoapKey.approachEscapeActive => "!approach escape active",
         _ => unknown
     };
 

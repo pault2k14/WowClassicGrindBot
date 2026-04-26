@@ -111,6 +111,11 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         // Lock out pull during evade recovery so the leader doesn't immediately
         // pull a new mob while both bots are still navigating away.
         AddPrecondition(GoapKey.evadeRecovery, false);
+        // Prevents PTG from being selected while ATG owns an active pather escape.
+        // Without this the planner thrashes between ATG and PTG every tick during
+        // escape navigation since both goals have their other preconditions met.
+        // ATG has no equivalent precondition so it retains escape ownership cleanly.
+        AddPrecondition(GoapKey.approachEscapeActive, false);
 
         AddEffect(GoapKey.pulled, true);
         this.chatReader = chatReader;
@@ -245,7 +250,12 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (bits.Target() && !bits.Combat() 
+        // Skip the blacklist bail-out while an escape is in progress — the mob being
+        // in the blacklist area is exactly WHY the escape was triggered. Bailing here
+        // would abort the escape route before the character has navigated clear of the
+        // obstacle. Once the escape completes, this check fires normally and PTG bails.
+        if (!navigation.IsApproachEscapeActive &&
+            bits.Target() && !bits.Combat() 
             && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
         {
             Log("PullTargetGoal: Mob in blacklist area trying not to pull");
@@ -257,6 +267,10 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             input.PressClearTarget();
             wait.Update();
             stopMoving.StopForward();
+            // Clear any in-progress escape navigation so FRG doesn't inherit a
+            // stale escape waypoint pointing away from the patrol route.
+            navigation.Stop();
+            navigation.ResetApproachEscape();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
