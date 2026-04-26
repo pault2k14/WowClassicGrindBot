@@ -139,6 +139,15 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         // from the prior goal, and the shared StuckDetector may have been reset by Pull.
         // 2000ms gives the character time to actually start moving before we declare stuck.
         nextStuckCheckTime = MIN_TIME_TILL_IDLE;
+        // If an escape is actively navigating for a different mob, stop the
+        // navigation immediately so the old escape route doesn't drive the bot
+        // in the wrong direction during the goal transition.
+        if (navigation.IsApproachEscapeActive &&
+            playerReader.TargetGuid != 0 &&
+            navigation.ApproachEscapeTargetGuid != playerReader.TargetGuid)
+        {
+            navigation.Stop();
+        }
         if (!navigation.IsApproachEscapeActive)
             navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
         _rangeStuckLastMinRange = float.MaxValue;
@@ -150,8 +159,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
-        if (!navigation.IsApproachEscapeActive)
-            navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
+        // RATF is intentionally NOT called here. OnExit fires when the target
+        // may be in flux (tab flicker mid-transition), so the guid is unreliable.
+        // OnEnter handles the same-target vs new-target decision with a stable guid.
         input.StopForward(false);
     }
 
@@ -216,7 +226,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         // Skip blacklist bail-out while an escape is in progress — the mob being
         // in the blacklist area is exactly WHY the escape was triggered.
-        if (!navigation.IsApproachEscapeActive && navigation.IsInBlacklistArea())
+        if (!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && navigation.IsInBlacklistArea())
         {
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
             // Broadcast to assist so they also ignore + clear this evading mob.
@@ -244,7 +254,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if(!navigation.IsApproachEscapeActive && !bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
+        if(!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && !bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
         {
             logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
 
@@ -413,7 +423,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             }
             else
             {
-                if (!navigation.IsApproachEscapeActive && !bits.Combat() && (targetInBlacklist || navigation.IsInBlacklistArea()))
+                if (!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && !bits.Combat() && (targetInBlacklist || navigation.IsInBlacklistArea()))
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
                     if (navigation.IsInBlacklistArea())
@@ -590,8 +600,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // During an escape sequence (active navigation or between escalation levels),
+        // suppress Tab targeting entirely. Switching to a closer mob mid-escape would
+        // corrupt the escape state and cause target thrash. Commit to the current
+        // target until all escalation levels are exhausted (mob then gets blacklisted).
         if (playerReader.TargetGuid == initialTargetGuid &&
-            !playerReader.IsInMeleeRange())
+            !playerReader.IsInMeleeRange() &&
+            !navigation.IsApproachEscapeActive &&
+            !navigation.IsApproachEscapeEscalating)
         {
             int initialTargetMinRange = playerReader.MinRange();
             if (!input.TargetNearestTarget.OnCooldown())
@@ -602,7 +618,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
             if (bits.Target() && playerReader.TargetGuid != initialTargetGuid)
             {
-                if (!navigation.IsApproachEscapeActive && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
+                if (!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
 

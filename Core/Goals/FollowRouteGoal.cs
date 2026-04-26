@@ -359,6 +359,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             wait.Update(1000);
         }
 
+        // Note: ResetApproachEscape() is intentionally NOT called here.
+        // Any new mob encountered via FRG will have ATG.OnEnter call
+        // ResetApproachEscapeForTarget(newGuid) which hits the else branch
+        // (different guid) and resets yards correctly. Calling it here would
+        // wipe escalation state on any brief FRG activation (e.g. momentary
+        // target loss during approach movement).
+
         onEnterTime = DateTime.UtcNow;
         ResetRefillWaypointsGuard();
 

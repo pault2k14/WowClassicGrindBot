@@ -166,6 +166,19 @@ public sealed partial class Navigation : IDisposable
     /// interrupting Navigation while it is routing around an obstacle.
     /// </summary>
     public bool IsApproachEscapeActive => _approachEscapeActive;
+    public int ApproachEscapeTargetGuid => _approachEscapeTargetGuid;
+
+    /// <summary>
+    /// True when at least one pather escape attempt has been made for the current
+    /// target and the escalation sequence is not yet exhausted (more attempts remain).
+    /// While true, goals should suppress the blacklist-area bail-out so the approach
+    /// can re-trigger TryUnstuck() for the next escalation level (10y → 20y → 30y).
+    /// Cleared when ResetApproachEscape() is called (new target or all attempts done).
+    /// </summary>
+    public bool IsApproachEscapeEscalating =>
+        _approachEscapeTargetGuid != 0 &&
+        _approachEscapeCurrentYards > 0 &&
+        _approachEscapeCurrentYards <= ApproachEscapeEndYards;
 
     /// <summary>
     /// Set to true after an escape clears due to no-progress AND the character
@@ -1281,6 +1294,11 @@ public sealed partial class Navigation : IDisposable
                 _approachEscapeActive = false;
                 _approachEscapeStartUtc = DateTime.MinValue;
                 Stop();
+                // Physically halt the character — Stop() clears the route but does
+                // not release the movement keys, so the bot would keep drifting
+                // along the old escape heading and corrupt the next attempt's
+                // starting position and direction.
+                stopMoving.Stop();
                 return false;
             }
 
@@ -1487,25 +1505,48 @@ public sealed partial class Navigation : IDisposable
     /// </summary>
     public void ResetApproachEscapeForTarget(int targetGuid)
     {
-        if (targetGuid != 0 && targetGuid == _approachEscapeTargetGuid)
+        // A guid of 0 means the goal re-entered while the target was momentarily
+        // cleared (common during goal transitions). We cannot make a valid decision —
+        // preserve all existing escape state unchanged rather than wiping escalation.
+        if (targetGuid == 0)
+            return;
+
+        if (targetGuid == _approachEscapeTargetGuid)
         {
-            // Preserve escape active flag if escape is currently in progress.
-            // When ATG re-enters via OnEnter() while PTG had an active escape,
-            // clearing _approachEscapeActive would drop the WorldState[approachEscapeActive]=true
-            // gate on the very next tick, allowing PTG to be selected again and
-            // causing ATG/PTG thrashing for the duration of the escape.
-            // ATG's Update() checks IsApproachEscapeActive and drives the escape correctly.
             bool wasActive = _approachEscapeActive;
-            _approachEscapeActive = false;
-            _approachRecordedW = default;
-            _approachPrevRecordedW = default;
-            _approachEscapeLastAttemptUtc = DateTime.MinValue;
-            _approachEscapeStartUtc = DateTime.MinValue;
-            _approachEscapeStartPos = default;
-            _approachEscapeLastProgressPos = default;
-            _approachEscapeLastProgressUtc = DateTime.MinValue;
-            _approachEscapeActive = wasActive; // restore — escape stays live
-            logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction{(wasActive ? " (escape ACTIVE — keeping lock)" : "")}.");
+
+            if (wasActive)
+            {
+                // Escape is actively in progress — only reset recorded approach positions
+                // (stale pre-escape positions would corrupt direction on the next attempt).
+                // CRITICAL: preserve all timing fields (_approachEscapeStartUtc,
+                // _approachEscapeStartPos, _approachEscapeLastProgressPos/Utc).
+                // Clearing them while wasActive=true causes TryUnstuck to compute
+                // escapeSec = now - DateTime.MinValue = HUGE → immediate timeout →
+                // Stop() → _chaseProgTarget cleared → wrong escape direction on retry.
+                _approachEscapeActive = false; // briefly clear so checks pass
+                _approachRecordedW = default;
+                _approachPrevRecordedW = default;
+                _approachEscapeLastAttemptUtc = DateTime.MinValue;
+                // DO NOT clear: _approachEscapeStartUtc, _approachEscapeStartPos,
+                //               _approachEscapeLastProgressPos, _approachEscapeLastProgressUtc
+                _approachEscapeActive = true; // restore — escape stays live with valid timing
+                logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction (escape ACTIVE — timing preserved).");
+            }
+            else
+            {
+                // Escape not active — full reset of per-attempt timing, preserve escalation
+                // and locked direction vectors for the next attempt.
+                _approachEscapeActive = false;
+                _approachRecordedW = default;
+                _approachPrevRecordedW = default;
+                _approachEscapeLastAttemptUtc = DateTime.MinValue;
+                _approachEscapeStartUtc = DateTime.MinValue;
+                _approachEscapeStartPos = default;
+                _approachEscapeLastProgressPos = default;
+                _approachEscapeLastProgressUtc = DateTime.MinValue;
+                logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction.");
+            }
         }
         else
         {
@@ -1555,6 +1596,24 @@ public sealed partial class Navigation : IDisposable
             dy = _chaseProgTarget.Y - currentW.Y;
             directionFound = true;
             logger.LogInformation("[NAV] ApproachEscape: using chase target for direction.");
+        }
+
+        // Stuck rect center is placed 3y ahead of the player in the approach direction —
+        // it is the most reliable proxy for the mob/obstacle direction when recorded
+        // positions are noisy and the chase target has been cleared (e.g. after Stop()).
+        if (!directionFound && _stuckWorldRects.Count > 0)
+        {
+            var lastRect = _stuckWorldRects[_stuckWorldRects.Count - 1];
+            float rcx = (lastRect.MinX + lastRect.MaxX) * 0.5f;
+            float rcy = (lastRect.MinY + lastRect.MaxY) * 0.5f;
+            dx = rcx - currentW.X;
+            dy = rcy - currentW.Y;
+            float rlen = Sqrt(dx * dx + dy * dy);
+            if (rlen >= 0.5f)
+            {
+                directionFound = true;
+                logger.LogInformation($"[NAV] ApproachEscape: using stuck rect center {new Vector3(rcx, rcy, 0f)} for direction.");
+            }
         }
 
         if (!directionFound && _approachEscapeLockedRecordedW != default)
@@ -1692,8 +1751,11 @@ public sealed partial class Navigation : IDisposable
 
             Vector3 startW = Nav2D(playerReader.WorldPos);
 
-            // Escape-mode guard
-            if (escapeActive)
+            // Escape-mode guard — skip entirely when an approach escape is active.
+            // The approach escape owns navigation in that window; the blacklist escape
+            // would route the bot in the wrong direction (north to exit the rect)
+            // instead of toward the approach escape target.
+            if (escapeActive && !_approachEscapeActive)
             {
                 if (AreaBlacklist?.ContainsWorld(startW) != true)
                 {

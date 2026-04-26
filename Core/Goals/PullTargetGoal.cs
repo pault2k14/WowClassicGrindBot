@@ -156,8 +156,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
-        if (!navigation.IsApproachEscapeActive)
-            navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
+        // RATF intentionally omitted — see ATG.OnExit comment.
 
         if (requiresNpcNameFinder)
         {
@@ -255,6 +254,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         // would abort the escape route before the character has navigated clear of the
         // obstacle. Once the escape completes, this check fires normally and PTG bails.
         if (!navigation.IsApproachEscapeActive &&
+            !navigation.IsApproachEscapeEscalating &&
             bits.Target() && !bits.Combat() 
             && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
         {
@@ -282,20 +282,18 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (PullDurationMs > MAX_PULL_DURATION)
+        // Skip pull-duration timeout entirely while an escape is running or
+        // escalating — the navigation owns movement, pressing StopAttack or
+        // clearing the target mid-escape causes a tight spam loop and breaks
+        // the escape sequence.
+        if (PullDurationMs > MAX_PULL_DURATION &&
+            !navigation.IsApproachEscapeActive &&
+            !navigation.IsApproachEscapeEscalating)
         {
             input.PressStopAttack();
-
-            // Only clear the target if no escape is already in progress.
-            // Clearing mid-escape causes FRG to take over and compete with
-            // the escape navigation.
-            if (!navigation.IsApproachEscapeActive)
-            {
-                input.PressClearTarget();
-                navigation.TryUnstuck();
-                Log("Pull taking too long. Clear target and attempting unstuck.");
-            }
-
+            input.PressClearTarget();
+            navigation.TryUnstuck();
+            Log("Pull taking too long. Clear target and attempting unstuck.");
             return;
         }
 
