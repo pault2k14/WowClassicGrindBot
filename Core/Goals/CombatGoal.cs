@@ -218,6 +218,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool targetGuidChanged = false;
         bool castOnTargetThisUpdate = false;
         wait.Update();
+        logger.LogInformation("In CombatGoals Update!");
+        logger.LogInformation("consecutiveApproach: " + consecutiveApproach);
 
         if (chatReader.ForcedFollow)
         {
@@ -252,6 +254,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             logger.LogInformation($"[CombatGoal] Target guid={playerReader.TargetGuid} is evading — broadcasting and exiting.");
             SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
             playerReader.IgnoreTarget(playerReader.TargetGuid);
+            // Clear dynamic stuck rects so the evade retreat path is not blocked
+            // by rects placed during the failed approach to this mob.
+            navigation.ClearStuckRects();
             input.PressStopAttack();
             wait.Update();
             input.PressClearTarget();
@@ -431,6 +436,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                             input.PressClearTarget();
                             wait.Update();
                             stopMoving.Stop();
+                            // Clear dynamic stuck rects so the retreat path is not blocked
+                            // by rects placed during the failed approach. The mob is now
+                            // ignored so re-approach is already prevented permanently.
+                            navigation.ClearStuckRects();
                             // Use pather-based escape: project waypoint along approach vector
                             // (10-30 yards, incrementing by 1) to route around the obstacle.
                             // Falls back to random turn/jump if all pather attempts fail.
@@ -535,10 +544,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         if(playerReader.TargetGuid != lastTargetGuid)
         {
             targetGuidChanged = true;
-            logger.LogInformation($"Target Changed To: {playerReader.TargetGuid}");
         }
 
         lastTargetGuid = playerReader.TargetGuid;
+
+        logger.LogInformation($"targetGuidCHange: {targetGuidChanged}");
 
         ReadOnlySpan<KeyAction> span = Keys;
         for (int i = 0; bits.Target_Alive() && i < span.Length; i++)

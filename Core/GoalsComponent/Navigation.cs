@@ -102,10 +102,10 @@ public sealed partial class Navigation : IDisposable
     // Runtime stuck rects recorded when the character makes zero movement during an escape.
     private readonly List<BlacklistRect> _stuckWorldRects = new();
 
-    // Half-size in world yards of the box placed around a stuck position.
-    // Large enough that after a 10y escape the player is outside the rect,
-    // allowing path validation to catch routes back through it.
-    private const float StuckRectHalfSizeY = 5f;
+    // Half-size in world yards of the dynamically-added stuck rect.
+    // Bottom edge is 1y ahead of the player, top edge is 5y ahead (4y deep).
+    // Center is 3y ahead (1y gap + 2y half-size).
+    private const float StuckRectHalfSizeY = 2f;
 
     /// <summary>How far outside a forbidden rect detour points are placed (WORLD units).</summary>
     public float DetourMargin { get; set; } = 12f;
@@ -1194,12 +1194,11 @@ public sealed partial class Navigation : IDisposable
             float len = MathF.Sqrt(forwardDir.X * forwardDir.X + forwardDir.Y * forwardDir.Y);
             if (len > 0.01f)
             {
-                // The rect is axis-aligned (AABB). For a diagonal approach the player
-                // can be inside the AABB even when they are 6y from the center, because
-                // the AABB check tests each axis independently. Worst case is 45° where
-                // the minimum safe offset is halfSize * sqrt(2) ≈ 7.07y. Use 8y to
-                // guarantee the player is outside regardless of approach angle.
-                float offsetY = 8f;
+                // Bottom edge is 1y ahead of the player, center is 3y ahead,
+                // top edge is 5y ahead. Half-size is 2y (rect is 4y deep).
+                // AABB worst case (45° approach): player is 3 - 2*sqrt(2) ≈ 0.17y
+                // outside the nearest corner — just clear.
+                float offsetY = 3f;
                 center = new Vector3(
                     posW.X + (forwardDir.X / len) * offsetY,
                     posW.Y + (forwardDir.Y / len) * offsetY,
@@ -2477,6 +2476,23 @@ public sealed partial class Navigation : IDisposable
     {
         bool inside = AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true;
         return inside;
+    }
+
+    /// <summary>
+    /// Clears all dynamically-added stuck rects accumulated during approach attempts.
+    /// Restores the effective blacklist to the static route blacklist only.
+    /// Call when the bot is fleeing and the mob has been ignored — the rects served
+    /// their purpose (preventing re-approach) but would block the retreat path.
+    /// Static blacklist areas configured in the route YAML are unaffected.
+    /// </summary>
+    public void ClearStuckRects()
+    {
+        if (_stuckWorldRects.Count == 0)
+            return;
+
+        _stuckWorldRects.Clear();
+        _areaBlacklist = _staticAreaBlacklist;
+        logger.LogInformation("[NAV] ClearStuckRects: dynamic stuck rects cleared — restoring static blacklist only.");
     }
 
     private bool IsBlacklistedPoint(Vector3 worldPoint)
