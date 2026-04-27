@@ -144,12 +144,37 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         // in the wrong direction during the goal transition.
         if (navigation.IsApproachEscapeActive &&
             playerReader.TargetGuid != 0 &&
+            navigation.ApproachEscapeTargetGuid != 0 &&
             navigation.ApproachEscapeTargetGuid != playerReader.TargetGuid)
         {
+            // Only stop the escape if it's definitely for a DIFFERENT mob.
+            // EscapeGuid=0 means the guid wasn't stamped yet — treat as same mob.
             navigation.Stop();
         }
         if (!navigation.IsApproachEscapeActive)
+        {
+            // [LOG-11] Log pre-RATF state so we can trace the 'was 0' mystery:
+            // RATF will see this guid/yards on entry. If 'was 0' fires immediately after
+            // this log, the guid was wiped between this OnEnter and the RATF call.
+            logger.LogDebug($"[ATG] OnEnter: calling RATF for target={playerReader.TargetGuid} — " +
+                $"pre-RATF state: escapeGuid={navigation.ApproachEscapeTargetGuid} " +
+                $"yards={navigation.ApproachEscapeCurrentYards:0} active={navigation.IsApproachEscapeActive} " +
+                $"exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating}");
             navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
+        }
+        else
+        {
+            // [LOG-10] BUG D diagnostic: escape is active so RATF is skipped entirely.
+            // Log the full escape state so we can see what is live when ATG takes over.
+            // In the log we saw ATG enter at :12:030 with no RATF appearing, yet an escape
+            // was active with stale startUtc from a prior 10y escape — this log will expose that.
+            logger.LogInformation($"[ATG] OnEnter: escape ACTIVE — skipping RATF. " +
+                $"yards={navigation.ApproachEscapeCurrentYards:0} " +
+                $"startUtc={navigation.ApproachEscapeStartUtc:HH:mm:ss.fff} " +
+                $"lastAttemptAge={(DateTime.UtcNow - navigation.ApproachEscapeLastAttemptUtc).TotalMilliseconds:0}ms " +
+                $"guid={navigation.ApproachEscapeTargetGuid} target={playerReader.TargetGuid} " +
+                $"exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating}");
+        }
         _rangeStuckLastMinRange = float.MaxValue;
         _rangeStuckCheckAtMs = RangeStuckIntervalMs;
 
@@ -226,9 +251,16 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         // Skip blacklist bail-out while an escape is in progress — the mob being
         // in the blacklist area is exactly WHY the escape was triggered.
-        if (!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && navigation.IsInBlacklistArea())
+        // Bail out when: all escape levels exhausted (mob genuinely unreachable) OR
+        // player drifted into blacklist area without an active escape in progress.
+        if (!navigation.IsApproachEscapeActive &&
+            (navigation.IsApproachEscapeExhausted ||
+             (!navigation.IsApproachEscapeEscalating && navigation.IsInBlacklistArea())))
         {
-            logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
+            string bail1Reason = navigation.IsApproachEscapeExhausted
+                ? $"all escape levels exhausted (10y/20y/30y failed)"
+                : $"player inside blacklist area";
+            logger.LogWarning($"[ATG] Bail-out: blacklisting target guid={playerReader.TargetGuid} — reason: {bail1Reason}.");
             // Broadcast to assist so they also ignore + clear this evading mob.
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
@@ -241,6 +273,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             // stale escape waypoint pointing away from the patrol route.
             navigation.Stop();
             navigation.ResetApproachEscape();
+            navigation.ClearStuckRects();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
@@ -256,7 +289,11 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if(!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && !bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
         {
-            logger.LogInformation("In BlacklistArea - Adding target to AreaBlacklistMobs list.");
+            // [LOG-13] Second bail-out — add escape state so we can distinguish
+            // "blacklist drift" from "exhausted-and-bailed" in the log.
+            logger.LogWarning($"[ATG] Bail-out: blacklisting target guid={playerReader.TargetGuid} — " +
+                $"reason: {(targetInBlacklist ? "target in blacklist" : "player inside blacklist area")} " +
+                $"[exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating} yards={navigation.ApproachEscapeCurrentYards:0}].");
 
             if (navigation.IsInBlacklistArea())
             {
@@ -274,6 +311,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             // stale escape waypoint pointing away from the patrol route.
             navigation.Stop();
             navigation.ResetApproachEscape();
+            navigation.ClearStuckRects();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
@@ -314,6 +352,15 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     // through the whole escape and would immediately trigger MAX_APPROACH_DURATION_MS.
                     if (!navigation.TryUnstuck())
                     {
+                        // [LOG-12] Full escape state on false-return — tells us why it returned false
+                        // (escape-stuck vs. all-exhausted) and what the goal will do next.
+                        // physStuck=true means jump+reverse will be injected below.
+                        logger.LogInformation(
+                            $"[ATG] TryUnstuck returned false — " +
+                            $"guid={navigation.ApproachEscapeTargetGuid} yards={navigation.ApproachEscapeCurrentYards:0} " +
+                            $"exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating} " +
+                            $"physStuck={navigation.IsApproachEscapePhysicallyStuck} " +
+                            $"startUtc={navigation.ApproachEscapeStartUtc:HH:mm:ss.fff}");
                         // If the character made zero movement, pather routes can't help —
                         // the terrain is physically trapping them. Inject a jump + brief
                         // backward movement to escape the geometry, matching the manual
@@ -350,6 +397,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                     // trigger the going-away check when the addon data refreshes to the real
                     // post-escape distance. MaxValue disables the going-away check until the
                     // first approach press records the genuine new minimum range.
+                    logger.LogInformation(
+                        $"[ATG] Escape complete — resetting approach timers. " +
+                        $"range={playerReader.MinRange():0.0}y exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating}");
                     approachStart = GetTimestamp();
                     initialMinRange = float.MaxValue;
                     _rangeStuckLastMinRange = playerReader.MinRange();
@@ -543,7 +593,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             float currentRange = playerReader.MinRange();
             if (currentRange >= _rangeStuckLastMinRange)
             {
-                Log($"No range progress after {RangeStuckIntervalMs}ms ({_rangeStuckLastMinRange:0.0} -> {currentRange:0.0}y) — attempting pather escape.");
+                Log($"No range progress after {RangeStuckIntervalMs}ms ({_rangeStuckLastMinRange:0.0} -> {currentRange:0.0}y) — attempting pather escape. " +
+                    $"escalating={navigation.IsApproachEscapeEscalating} exhausted={navigation.IsApproachEscapeExhausted}");
                 // Reset the check window BEFORE calling TryUnstuck so that if
                 // TryUnstuck exhausts all attempts and returns false, the check
                 // doesn't fire again on the very next tick from a different code path.

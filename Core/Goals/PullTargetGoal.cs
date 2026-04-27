@@ -17,6 +17,10 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     private const int AcquireTargetTimeMs = 5000;
     private const int MAX_PULL_DURATION = 15_000;
+    // How long without range reduction before firing TryUnstuck, even if stuckDetector
+    // thinks we're moving. Matches ATG's RangeStuckIntervalMs. Catches the "shuffling
+    // sideways against terrain" case: the bot IS moving but not toward the mob.
+    private const double RangeStuckIntervalMs = 3000;
 
     private readonly ILogger<PullTargetGoal> logger;
     private readonly ConfigurableInput input;
@@ -41,6 +45,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     private readonly bool requiresNpcNameFinder;
 
     private long pullStart;
+    private float _rangeStuckLastMinRange;
+    private double _rangeStuckCheckAtMs;
 
     // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
     // Checked at the top of Update() to force an immediate exit.
@@ -125,8 +131,43 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     {
         wait.Update();
         stuckDetector.Reset();
+
+        // BUG 5 FIX: mirror ATG's wrong-mob escape guard.
+        // Evidence: Run 4 line 721 — PTG entered with "escape ACTIVE" for guid=7299149
+        // while target=7305883. No guard existed to stop the stale escape, so PTG drove
+        // the wrong-mob navigation and the bot engaged a different mob entirely.
+        // ATG has this guard (ApproachTargetGoal.cs lines 145-151); PTG did not.
+        if (navigation.IsApproachEscapeActive &&
+            playerReader.TargetGuid != 0 &&
+            navigation.ApproachEscapeTargetGuid != 0 &&
+            navigation.ApproachEscapeTargetGuid != playerReader.TargetGuid)
+        {
+            logger.LogWarning($"[PTG] OnEnter: stopping wrong-mob escape " +
+                $"(escapeGuid={navigation.ApproachEscapeTargetGuid} ≠ target={playerReader.TargetGuid}) — calling Stop().");
+            navigation.Stop();
+        }
+
         if (!navigation.IsApproachEscapeActive)
+        {
+            // [LOG-14a] Pre-RATF state snapshot — mirrors ATG [LOG-11].
+            logger.LogDebug($"[PTG] OnEnter: calling RATF for target={playerReader.TargetGuid} — " +
+                $"pre-RATF state: escapeGuid={navigation.ApproachEscapeTargetGuid} " +
+                $"yards={navigation.ApproachEscapeCurrentYards:0} active={navigation.IsApproachEscapeActive} " +
+                $"exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating}");
             navigation.ResetApproachEscapeForTarget(playerReader.TargetGuid);
+        }
+        else
+        {
+            // [LOG-14b] BUG D diagnostic: escape is active so RATF is skipped.
+            // If the guid/startUtc here are stale (from a prior escape), this log exposes it.
+            logger.LogInformation($"[PTG] OnEnter: escape ACTIVE — skipping RATF. " +
+                $"yards={navigation.ApproachEscapeCurrentYards:0} " +
+                $"startUtc={navigation.ApproachEscapeStartUtc:HH:mm:ss.fff} " +
+                $"lastAttemptAge={(DateTime.UtcNow - navigation.ApproachEscapeLastAttemptUtc).TotalMilliseconds:0}ms " +
+                $"guid={navigation.ApproachEscapeTargetGuid} target={playerReader.TargetGuid} " +
+                $"exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating}");
+        }
+        _rangeStuckLastMinRange = float.MaxValue;
 
         if (mountHandler.IsMounted())
         {
@@ -150,6 +191,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         }
 
         pullStart = GetTimestamp();
+        _rangeStuckCheckAtMs = PullDurationMs + RangeStuckIntervalMs;
         input.PressDisableSoftInteract();
         wait.Update();
     }
@@ -177,6 +219,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (e.GetType() == typeof(ResumeEvent))
         {
             pullStart = GetTimestamp();
+            _rangeStuckLastMinRange = float.MaxValue;
+            _rangeStuckCheckAtMs = PullDurationMs + RangeStuckIntervalMs;
         }
         else if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
         {
@@ -252,13 +296,19 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         // Skip the blacklist bail-out while an escape is in progress — the mob being
         // in the blacklist area is exactly WHY the escape was triggered. Bailing here
         // would abort the escape route before the character has navigated clear of the
-        // obstacle. Once the escape completes, this check fires normally and PTG bails.
+        // obstacle. Once the escape completes (or all levels exhaust), this check fires
+        // and PTG bails. IsApproachEscapeExhausted triggers immediately when all 3 levels
+        // fail so the mob gets blacklisted without needing the player inside the rect.
         if (!navigation.IsApproachEscapeActive &&
-            !navigation.IsApproachEscapeEscalating &&
-            bits.Target() && !bits.Combat() 
-            && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
+            bits.Target() && !bits.Combat() &&
+            (navigation.IsApproachEscapeExhausted ||
+             (!navigation.IsApproachEscapeEscalating &&
+              (targetBlacklist.Is() || navigation.IsInBlacklistArea()))))
         {
-            Log("PullTargetGoal: Mob in blacklist area trying not to pull");
+            string ptgBailReason = navigation.IsApproachEscapeExhausted
+                ? "all escape levels exhausted (10y/20y/30y failed)"
+                : targetBlacklist.Is() ? "target in blacklist" : "player inside blacklist area";
+            logger.LogWarning($"[PTG] Bail-out: blacklisting target guid={playerReader.TargetGuid} — reason: {ptgBailReason}.");
             // Broadcast to assist so they also ignore + clear this mob.
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
@@ -271,6 +321,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             // stale escape waypoint pointing away from the patrol route.
             navigation.Stop();
             navigation.ResetApproachEscape();
+            navigation.ClearStuckRects();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
@@ -397,7 +448,30 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             // completed the escape. Only call TryUnstuck if still active (to
             // check the timeout), otherwise let normal approach resume next tick.
             if (navigation.IsApproachEscapeActive)
+            {
+                // [LOG-15] Periodic heartbeat while escape is active — emits at Debug level.
+                // Provides escapeSec and displaced so we can see mid-escape progress without
+                // waiting for completion or timeout. Throttled to ~1s to avoid log spam.
+                if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
+                {
+                    double escSec = (DateTime.UtcNow - navigation.ApproachEscapeStartUtc).TotalSeconds;
+                    logger.LogDebug($"[PTG] DefaultApproach: escape heartbeat — " +
+                        $"yards={navigation.ApproachEscapeCurrentYards:0} escapeSec={escSec:0.0}s " +
+                        $"range={playerReader.MinRange():0.0}y guid={navigation.ApproachEscapeTargetGuid}");
+                }
                 navigation.TryUnstuck();
+            }
+            else
+            {
+                // Escape just completed — reset range tracker so the 3s window
+                // starts fresh. Pre-escape range data is stale (player moved during
+                // navigation) and would immediately trigger a false stuck detection.
+                logger.LogInformation(
+                    $"[PTG] Escape complete — resetting range-stuck tracker. " +
+                    $"range={playerReader.MinRange():0.0}y exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating}");
+                _rangeStuckLastMinRange = playerReader.MinRange();
+                _rangeStuckCheckAtMs = PullDurationMs + RangeStuckIntervalMs;
+            }
             return;
         }
 
@@ -414,8 +488,47 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("EligibleEnemySoftTargetExists(): " + EligibleEnemySoftTargetExists());
         }
 
+        // Range-progress stuck detection: even if stuckDetector.IsMoving() is true
+        // (bot is physically moving — sliding sideways against terrain), if MinRange
+        // hasn't decreased after RangeStuckIntervalMs the character is not making
+        // progress toward the mob. Fire TryUnstuck to route around the obstacle.
+        if (PullDurationMs >= _rangeStuckCheckAtMs && !navigation.IsApproachEscapeActive)
+        {
+            float currentRange = playerReader.MinRange();
+            if (currentRange >= _rangeStuckLastMinRange)
+            {
+                logger.LogInformation(
+                    $"[PTG] No range progress after {RangeStuckIntervalMs:0}ms " +
+                    $"({_rangeStuckLastMinRange:0.0} -> {currentRange:0.0}y) — attempting pather escape. " +
+                    $"escalating={navigation.IsApproachEscapeEscalating} exhausted={navigation.IsApproachEscapeExhausted}");
+                _rangeStuckCheckAtMs = PullDurationMs + RangeStuckIntervalMs;
+                navigation.TryUnstuck();
+            }
+            else
+            {
+                _rangeStuckLastMinRange = currentRange;
+                _rangeStuckCheckAtMs = PullDurationMs + RangeStuckIntervalMs;
+            }
+        }
+        else if (_rangeStuckLastMinRange == float.MaxValue)
+        {
+            // First approach tick — seed the initial range snapshot.
+            _rangeStuckLastMinRange = playerReader.MinRange();
+        }
+
         if (!stuckDetector.IsMoving())
+        {
+            // [LOG-16] Richer context on stuckDetector path — confirms whether the call is
+            // expected (escalating=true, yards>0) or a spurious fire after escape completion.
+            // lastAttemptAge confirms the 200ms gate state.
+            logger.LogInformation(
+                $"[PTG] Not moving — calling TryUnstuck(). " +
+                $"escalating={navigation.IsApproachEscapeEscalating} exhausted={navigation.IsApproachEscapeExhausted} " +
+                $"yards={navigation.ApproachEscapeCurrentYards:0} range={playerReader.MinRange():0.0}y " +
+                $"lastAttemptAge={(DateTime.UtcNow - navigation.ApproachEscapeLastAttemptUtc).TotalMilliseconds:0}ms " +
+                $"stuckRects={navigation.StuckRectCount}");
             navigation.TryUnstuck();
+        }
     }
 
     private void ConditionalApproach()
