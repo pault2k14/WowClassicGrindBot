@@ -1007,7 +1007,13 @@ public sealed partial class Navigation : IDisposable
                     $"player={playerPos} chase={targetW} dChase={dChase:0.00} best={_chaseProgBestDist:0.00} " +
                     $"sinceBest={sinceBestSec:0.00}s sinceMove={sinceMoveSec:0.00}s");
 
-                if (now >= _chaseUnstuckCooldownUntilUtc)
+                // Suppress stuckDetector during route escape — TryRouteUnstuck is already
+                // managing recovery. Calling stuckDetector here competes with it:
+                // evidence from 23:09 log — stuckDetector pressed DownArrow (backward) for
+                // 1610ms DURING the 10y escape, moving the bot AWAY from the escape target,
+                // giving a 1.53y displacement that masked physTrapped=True, and ultimately
+                // causing the escape to time out without making real forward progress.
+                if (!_routeEscapeActive && now >= _chaseUnstuckCooldownUntilUtc)
                 {
                     stopMoving.Stop();
                     stuckDetector.SetTargetLocation(StuckOwnerId, targetW);
@@ -1018,8 +1024,7 @@ public sealed partial class Navigation : IDisposable
                     _chaseLastMovedUtc = now;
                     return;
                 }
-
-                if (sinceBestSec > 6.0 && now >= noProgressRefillCooldownUntilUtc)
+                else if (!_routeEscapeActive && sinceBestSec > 6.0 && now >= noProgressRefillCooldownUntilUtc)
                 {
                     noProgressRefillCooldownUntilUtc = now.AddMilliseconds(1500);
 
@@ -1688,7 +1693,14 @@ public sealed partial class Navigation : IDisposable
                     $"displacement={totalDisplacement:0.00}y physTrapped={physicallyTrapped}. Escalating.");
 
                 _routeEscapeActive = false;
-                Stop();
+                // Do NOT call Stop() here. Stop() sets active=false, causing navigation.Update()
+                // to return immediately on every subsequent tick — TryRouteUnstuck never fires
+                // again and the 20y/30y escalation is silently lost.
+                // Evidence: 23:09 log — after escape-stuck at 23:09:25, bot made zero further
+                // recovery attempts for 30+ seconds. Navigation was dead because Stop() killed it.
+                // Keeping navigation active allows the next Update() tick to call TryRouteUnstuck
+                // lower-block, which increments yards and launches the 20y escape via SetSingleWaypoint
+                // (atomically replacing the stale 10y waypoint with the new 20y target).
 
                 if (physicallyTrapped)
                 {
