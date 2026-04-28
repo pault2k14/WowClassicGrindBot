@@ -365,34 +365,37 @@ public sealed partial class GoapAgent : IDisposable
                 {
                     SendPartyInCombat();
                     previousPartyInCombat = true;
-
-                    // Combat resumed — cancel the post-combat reset timer so we don't
-                    // wipe loot/gather state mid-fight.
-                    if (_postCombatResetUtc != DateTime.MinValue)
-                    {
-                        logger.LogInformation("[GoapAgent] Post-combat reset timer cancelled — combat resumed.");
-                        _postCombatResetUtc = DateTime.MinValue;
-                    }
                 }
                 else
                 {
                     SendPartyNotInCombat();
                     previousPartyInCombat = false;
-
-                    // Combat ended — start the 10s timer. If loot/gather haven't been
-                    // cleared by their respective goals by the time it fires, force-reset
-                    // them. This handles the case where the leader loots/skins a corpse
-                    // before the assist can, leaving the assist stuck in NO PLAN.
-                    if (State.LootableCorpseCount > 0 || State.GatherableCorpseCount > 0)
-                    {
-                        _postCombatResetUtc = DateTime.UtcNow.AddSeconds(PostCombatResetSec);
-                        logger.LogInformation($"[GoapAgent] Post-combat reset timer started ({PostCombatResetSec}s) — LootableCorpseCount={State.LootableCorpseCount} GatherableCorpseCount={State.GatherableCorpseCount}.");
-                    }
                 }
             }
 
-            // Post-combat loot/gather reset: if the timer has expired and we're still
-            // not in combat, force-clear the stale counts.
+            // Post-combat loot/gather reset: force-clear stale loot/gather counts that were
+            // not cleaned up by their respective goals (e.g. leader skinned before assist could).
+            //
+            // ROOT CAUSE of the original bug: the timer was only started at the exact moment of
+            // the combat→no-combat TRANSITION. If GatherableCorpseCount was 0 at that moment
+            // (incremented later, e.g. by SkinningGoal detecting a gatherable corpse during the
+            // loot phase) the timer was never set → shouldgather stayed True indefinitely.
+            // Evidence: user reported NO PLAN persisting for several minutes; 10s timer never fired.
+            //
+            // FIX: check every tick. Whenever loot/gather counts are non-zero AND we are out of
+            // combat AND no timer is running, start one now. This catches late increments.
+            if ((State.LootableCorpseCount > 0 || State.GatherableCorpseCount > 0) &&
+                !PartyInCombat() &&
+                _postCombatResetUtc == DateTime.MinValue)
+            {
+                _postCombatResetUtc = DateTime.UtcNow.AddSeconds(PostCombatResetSec);
+                logger.LogInformation(
+                    $"[GoapAgent] Post-combat reset timer started ({PostCombatResetSec}s) — " +
+                    $"LootableCorpseCount={State.LootableCorpseCount} " +
+                    $"GatherableCorpseCount={State.GatherableCorpseCount}.");
+            }
+
+            // Timer expired: force-clear the stale counts.
             if (_postCombatResetUtc != DateTime.MinValue &&
                 DateTime.UtcNow >= _postCombatResetUtc &&
                 !PartyInCombat())
@@ -400,10 +403,20 @@ public sealed partial class GoapAgent : IDisposable
                 _postCombatResetUtc = DateTime.MinValue;
                 if (State.LootableCorpseCount > 0 || State.GatherableCorpseCount > 0)
                 {
-                    logger.LogWarning($"[GoapAgent] Post-combat reset timer expired — clearing stale LootableCorpseCount={State.LootableCorpseCount} GatherableCorpseCount={State.GatherableCorpseCount}.");
+                    logger.LogWarning(
+                        $"[GoapAgent] Post-combat reset timer expired — clearing stale " +
+                        $"LootableCorpseCount={State.LootableCorpseCount} " +
+                        $"GatherableCorpseCount={State.GatherableCorpseCount}.");
                     State.LootableCorpseCount = 0;
                     State.GatherableCorpseCount = 0;
                 }
+            }
+
+            // Cancel the timer if combat resumes — don't wipe loot/gather state mid-fight.
+            if (_postCombatResetUtc != DateTime.MinValue && PartyInCombat())
+            {
+                logger.LogInformation("[GoapAgent] Post-combat reset timer cancelled — combat resumed.");
+                _postCombatResetUtc = DateTime.MinValue;
             }
 
             GoapGoal? newGoal = NextGoal();
