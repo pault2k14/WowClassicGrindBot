@@ -1734,16 +1734,34 @@ public sealed partial class Navigation : IDisposable
     /// </summary>
     public void ResetApproachEscape([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
-        // [LOG-06] BUG B DIAGNOSTIC: raised from LogDebug → LogWarning so it cannot be
-        // dropped by the async console logger buffer during high-throughput Debug floods
-        // (TryUnstuck(active) heartbeat fires ~60 Hz and can saturate the 1024-entry buffer).
-        // [CallerMemberName] identifies the exact method that called ResetApproachEscape()
-        // without needing a stack trace — this will reveal the hidden caller causing BUG B.
-        logger.LogWarning($"[NAV] ResetApproachEscape (caller={caller}): wiping state — " +
+        // [LOG-06] BUG B DIAGNOSTIC: [CallerMemberName] identifies the exact method that called
+        // ResetApproachEscape() without needing a stack trace — this surfaces the hidden caller
+        // causing BUG B (guid/yards zeroed between escape completion and PTG goal entry).
+        //
+        // Log at Warning when there is meaningful state being wiped (yards>0, guid set,
+        // lastAttempt recorded, or stuckRects present) — these are the cases where an unexpected
+        // reset would damage escalation state and must remain visible in production logs.
+        //
+        // Log at Debug when all state is already at its default/zero values (e.g. CombatGoal
+        // cleanup on every kill, bot startup). That call is a harmless no-op and produced a
+        // spurious Warning on every single run, confirmed in Runs 26-30 where 'was: yards=0
+        // guid=0 lastAttempt=00:00:00.000' appeared at the end of each successful approach.
+        bool hasState = _approachEscapeCurrentYards != 0
+            || _approachEscapeTargetGuid != 0
+            || _approachEscapeLastAttemptUtc != DateTime.MinValue
+            || _stuckWorldRects.Count != 0
+            || IsApproachEscapeExhausted;
+
+        string logMsg = $"[NAV] ResetApproachEscape (caller={caller}): wiping state — " +
             $"was: active={_approachEscapeActive} yards={_approachEscapeCurrentYards:0} guid={_approachEscapeTargetGuid} " +
             $"exhausted={IsApproachEscapeExhausted} escalating={IsApproachEscapeEscalating} " +
             $"lastAttempt={_approachEscapeLastAttemptUtc:HH:mm:ss.fff} startUtc={_approachEscapeStartUtc:HH:mm:ss.fff} " +
-            $"lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW}");
+            $"lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW}";
+
+        if (hasState)
+            logger.LogWarning(logMsg);
+        else
+            logger.LogDebug(logMsg);
         _approachEscapeActive = false;
         _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f;
         _approachRecordedW = default;
