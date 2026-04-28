@@ -483,7 +483,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             {
                 navigation.Update(CancellationToken.None);
                 if (navigation.IsApproachEscapeActive)
-                    navigation.TryUnstuck();
+                {
+                    if (!navigation.TryUnstuck())
+                        InjectPhysStuckEscape();
+                }
                 return;
             }
 
@@ -633,6 +636,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Drive navigation this tick.
         navigation.Update(CancellationToken.None);
 
+        // If an escape is active (launched by a prior TryUnstuck call from TickIdleStuckDetection
+        // or this block), drive it with TryUnstuck so the escape-stuck and physStuck checks fire.
+        // Without this, a bot physically trapped while navigating to the leader would only be
+        // rescued by the 30s active-time timeout — TryUnstuck provides a much faster escape.
+        if (navigation.IsApproachEscapeActive)
+        {
+            if (!navigation.TryUnstuck())
+                InjectPhysStuckEscape();
+            return; // don't try follow while escape is navigating
+        }
+
+        // Position-based stuck detection for NavigatingToLeader: reuse TickIdleStuckDetection
+        // (already handles combat/evade guards, 3s interval, 10s cooldown). If the bot is
+        // physically stuck on terrain mid-navigation and there's no active escape yet,
+        // this will fire TryUnstuck to start one.
+        TickIdleStuckDetection();
+
         // Opportunistically try to follow if we are now in range.
         if (TryFollowIfInRange())
             return;
@@ -682,6 +702,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navAttempt = 0;
         _navTimerInit = false;
         _navActiveElapsed = TimeSpan.Zero;
+    }
+
+    // -------------------------------------------------------------------------
+    // PhysStuck injection helper — shared by Idle and NavigatingToLeader escape paths.
+    // Injects the same jump+reverse sequence as ATG when TryUnstuck returns false
+    // with IsApproachEscapePhysicallyStuck=true (zero displacement detected).
+    // Thread.Sleep gives true wall-clock delays — confirmed necessary after ATG Run 21
+    // showed wait.Update(N) returning in <30ms regardless of N.
+    // -------------------------------------------------------------------------
+    private void InjectPhysStuckEscape()
+    {
+        if (!navigation.IsApproachEscapePhysicallyStuck)
+            return;
+
+        navigation.IsApproachEscapePhysicallyStuck = false;
+        logger.LogWarning("[FFG] Physically trapped in terrain — injecting jump + reverse to escape.");
+        input.StopForward(false);
+        input.PressJump();
+        Thread.Sleep(400);
+        input.StartBackward(false);
+        input.PressJump();
+        Thread.Sleep(600);
+        input.PressJump();
+        Thread.Sleep(400);
+        input.StopBackward(false);
     }
 
     // -------------------------------------------------------------------------
@@ -738,8 +783,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         // Use pather-based escape: project a waypoint along the approach vector
         // (10-30 yards) to route around the terrain obstacle, falling back to
-        // random turn/jump if all pather attempts fail.
-        navigation.TryUnstuck();
+        // physStuck injection (jump+reverse) if the pather reports zero displacement.
+        bool escapeStillActive = navigation.TryUnstuck();
+        if (!escapeStillActive)
+        {
+            // TryUnstuck returned false: escape-stuck or exhausted.
+            // If the character made zero movement, inject jump+reverse to break free.
+            InjectPhysStuckEscape();
+        }
 
         // Reset wantsLeaderToReturn so a fresh N8 fires immediately,
         // giving the leader the assist's new position after the escape attempt
