@@ -369,14 +369,19 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                         {
                             navigation.IsApproachEscapePhysicallyStuck = false;
                             logger.LogWarning("[ATG] Physically trapped in terrain — injecting jump + reverse to escape.");
+                            // wait.Update(N) is a game-tick-based call that returns in <30ms
+                            // regardless of N — confirmed in Run 21 where all 3 jumps fired
+                            // within 140ms instead of the expected ~1400ms. Thread.Sleep gives
+                            // true wall-clock delays so the backward+jump sequence runs as designed.
+                            // goapThread can block safely; this is not the main game thread.
                             input.StopForward(false);
                             input.PressJump();
-                            wait.Update(400);
+                            Thread.Sleep(400);
                             input.StartBackward(false);
                             input.PressJump();
-                            wait.Update(600);
+                            Thread.Sleep(600);
                             input.PressJump();
-                            wait.Update(400);
+                            Thread.Sleep(400);
                             input.StopBackward(false);
                         }
 

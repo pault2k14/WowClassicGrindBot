@@ -240,6 +240,9 @@ public sealed partial class Navigation : IDisposable
     private Vector3 _approachEscapeLockedRecordedW;
     private Vector3 _approachEscapeLockedPrevRecordedW;
     private int _approachEscapeTargetGuid;
+    // Tracks which integer second the TryUnstuck(active) heartbeat last fired.
+    // Prevents double-fire when two consecutive calls both straddle a second boundary.
+    private int _approachEscapeHeartbeatLastSec = -1;
 
     // Pather-based route escape — tried before stuckDetector.Update() when the bot
     // gets stuck while following the patrol route. Uses the player's facing direction
@@ -428,7 +431,7 @@ public sealed partial class Navigation : IDisposable
 
         emptyRouteRefillCooldownUntilUtc = now.AddMilliseconds(EmptyRouteRefillMinIntervalMs);
 
-        logger.LogWarning(
+        logger.LogDebug(
             $"[NAV-EMPTY] route=0 wp={wayPoints.Count} " +
             $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
             $"reqQ={pathRequests.Count} resQ={pathResults.Count} " +
@@ -564,7 +567,7 @@ public sealed partial class Navigation : IDisposable
 
     private void RefillExit(string reason)
     {
-        logger.LogWarning(
+        logger.LogDebug(
             $"[NAV-REFILL-EXIT] {reason} " +
             $"active={active} escapeActive={escapeActive} insideBL={(AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true)} " +
             $"wp={wayPoints.Count} route={routeToNextWaypoint.Count} " +
@@ -579,7 +582,7 @@ public sealed partial class Navigation : IDisposable
     private void RefillEnd(string phase, long startTick)
     {
         long now = Environment.TickCount64;
-        logger.LogWarning(
+        logger.LogDebug(
             $"[NAV-REFILL-END] phase={phase} elapsedMs={(now - startTick)} " +
             $"uiMapId={(playerReader.UIMapId.Value > 0 ? playerReader.UIMapId.Value.ToString() : "<null>")} " +
             $"worldMapArea={playerReader.WorldMapArea} " +
@@ -596,7 +599,7 @@ public sealed partial class Navigation : IDisposable
     {
         if (NavDebugDue())
         {
-            logger.LogWarning("[NAV-DBG] " + msg);
+            logger.LogDebug("[NAV-DBG] " + msg);
         }
     }
 
@@ -886,7 +889,7 @@ public sealed partial class Navigation : IDisposable
             float distToRoute = playerPos.WorldDistanceXYTo(targetW);
             float dAnyWp = MinDistToAny(playerPos, wayPoints);
 
-            logger.LogWarning(
+            logger.LogDebug(
                 $"[NAV-DBG] dAnyWp={dAnyWp:0.00} player={playerPos} routeTop={targetW} dRoute={distToRoute:0.00} " +
                 $"wpTop={wpTop} dWp={distToWp:0.00} routeCount={routeToNextWaypoint.Count} wpCount={wayPoints.Count}");
         }
@@ -1326,12 +1329,15 @@ public sealed partial class Navigation : IDisposable
             Vector3 currentPos = Nav2D(playerReader.WorldPos);
             double escapeSec = (now2 - _approachEscapeStartUtc).TotalSeconds;
 
-            // [LOG-03] Heartbeat on every TryUnstuck call while active — emits at Debug level so
-            // it's available without overwhelming the log. Exposes stale startUtc (BUG D):
-            // if escapeSec >> timeoutSec the startUtc is from a prior escape and was never
-            // overwritten by the lower block that launched this escape.
-            if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
+            // [LOG-03] Heartbeat — throttled to exactly once per integer second via a
+            // last-fired-second field. The original (int)escapeSec != (int)(escapeSec-0.016)
+            // condition could double-fire when two consecutive calls both straddled a second
+            // boundary (observed in Run 11: :56:714 and :56:729 both showed escapeSec=8.0s).
+            int heartbeatSec = (int)escapeSec;
+            if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug) &&
+                heartbeatSec != _approachEscapeHeartbeatLastSec)
             {
+                _approachEscapeHeartbeatLastSec = heartbeatSec;
                 double timeoutSecDbg = _approachEscapeCurrentYards * ApproachEscapeTimeoutSecPerYard;
                 logger.LogDebug($"[NAV] TryUnstuck(active): yards={_approachEscapeCurrentYards:0} " +
                     $"escapeSec={escapeSec:0.0}s budget={timeoutSecDbg:0.0}s " +
@@ -1407,6 +1413,7 @@ public sealed partial class Navigation : IDisposable
 
                 _approachEscapeActive = false;
                 _approachEscapeStartUtc = DateTime.MinValue;
+                _approachEscapeHeartbeatLastSec = -1; // reset so next escape's heartbeat fires on second 0
                 Stop();
                 // Physically halt the character — Stop() clears the route but does
                 // not release the movement keys, so the bot would keep drifting
@@ -1552,9 +1559,17 @@ public sealed partial class Navigation : IDisposable
             }
             else
             {
-                float facing = playerReader.Direction;
-                approachDir = new Vector3(Cos(facing), Sin(facing), 0f);
-                logger.LogInformation("[NAV] ApproachEscape: using facing direction for stuck rect placement.");
+                // BUG B RECOVERY: No direction data available (prev=<0,0,0>, no stuck rects,
+                // no chase target). This happens when BUG B wiped the approach escape state and
+                // the bot called TryUnstuck before enough approach presses to build a direction
+                // vector. DO NOT call AddStuckRect — with default forwardDir the rect would be
+                // centered on the player, putting the player inside their own blacklist rect and
+                // immediately triggering an escape-first route AWAY from the mob. Instead, run
+                // the pather escape without a rect hint and let it route around terrain geometry.
+                logger.LogWarning("[NAV] ApproachEscape: no direction data (prev=<0,0,0>, no stuck rects, " +
+                    "no chase target) — SKIPPING stuck rect to avoid player-inside-own-rect. " +
+                    "Pather escape runs without rect hint. (Typically caused by BUG B state wipe.)");
+                goto AFTER_STUCK_RECT;
             }
             // [LOG-09] Log the direction vector used to place this stuck rect — if it is
             // wrong (e.g. facing direction instead of approach direction) this tells us
@@ -1566,6 +1581,7 @@ public sealed partial class Navigation : IDisposable
                     $"player={Nav2D(playerReader.WorldPos)}");
             }
             AddStuckRect(Nav2D(playerReader.WorldPos), approachDir);
+            AFTER_STUCK_RECT:;
         }
 
         if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
@@ -1607,6 +1623,7 @@ public sealed partial class Navigation : IDisposable
         // the bail firing (e.g., bits.Target()=false at that tick), this new escape
         // would be immediately bail-outed upon completion even if the mob was reached.
         IsApproachEscapeExhausted = false;
+        _approachEscapeHeartbeatLastSec = -1; // reset so heartbeat fires immediately on new escape
         SetSingleWaypoint(projection);
         _approachEscapeActive = true;
         _approachEscapeStartUtc = DateTime.UtcNow;
@@ -1715,12 +1732,14 @@ public sealed partial class Navigation : IDisposable
     /// <summary>
     /// Resets approach escape state. Call when the goal exits or target changes.
     /// </summary>
-    public void ResetApproachEscape()
+    public void ResetApproachEscape([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
-        // [LOG-06] Full state dump before wipe — critical for tracing 'was 0' mystery and
-        // any unexpected ResetApproachEscape call that wipes guid mid-sequence.
-        // Caller is visible in stack trace; log records state AT the moment of reset.
-        logger.LogDebug($"[NAV] ResetApproachEscape: wiping state — " +
+        // [LOG-06] BUG B DIAGNOSTIC: raised from LogDebug → LogWarning so it cannot be
+        // dropped by the async console logger buffer during high-throughput Debug floods
+        // (TryUnstuck(active) heartbeat fires ~60 Hz and can saturate the 1024-entry buffer).
+        // [CallerMemberName] identifies the exact method that called ResetApproachEscape()
+        // without needing a stack trace — this will reveal the hidden caller causing BUG B.
+        logger.LogWarning($"[NAV] ResetApproachEscape (caller={caller}): wiping state — " +
             $"was: active={_approachEscapeActive} yards={_approachEscapeCurrentYards:0} guid={_approachEscapeTargetGuid} " +
             $"exhausted={IsApproachEscapeExhausted} escalating={IsApproachEscapeEscalating} " +
             $"lastAttempt={_approachEscapeLastAttemptUtc:HH:mm:ss.fff} startUtc={_approachEscapeStartUtc:HH:mm:ss.fff} " +
@@ -1805,10 +1824,70 @@ public sealed partial class Navigation : IDisposable
                 // whether the 200ms yard-increment gate is effectively open (age>>200ms)
                 // or still cooling down. startUtc is cleared here — confirm it becomes MinValue.
                 double lastAttemptAgeMs = (DateTime.UtcNow - _approachEscapeLastAttemptUtc).TotalMilliseconds;
-                logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction. " +
+                string lockedDirStatus = _approachEscapeLockedRecordedW != default
+                    ? $"locked direction preserved (curr={_approachEscapeLockedRecordedW})"
+                    : "locked direction WIPED (BUG B)";
+                logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — " +
+                    $"preserving {_approachEscapeCurrentYards:0}y escalation, {lockedDirStatus}. " +
                     $"[diag: lastAttemptAge={lastAttemptAgeMs:0}ms exhausted={IsApproachEscapeExhausted} " +
                     $"lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW} " +
                     $"stuckRects={_stuckWorldRects.Count}]");
+            }
+        }
+        else if (_approachEscapeTargetGuid == 0)
+        {
+            // BUG B FIX: The stored guid is transiently 0 (wiped by an unknown code path
+            // between escape completion and goal re-entry). We cannot distinguish this from
+            // a genuine different-target scenario, but the caller's targetGuid is valid.
+            // Treating guid=0 as "different target" wipes yards, lockedDir, lastAttemptUtc
+            // and stuckRects, restarting escalation from 0y — exactly the BUG B damage.
+            //
+            // SAFE CHOICE: treat guid=0 as "same target — restore guid, preserve all state".
+            // If the target genuinely DID change while guid was 0, the caller's targetGuid
+            // is still fresh and the next RATF call (with a non-zero stored guid) would
+            // correctly detect the change and reset. The cost of one missed reset is minimal;
+            // the cost of a spurious reset is restarting a 20y+ escalation from 0y.
+            _approachEscapeTargetGuid = targetGuid;
+
+            // When yards=0 the locked direction is either the default (never set) or stale
+            // from a PREVIOUS mob's escape (observed in Run 16: after mob 7323647 was exhausted,
+            // the bot switched to mob 7327199 — BUG B fired for 7327199 but "preserved"
+            // lockedCurr/Prev from 7323647, causing the next escape to go in the wrong direction).
+            // Clear the stale direction so the next escape recomputes from fresh approach data.
+            if (_approachEscapeCurrentYards == 0)
+            {
+                _approachEscapeLockedRecordedW = default;
+                _approachEscapeLockedPrevRecordedW = default;
+            }
+
+            double lastAttemptAgeMs = (DateTime.UtcNow - _approachEscapeLastAttemptUtc).TotalMilliseconds;
+
+            // Distinguish a genuine BUG B event (meaningful state was preserved or wiped) from
+            // a fresh-start false positive (bot just started, all state is default/zero).
+            // Fresh start: yards=0, lockedCurr=default, stuckRects=0, lastAttemptAge≈MaxValue.
+            // Genuine BUG B: yards>0 OR stuckRects>0 (non-trivial state that BUG B damaged).
+            bool genuineBugB = _approachEscapeCurrentYards > 0 || _stuckWorldRects.Count > 0;
+
+            string bugBescalation = _approachEscapeCurrentYards > 0
+                ? $"{_approachEscapeCurrentYards:0}y escalation preserved"
+                : "escalation WIPED (yards=0)";
+            string bugBrects = _stuckWorldRects.Count > 0
+                ? $"{_stuckWorldRects.Count} stuckRect(s) preserved"
+                : "stuckRects WIPED";
+
+            if (genuineBugB)
+            {
+                logger.LogWarning($"[NAV] ApproachEscape: BUG B — stored guid was 0, restoring to {targetGuid}. " +
+                    $"{bugBescalation}, {bugBrects}. " +
+                    $"[diag: lastAttemptAge={lastAttemptAgeMs:0}ms exhausted={IsApproachEscapeExhausted} " +
+                    $"lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW} " +
+                    $"stuckRects={_stuckWorldRects.Count}]");
+            }
+            else
+            {
+                // Fresh start — guid was 0 because the bot just started (no prior escape state).
+                // Log at Debug to avoid noise; this fires on every bot launch.
+                logger.LogDebug($"[NAV] ApproachEscape: first approach, guid restored to {targetGuid} (no prior escape state).");
             }
         }
         else
@@ -2142,7 +2221,7 @@ public sealed partial class Navigation : IDisposable
 
             float distance = startW.WorldDistanceXYTo(targetW);
 
-            logger.LogWarning(
+            logger.LogDebug(
                 $"[NAV-DBG] REFILL start={startW} wpTop(raw)={targetRaw} wpTop(norm)={targetW} " +
                 $"dist={distance:0.00} usePather? TBD wpCount={wayPoints.Count}");
 
@@ -2210,7 +2289,7 @@ public sealed partial class Navigation : IDisposable
                 ClearDestinationLatch();
                 stopMoving.Stop();
 
-                logger.LogWarning(
+                logger.LogDebug(
                     $"[NAV-DBG] ENQUEUE PATH start={startW} end(targetWp raw)={targetRaw} end(targetWp norm)={targetW} dist={distance:0.00}");
 
                 NavDbg($"REFILL enqueuePath start={startW} end={targetW} dist={distance:0.00}");
@@ -2438,7 +2517,7 @@ public sealed partial class Navigation : IDisposable
         logger.LogInformation($"[NAV] PathCalculatedCallback reqId={requestId} pathLen={result.Path.Length} start={result.StartW} end={result.EndW}");
 
         Vector3 wpTop = wayPoints.Count > 0 ? wayPoints.Peek() : default;
-        logger.LogWarning(
+        logger.LogDebug(
             $"[NAV-DBG] PATH RESULT requestId={requestId} resultStart={result.StartW} resultEnd={result.EndW} " +
             $"currentWpTop={wpTop} endMatchesWp={(wayPoints.Count > 0 ? wpTop.WorldDistanceXYTo(result.EndW) : -1):0.00}");
 
@@ -2504,7 +2583,7 @@ public sealed partial class Navigation : IDisposable
         if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
             routeToNextWaypoint.Push(Nav2D(wayPoints.Peek()));
 
-        logger.LogWarning(
+        logger.LogDebug(
             $"[NAV-DBG] ROUTESET reqId={requestId} routeCount={routeToNextWaypoint.Count} " +
             $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +
             $"wpTop={(wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()).ToString() : "<none>")} " +
@@ -2760,7 +2839,7 @@ public sealed partial class Navigation : IDisposable
         {
             Vector3 newTop = routeToNextWaypoint.Count > 0 ? routeToNextWaypoint.Peek() : default;
             Vector3 wpTop = wayPoints.Count > 0 ? wayPoints.Peek() : default;
-            logger.LogWarning($"[NAV-DBG] ReduceByDistance poppedLast={lastPopped} newRouteTop={newTop} wpTop={wpTop}");
+            logger.LogDebug($"[NAV-DBG] ReduceByDistance poppedLast={lastPopped} newRouteTop={newTop} wpTop={wpTop}");
         }
 
         SetLastSafeAnchor(lastPopped);
