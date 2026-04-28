@@ -74,6 +74,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // so the timeout doesn't burn down while the assist is in combat or evade recovery.
     private const double NavigationActiveTimeoutSec = 30.0;
 
+    // When the co-located path is taken (dist < 1.0 map unit, no SetSingleWaypoint),
+    // TryFollowIfInRange is tried every tick. If SpellInRange.Focus_Inspect stays false
+    // for this grace period, the assist is terrain-trapped with no LOS to the leader.
+    // Fall back to pather navigation so it can route around the terrain.
+    //
+    // Evidence: assist_3_side_stuck.txt — dist=0.28 map units (leader ~10-15 world yards
+    // away), but three-sided terrain blocked LOS → Focus_Inspect=false for 30s with zero
+    // key presses. The pather found pathLen=33 route around terrain when TryUnstuck finally
+    // fired after AssistCantFollow. SetSingleWaypoint after the grace period gives the
+    // pather that same chance without needing the 30s timeout first.
+    private const double CoLocatedFollowOutOfRangeSec = 3.0;
+    // Set when the co-located path is taken and Focus_Inspect is first observed false.
+    // Reset if Focus_Inspect becomes true (LOS cleared) or when leaving NavigatingToLeader.
+    private DateTime _coLocatedOutOfRangeUtc = DateTime.MinValue;
+
     private DateTime _navStateEnteredUtc;
 
     // --- NavigatingToLeader: rewind/retry and active-time timeout ---
@@ -194,7 +209,15 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Reset stuck detection snapshot on re-entry so stale position data
         // from a previous plan cycle doesn't cause a false positive.
         _stuckCheckLastUtc = DateTime.MinValue;
-        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
+        // Always reset approach escape on FFG entry — do NOT guard with !IsApproachEscapeActive.
+        // Evidence: 00:12 log — a mob-approach escape started at 07:11:08 UTC (during ATG)
+        // survived through CombatGoal, LootGoal, CorpseConsumedGoal, FFG #1, and FFG #2
+        // because every goal's "if (!IsApproachEscapeActive) reset" check was skipped.
+        // When FFG #2 entered, it drove the stale escape for 8 seconds, moving the bot
+        // ~53 world units off course before escape-stuck fired and the bot requested position.
+        // FFG never needs to inherit a mob approach escape. If FFG starts its own escape
+        // (via TickIdleStuckDetection → TryUnstuck), it will be restarted within 3s if needed.
+        navigation.ResetApproachEscape();
 
         if (input.IsKeyDown(input.ForwardKey))
         {
@@ -244,7 +267,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
-        if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
+        // Always reset approach escape on exit — same reasoning as OnEnter.
+        // Ensures any stale mob-approach escape is cleared before the next goal inherits it.
+        navigation.ResetApproachEscape();
         input.StepBackwards();
         input.PressAssistIsNotFollowing();
         lastMessageSent = followMessage.ImNotFollowing;
@@ -665,7 +690,69 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         // Opportunistically try to follow if we are now in range.
         if (TryFollowIfInRange())
+        {
+            _coLocatedOutOfRangeUtc = DateTime.MinValue; // reset on success
             return;
+        }
+
+        // Co-located pather fallback: when no waypoints exist (co-located path skipped
+        // SetSingleWaypoint) and SpellInRange.Focus_Inspect stays false, terrain is blocking
+        // LOS between the assist and the leader despite their close map distance. The co-located
+        // assumption ("just press FollowTarget") is wrong — the pather needs to route around
+        // the terrain.
+        //
+        // After a short grace period, switch to pather navigation by calling SetSingleWaypoint
+        // on the leader's stored map position. HasWaypoint() becomes true, which:
+        //   1. Allows TickIdleStuckDetection to fire (the guard requires HasWaypoint)
+        //   2. Gives navigation a target so Update() drives the bot toward the leader
+        //   3. Lets the pather find the terrain-avoiding route (pathLen=33 in the log)
+        //
+        // Evidence: assist_3_side_stuck.txt — three-sided terrain trap, dist=0.28 map units,
+        // Focus_Inspect=false for 30s (no LOS through terrain), zero key presses. The pather
+        // found pathLen=33 the moment TryUnstuck fired after AssistCantFollow forced NavState→Idle.
+        // This fallback eliminates the 30s wait by triggering that same pather route immediately.
+        if (!navigation.HasWaypoint() && !navigation.HasNext() && !navigation.IsApproachEscapeActive)
+        {
+            if (!playerReader.SpellInRange.Focus_Inspect)
+            {
+                if (_coLocatedOutOfRangeUtc == DateTime.MinValue)
+                {
+                    _coLocatedOutOfRangeUtc = DateTime.UtcNow.AddSeconds(CoLocatedFollowOutOfRangeSec);
+                    logger.LogInformation(
+                        $"[FFG] Co-located follow: Focus_Inspect=false (terrain blocking LOS?) — " +
+                        $"waiting {CoLocatedFollowOutOfRangeSec}s before switching to pather navigation.");
+                }
+                else if (DateTime.UtcNow >= _coLocatedOutOfRangeUtc)
+                {
+                    _coLocatedOutOfRangeUtc = DateTime.MinValue;
+                    if (_navLeaderTargetMapPos != default)
+                    {
+                        logger.LogWarning(
+                            "[FFG] Co-located follow: Focus_Inspect still false after grace period — " +
+                            "terrain likely blocking LOS. Switching to pather navigation to route around it.");
+                        navigation.SetSingleWaypoint(_navLeaderTargetMapPos);
+                        // HasWaypoint() is now true; subsequent ticks will drive navigation and
+                        // TickIdleStuckDetection will fire if the bot gets stuck en-route.
+                    }
+                    else
+                    {
+                        // No stored position — escalate normally.
+                        logger.LogWarning(
+                            "[FFG] Co-located follow: Focus_Inspect still false and no stored leader position — escalating to AssistCantFollow.");
+                        navigation.Stop();
+                        ResetNavRetryState();
+                        SendAssistCantFollow();
+                        EnterState(NavState.Idle);
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                // LOS is clear — reset the timer. TryFollowIfInRange will establish AutoFollow.
+                _coLocatedOutOfRangeUtc = DateTime.MinValue;
+            }
+        }
 
         wait.Update();
     }
@@ -712,6 +799,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navAttempt = 0;
         _navTimerInit = false;
         _navActiveElapsed = TimeSpan.Zero;
+        _coLocatedOutOfRangeUtc = DateTime.MinValue;
     }
 
     // -------------------------------------------------------------------------
