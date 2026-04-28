@@ -1797,6 +1797,15 @@ public sealed partial class Navigation : IDisposable
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
         _approachEscapeAnchorW = default;
+        // BUG A FIX: lockedCurr and lockedPrev were NOT cleared by ResetApproachEscape.
+        // Evidence: leader_stuck_in_terrain.txt — FFG.OnEnter called ResetApproachEscape
+        // at 22:34:08:110 (logged 'was: lockedCurr=<-785.93,-4751.11>'), but the [LOG-04]
+        // debug entry at 22:34:11:173 showed lockedCurr=<-785.93,-4751.11> STILL set.
+        // The locking block in TryUnstuck lower-block checks 'if (lockedCurr == default)'
+        // before overwriting it — since lockedCurr was non-zero, the stale value was kept
+        // and used to project the escape target 10y in the wrong direction (away from leader).
+        _approachEscapeLockedRecordedW = default;
+        _approachEscapeLockedPrevRecordedW = default;
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
         _approachEscapeStartUtc = DateTime.MinValue;
         _approachEscapeStartPos = default;

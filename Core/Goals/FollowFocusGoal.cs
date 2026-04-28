@@ -651,7 +651,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // (already handles combat/evade guards, 3s interval, 10s cooldown). If the bot is
         // physically stuck on terrain mid-navigation and there's no active escape yet,
         // this will fire TryUnstuck to start one.
-        TickIdleStuckDetection();
+        //
+        // GUARD: only fire when navigation actually has work to do (a waypoint or route exists).
+        // Evidence: leader_stuck_in_terrain.txt — when the leader was co-located (dist=0.48 map
+        // units), the co-located path skipped SetSingleWaypoint and entered NavigatingToLeader
+        // directly. Navigation had no waypoints so Update() returned immediately (EXIT noWork).
+        // TickIdleStuckDetection saw 0.52y movement over 3s, called TryUnstuck, and launched
+        // a 10y escape AWAY from the leader — then OnDestinationReached fired and the bot sent
+        // AssistCantFollow. The bot was NOT stuck: it was stationary waiting for AutoFollow to
+        // establish. Stuck detection must not run when there is no active navigation to be stuck on.
+        if (navigation.HasWaypoint() || navigation.HasNext())
+            TickIdleStuckDetection();
 
         // Opportunistically try to follow if we are now in range.
         if (TryFollowIfInRange())
