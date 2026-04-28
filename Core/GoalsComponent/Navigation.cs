@@ -1675,9 +1675,39 @@ public sealed partial class Navigation : IDisposable
                 string reason = noProgress
                     ? $"no progress for {sinceProgressSec:0.0}s"
                     : $"timed out after {escapeSec:0.0}s at {_routeEscapeCurrentYards:0}y";
-                logger.LogWarning($"[NAV] RouteEscape: escape stuck ({reason}) — escalating.");
+
+                // Check whether the bot made ANY displacement from where the escape started.
+                // Near-zero displacement means it is physically wedged — the facing direction
+                // is blocked by terrain the bot entered from behind. Confirmed in log
+                // leader_stuck_in_terrain.txt: pather returned pathLen=0 (no forward path),
+                // StuckDetector UpArrow 1506ms had zero effect. The only escape is backward.
+                float totalDisplacement = currentPos.WorldDistanceXYTo(Nav2D(_routeEscapeStartPos));
+                bool physicallyTrapped = totalDisplacement < 0.5f;
+
+                logger.LogWarning($"[NAV] RouteEscape: escape stuck ({reason}) — " +
+                    $"displacement={totalDisplacement:0.00}y physTrapped={physicallyTrapped}. Escalating.");
+
                 _routeEscapeActive = false;
                 Stop();
+
+                if (physicallyTrapped)
+                {
+                    // The bot cannot move forward at all. Inject jump + backward movement to
+                    // back out of the terrain trap — the same technique as ATG's physStuck injection.
+                    // Thread.Sleep gives true wall-clock delays (confirmed: wait.Update(N) returns
+                    // in <30ms regardless of N). This runs on goapThread which can block safely.
+                    logger.LogWarning("[NAV] RouteEscape: physically trapped — injecting jump + reverse to escape.");
+                    input.StopForward(false);
+                    input.PressJump();
+                    System.Threading.Thread.Sleep(400);
+                    input.StartBackward(false);
+                    input.PressJump();
+                    System.Threading.Thread.Sleep(600);
+                    input.PressJump();
+                    System.Threading.Thread.Sleep(400);
+                    input.StopBackward(false);
+                }
+
                 return false;
             }
 
