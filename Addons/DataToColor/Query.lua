@@ -325,6 +325,11 @@ end
 
 --
 
+function DataToColor:getRangeForUnit(unit)
+    local min, max = Range:GetRange(unit)
+    return (max or 0) * 1000 + (min or 0)
+end
+
 function DataToColor:getRange()
     local min, max = Range:GetRange(DataToColor.C.unitTarget)
     return (max or 0) * 1000 + (min or 0)

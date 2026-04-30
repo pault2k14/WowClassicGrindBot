@@ -272,6 +272,21 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public int PartyMember3Guid => reader.GetInt(128);
     public int PartyMember4Guid => reader.GetInt(129);
 
+    public int FocusMinRange() => reader.GetInt(132) % 1000;
+    public int FocusMaxRange() => reader.GetInt(132) / 1000 % 1000;
+
+    public int PartyMember1MinRange() => reader.GetInt(133) % 1000;
+    public int PartyMember1MaxRange() => reader.GetInt(133) / 1000 % 1000;
+
+    public int PartyMember2MinRange() => reader.GetInt(134) % 1000;
+    public int PartyMember2MaxRange() => reader.GetInt(134) / 1000 % 1000;
+
+    public int PartyMember3MinRange() => reader.GetInt(135) % 1000;
+    public int PartyMember3MaxRange() => reader.GetInt(135) / 1000 % 1000;
+
+    public int PartyMember4MinRange() => reader.GetInt(136) % 1000;
+    public int PartyMember4MaxRange() => reader.GetInt(136) / 1000 % 1000;
+
 
     public int LastCastGCD { get; private set; }
     public void ResetLastCastGCD()
