@@ -849,7 +849,17 @@ public sealed partial class RequirementFactory
 
         string requirementStr = requirement.ToString();
 
-        string? key = requirementMap.Keys.FirstOrDefault(requirementStr.Contains);
+        // FIX: sort keys by descending length before matching so that longer, more specific
+        // keys are found before shorter ones that may be substrings of them.
+        // Example: "PartyMember1SpellInRange:8" contains "SpellInRange:" as a substring.
+        // Without ordering by length, FirstOrDefault finds "SpellInRange:" first and calls
+        // CreateSpellInRange (checking the player's own range) instead of
+        // CreatePartyMember1SpellInRange. The same issue affects FocusSpellInRange:,
+        // PartyMember2-4SpellInRange:, and any other key that is a suffix of a longer key.
+        string? key = requirementMap.Keys
+            .OrderByDescending(k => k.Length)
+            .FirstOrDefault(requirementStr.Contains);
+
         if (!string.IsNullOrEmpty(key) && requirementMap.TryGetValue(key, out var createRequirement))
         {
             Requirement r = createRequirement(requirement);

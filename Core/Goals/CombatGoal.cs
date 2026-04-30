@@ -182,6 +182,42 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         wait.Update();
     }
 
+    public void logPartyMember1SpellInRangeBitMask()
+    {
+        logger.LogInformation($"[CombatGoal] PartyMember1MinRange: {playerReader.PartyMember1MinRange()}");
+        logger.LogInformation($"[CombatGoal] PartyMember1MaxRange: {playerReader.PartyMember1MaxRange()}");
+        logger.LogInformation($"[CombatGoal] PartyMember1 Fortitude in Rnage: {playerReader.PartyMember1SpellInRange.Priest_Power_World_Fortitude}");
+        logger.LogInformation($"[CombatGoal] PartyMember1 Shield in Rnage: {playerReader.PartyMember1SpellInRange.Priest_Power_Word_Shield}");
+        logger.LogInformation($"[CombatGoal] PartyMember1 Lesser Heal in Range: {playerReader.PartyMember1SpellInRange.Priest_Lesser_Heal}");
+
+
+        PartyMember1SpellInRange p1range = playerReader.PartyMember1SpellInRange;
+        SpellInRange range = playerReader.SpellInRange;
+
+
+        int bitMask6 = Mask.M[6];
+        int bitMask7 = Mask.M[7];
+        int bitMask8 = Mask.M[8];
+
+        bool f6 = range[bitMask6];
+        bool f7 = range[bitMask7];
+        bool f8 = range[bitMask8];
+
+        bool p1f6 = p1range[bitMask6];
+        bool p1f7 = p1range[bitMask7];
+        bool p1f8 = p1range[bitMask8];
+
+        logger.LogInformation("Values from PartyMember1SpellInRange array");
+        logger.LogInformation($"playerReader.PartyMember1SpellInRange Fortitude: {p1f6}");
+        logger.LogInformation($"playerReader.PartyMember1SpellInRange Shield: {p1f7}");
+        logger.LogInformation($"playerReader.PartyMember1SpellInRange Lesser Heal: {p1f8}");
+
+        logger.LogInformation("Values from SpellInRange array");
+        logger.LogInformation($"playerReader.SpellInRange Fortitude: {f6}");
+        logger.LogInformation($"playerReader.SpellInRange Shield: {f7}");
+        logger.LogInformation($"playerReader.SpellInRange Lesser Heal: {f8}");
+    }
+
     public override void Update()
     {
         bool targetGuidChanged = false;

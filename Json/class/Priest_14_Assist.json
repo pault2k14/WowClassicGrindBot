@@ -36,8 +36,9 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
+          "PartyMember1Health% > 1",
           "Mana > 75",
-          "TargetAlive"
+          "PartyMember1SpellInRange:8"
         ]
       },
       {
@@ -50,8 +51,9 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
+          "PartyMember1Health% > 1",
           "Mana > 65 ",
-          "TargetAlive"
+          "PartyMember1SpellInRange:10"
         ]
       },
       {
@@ -63,10 +65,12 @@
           "!P1_Fortitude",
           "!InCombat",
           "!FocusCombat",
+          "PartyMember1Health% > 1",
           "Mana% > 80",
           "!Food",
           "!Drink",
-          "TargetAlive"
+          "PartyMember1SpellInRange:6"
+
         ]
       },
       {
@@ -77,12 +81,13 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "PartyMember1Health% < 20",
+          "PartyMember1Health% > 1",
           "Mana > 80",
           "InCombat",
           "!P1_Shield",
           "!Food",
           "!Drink",
-          "TargetAlive"
+          "PartyMember1SpellInRange:7"
         ]
       }
     ]
@@ -136,8 +141,9 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
+          "PartyMember1Health% > 1",
           "Mana > 75",
-          "TargetAlive"
+          "PartyMember1SpellInRange:8"
         ]
       },
       {
@@ -151,8 +157,9 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
+          "PartyMember1Health% > 1",
           "Mana > 65",
-          "TargetAlive"
+          "PartyMember1SpellInRange:10"
         ]
       },
       {
