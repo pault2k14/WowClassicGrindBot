@@ -22,6 +22,11 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
         AreaDB areaDb,
         AddonBits addonBits,
         SpellInRange spellInRange,
+        FocusSpellInRange focusSpellInRange,
+        PartyMember1SpellInRange partyMember1SpellInRange,
+        PartyMember2SpellInRange partyMember2SpellInRange,
+        PartyMember3SpellInRange partyMember3SpellInRange,
+        PartyMember4SpellInRange partyMember4SpellInRange,
         Stance stance)
     {
         this.worldMapAreaDB = mapAreaDB;
@@ -30,6 +35,11 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
 
         bits = addonBits;
         SpellInRange = spellInRange;
+        FocusSpellInRange = focusSpellInRange;
+        PartyMember1SpellInRange = partyMember1SpellInRange;
+        PartyMember2SpellInRange = partyMember2SpellInRange;
+        PartyMember3SpellInRange = partyMember3SpellInRange;
+        PartyMember4SpellInRange = partyMember4SpellInRange;
         Stance = stance;
 
         // TODO: inject! value type tho

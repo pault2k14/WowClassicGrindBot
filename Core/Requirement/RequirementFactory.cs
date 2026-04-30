@@ -1254,7 +1254,7 @@ public sealed partial class RequirementFactory
             int bitMask = Mask.M[bitNum];
 
             bool f() => range[bitMask];
-            string s() => $"SpellInRange {bitNum}";
+            string s() => $"FocusSpellInRange {bitNum}";
 
             return new Requirement
             {
@@ -1276,7 +1276,7 @@ public sealed partial class RequirementFactory
             int bitMask = Mask.M[bitNum];
 
             bool f() => range[bitMask];
-            string s() => $"SpellInRange {bitNum}";
+            string s() => $"PartyMember1SpellInRange {bitNum}";
 
             return new Requirement
             {
@@ -1298,7 +1298,7 @@ public sealed partial class RequirementFactory
             int bitMask = Mask.M[bitNum];
 
             bool f() => range[bitMask];
-            string s() => $"SpellInRange {bitNum}";
+            string s() => $"PartyMember2SpellInRange {bitNum}";
 
             return new Requirement
             {
@@ -1320,7 +1320,7 @@ public sealed partial class RequirementFactory
             int bitMask = Mask.M[bitNum];
 
             bool f() => range[bitMask];
-            string s() => $"SpellInRange {bitNum}";
+            string s() => $"PartyMember3SpellInRange {bitNum}";
 
             return new Requirement
             {
@@ -1342,7 +1342,7 @@ public sealed partial class RequirementFactory
             int bitMask = Mask.M[bitNum];
 
             bool f() => range[bitMask];
-            string s() => $"SpellInRange {bitNum}";
+            string s() => $"PartyMember4SpellInRange {bitNum}";
 
             return new Requirement
             {
