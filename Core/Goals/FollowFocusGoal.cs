@@ -551,6 +551,27 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
                 EnterState(NavState.WaitingForPosition);
             }
+            else if (_navLeaderTargetMapPos != default)
+            {
+                // Cooldown is active but we already have the leader's position from a
+                // previous NavigatingToLeader session. Immediately resume navigation to
+                // it rather than doing nothing until the cooldown expires.
+                //
+                // Root cause: the bot was being preempted every ~1s by Party Member1,
+                // resetting the NavigationActiveTimeout each time FFG re-entered so
+                // AssistCantFollow never fired. With no stored-position fallback in the
+                // cooldown-active branch, the bot just logged "on cooldown" and sat idle
+                // for the full 35s until it could send another position request.
+                // Evidence: assist_cant_follow_doesnt_ask_leader_to_return.txt —
+                // _navLeaderTargetMapPos was set at 19:33:14 when dist=0.18 was received,
+                // but from 19:33:33 to 19:33:45 the bot did nothing while the cooldown
+                // ticked down, cycling Idle → Party Member1 → Idle every ~1s.
+                logger.LogInformation(
+                    $"[FFG] Leader out of range — cooldown active ({secSinceLastRequest:0.0}s / {RequestPositionCooldownSec}s) " +
+                    "but stored position available. Resuming navigation to last known leader position.");
+                navigation.SetSingleWaypoint(_navLeaderTargetMapPos);
+                EnterState(NavState.NavigatingToLeader);
+            }
             else
             {
                 logger.LogInformation(
