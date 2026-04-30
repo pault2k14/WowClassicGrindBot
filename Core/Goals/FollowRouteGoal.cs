@@ -576,6 +576,38 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public override void Update()
     {
+        // Re-enable target finder after evade-blacklist suppression window elapses.
+        // MUST run before any early-return paths (IsSuppressedBlacklistedTarget, AssistIsNotFollowing,
+        // _waitingForAssistAfterPosition, etc.) so it fires unconditionally every tick.
+        //
+        // Bug fixed: these blocks were previously placed AFTER three early-return guards.
+        // If _waitingForAssistAfterPosition stayed true for the full 25s window without FRG
+        // being preempted (no Abort/Resume), the elapse block never ran and sideActivityManualReset
+        // was never Set() — the side thread stayed blocked indefinitely.
+        // Evidence: Leader_Blacklist_TargetFinder_Permanently_Off.txt — second Resume() at
+        // 17:27:05:011 showed suppression still active (18214ms), confirming FRG was briefly
+        // preempted while _waitingForAssistAfterPosition was likely true. In that specific run
+        // the assist eventually arrived before the window expired, so the bug was masked. In runs
+        // where the assist takes longer than the full 25s window, the target finder stays off.
+        if (_suppressTargetFinderUntilUtc != DateTime.MinValue &&
+            DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
+        {
+            _suppressTargetFinderUntilUtc = DateTime.MinValue;
+            logger.LogInformation("[FRG] Target finder suppression window elapsed — resuming normal target search.");
+            sideActivityManualReset.Set();
+        }
+
+        // Watchdog: if the side-activity thread is paused but there is no active
+        // suppression and no current target, re-enable it. Also moved to the top so
+        // it fires even when an early-return guard is active.
+        if (!sideActivityManualReset.IsSet &&
+            _suppressTargetFinderUntilUtc == DateTime.MinValue &&
+            !bits.Target())
+        {
+            logger.LogInformation("[FRG] Thread watchdog: side-activity paused with no target and no suppression — re-enabling.");
+            sideActivityManualReset.Set();
+        }
+
         // 1) Consume pause requests (from side thread)
         if (Interlocked.Exchange(ref _pauseNavRequested, 0) == 1)
         {
@@ -661,28 +693,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             // Still waiting for the assist to arrive — hold position.
             wait.Update();
             return;
-        }
-
-        // Re-enable target finder after evade-blacklist suppression window elapses
-        if (_suppressTargetFinderUntilUtc != DateTime.MinValue &&
-            DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
-        {
-            _suppressTargetFinderUntilUtc = DateTime.MinValue;
-            logger.LogInformation("[FRG] Target finder suppression window elapsed — resuming normal target search.");
-            sideActivityManualReset.Set();
-        }
-
-        // Watchdog: if the side-activity thread is paused but there is no active
-        // suppression and no current target, re-enable it. This recovers from the
-        // race where "Found target!" fired but GOAP never transitioned away from FRG
-        // (e.g. the target was already dead by the time the planner evaluated), leaving
-        // the thread paused indefinitely since OnEnter/Resume never gets called again.
-        if (!sideActivityManualReset.IsSet &&
-            _suppressTargetFinderUntilUtc == DateTime.MinValue &&
-            !bits.Target())
-        {
-            logger.LogInformation("[FRG] Thread watchdog: side-activity paused with no target and no suppression — re-enabling.");
-            sideActivityManualReset.Set();
         }
 
         // 2) Determine whether we WANT navigation paused this tick
