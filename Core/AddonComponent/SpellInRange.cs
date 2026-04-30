@@ -6,11 +6,21 @@ public sealed class SpellInRange : IReader
 {
     private const int cell = 40;
     private const int partyMembersInRangecell = 130;
+    private const int focusCell = 133;
+    private const int party1Cell = 135;
+    private const int party2Cell = 137;
+    private const int party3Cell = 139;
+    private const int party4Cell = 141;
 
     public bool this[int index] => b[index];
 
     private BitVector32 b;
     private BitVector32 b2;
+    private BitVector32 f;
+    private BitVector32 p1;
+    private BitVector32 p2;
+    private BitVector32 p3;
+    private BitVector32 p4;
 
     public SpellInRange() { }
 
@@ -18,6 +28,11 @@ public sealed class SpellInRange : IReader
     {
         b = new(reader.GetInt(cell));
         b2 = new (reader.GetInt(partyMembersInRangecell));
+        f = new(reader.GetInt(focusCell));
+        p1 = new(reader.GetInt(party1Cell));
+        p2 = new(reader.GetInt(party2Cell));
+        p3 = new(reader.GetInt(party3Cell));
+        p4 = new(reader.GetInt(party4Cell));
     }
 
     // Warrior

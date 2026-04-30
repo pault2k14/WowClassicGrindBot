@@ -128,6 +128,11 @@ public sealed partial class RequirementFactory
             { "npcID:", CreateNpcId },
             { "BagItem:", CreateBagItem },
             { "SpellInRange:", CreateSpellInRange },
+            { "FocusSpellInRange:", CreateFocusSpellInRange },
+            { "PartyMember1SpellInRange:", CreatePartyMember1SpellInRange },
+            { "PartyMember2SpellInRange:", CreatePartyMember2SpellInRange },
+            { "PartyMember3SpellInRange:", CreatePartyMember3SpellInRange },
+            { "PartyMember4SpellInRange:", CreatePartyMember4SpellInRange },
             { "TargetCastingSpell", CreateTargetCastingSpell },
             { "Form", CreateForm },
             { "Race", CreateRace },
@@ -1219,6 +1224,116 @@ public sealed partial class RequirementFactory
     {
         return create(requirement, playerReader.SpellInRange, intVariables);
         static Requirement create(ReadOnlySpan<char> requirement, SpellInRange range,
+            Dictionary<string, Func<int>> intVariables)
+        {
+            // 'SpellInRange:_BIT_NUM_OR_INTVARIABLE_'
+            int sep = requirement.IndexOf(SEP1);
+            int bitNum = GetIntValueOrVariable(intVariables, requirement[(sep + 1)..]);
+            int bitMask = Mask.M[bitNum];
+
+            bool f() => range[bitMask];
+            string s() => $"SpellInRange {bitNum}";
+
+            return new Requirement
+            {
+                HasRequirement = f,
+                LogMessage = s
+            };
+        }
+    }
+
+    private Requirement CreateFocusSpellInRange(ReadOnlySpan<char> requirement)
+    {
+        return create(requirement, playerReader.FocusSpellInRange, intVariables);
+        static Requirement create(ReadOnlySpan<char> requirement, FocusSpellInRange range,
+            Dictionary<string, Func<int>> intVariables)
+        {
+            // 'SpellInRange:_BIT_NUM_OR_INTVARIABLE_'
+            int sep = requirement.IndexOf(SEP1);
+            int bitNum = GetIntValueOrVariable(intVariables, requirement[(sep + 1)..]);
+            int bitMask = Mask.M[bitNum];
+
+            bool f() => range[bitMask];
+            string s() => $"SpellInRange {bitNum}";
+
+            return new Requirement
+            {
+                HasRequirement = f,
+                LogMessage = s
+            };
+        }
+    }
+
+    private Requirement CreatePartyMember1SpellInRange(ReadOnlySpan<char> requirement)
+    {
+        return create(requirement, playerReader.PartyMember1SpellInRange, intVariables);
+        static Requirement create(ReadOnlySpan<char> requirement, PartyMember1SpellInRange range,
+            Dictionary<string, Func<int>> intVariables)
+        {
+            // 'SpellInRange:_BIT_NUM_OR_INTVARIABLE_'
+            int sep = requirement.IndexOf(SEP1);
+            int bitNum = GetIntValueOrVariable(intVariables, requirement[(sep + 1)..]);
+            int bitMask = Mask.M[bitNum];
+
+            bool f() => range[bitMask];
+            string s() => $"SpellInRange {bitNum}";
+
+            return new Requirement
+            {
+                HasRequirement = f,
+                LogMessage = s
+            };
+        }
+    }
+
+    private Requirement CreatePartyMember2SpellInRange(ReadOnlySpan<char> requirement)
+    {
+        return create(requirement, playerReader.PartyMember2SpellInRange, intVariables);
+        static Requirement create(ReadOnlySpan<char> requirement, PartyMember2SpellInRange range,
+            Dictionary<string, Func<int>> intVariables)
+        {
+            // 'SpellInRange:_BIT_NUM_OR_INTVARIABLE_'
+            int sep = requirement.IndexOf(SEP1);
+            int bitNum = GetIntValueOrVariable(intVariables, requirement[(sep + 1)..]);
+            int bitMask = Mask.M[bitNum];
+
+            bool f() => range[bitMask];
+            string s() => $"SpellInRange {bitNum}";
+
+            return new Requirement
+            {
+                HasRequirement = f,
+                LogMessage = s
+            };
+        }
+    }
+
+    private Requirement CreatePartyMember3SpellInRange(ReadOnlySpan<char> requirement)
+    {
+        return create(requirement, playerReader.PartyMember3SpellInRange, intVariables);
+        static Requirement create(ReadOnlySpan<char> requirement, PartyMember3SpellInRange range,
+            Dictionary<string, Func<int>> intVariables)
+        {
+            // 'SpellInRange:_BIT_NUM_OR_INTVARIABLE_'
+            int sep = requirement.IndexOf(SEP1);
+            int bitNum = GetIntValueOrVariable(intVariables, requirement[(sep + 1)..]);
+            int bitMask = Mask.M[bitNum];
+
+            bool f() => range[bitMask];
+            string s() => $"SpellInRange {bitNum}";
+
+            return new Requirement
+            {
+                HasRequirement = f,
+                LogMessage = s
+            };
+        }
+    }
+
+    private Requirement CreatePartyMember4SpellInRange(ReadOnlySpan<char> requirement)
+    {
+        return create(requirement, playerReader.PartyMember4SpellInRange, intVariables);
+        static Requirement create(ReadOnlySpan<char> requirement, PartyMember4SpellInRange range,
             Dictionary<string, Func<int>> intVariables)
         {
             // 'SpellInRange:_BIT_NUM_OR_INTVARIABLE_'

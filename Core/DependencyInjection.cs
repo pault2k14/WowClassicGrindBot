@@ -38,6 +38,11 @@ public static class DependencyInjection
         s.ForwardSingleton<AddonBits, IGameMenuWindowShown>();
 
         s.ForwardSingleton<SpellInRange, IReader>();
+        s.ForwardSingleton<FocusSpellInRange, IReader>();
+        s.ForwardSingleton<PartyMember1SpellInRange, IReader>();
+        s.ForwardSingleton<PartyMember2SpellInRange, IReader>();
+        s.ForwardSingleton<PartyMember3SpellInRange, IReader>();
+        s.ForwardSingleton<PartyMember4SpellInRange, IReader>();
         s.ForwardSingleton<BuffStatus<IPlayer>, IReader>(x => new(41));
         s.ForwardSingleton<TargetDebuffStatus, IReader>();
         s.ForwardSingleton<BuffStatus<IFocus>, IReader>(x => new(91));
@@ -142,6 +147,11 @@ public static class DependencyInjection
         s.ForwardSingleton<IGameMenuWindowShown>(sp);
 
         s.ForwardSingleton<SpellInRange>(sp);
+        s.ForwardSingleton<FocusSpellInRange>(sp);
+        s.ForwardSingleton<PartyMember1SpellInRange>(sp);
+        s.ForwardSingleton<PartyMember2SpellInRange>(sp);
+        s.ForwardSingleton<PartyMember3SpellInRange>(sp);
+        s.ForwardSingleton<PartyMember4SpellInRange>(sp);
         s.ForwardSingleton<BuffStatus<IPlayer>>(sp);
         s.ForwardSingleton<TargetDebuffStatus>(sp);
         s.ForwardSingleton<BuffStatus<IFocus>>(sp);

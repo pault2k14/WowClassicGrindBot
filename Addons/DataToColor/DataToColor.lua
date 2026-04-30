@@ -5,7 +5,7 @@
 -- Trigger between emitting game data and frame location data
 local SETUP_SEQUENCE = false
 -- Total number of data frames generated
-local NUMBER_OF_FRAMES = 139
+local NUMBER_OF_FRAMES = 144
 -- Set number of pixel rows
 local FRAME_ROWS = 1
 -- Size of data squares in px. Varies based on rounding errors as well as dimension size. Use as a guideline, but not 100% accurate.
@@ -1059,8 +1059,7 @@ function DataToColor:CreateFrames()
             end
 
             Pixel(int, DataToColor:arePartyMembersInRange(), 130)
-
-            
+                        
             if UnitExists(DataToColor.C.unitTarget) then
                 local raidTargetIndex = GetRaidTargetIndex(DataToColor.C.unitTarget)
                 if raidTargetIndex == nil then
@@ -1185,32 +1184,42 @@ function DataToColor:CreateFrames()
 
             if UnitExists(DataToColor.C.unitFocus) then
                 Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitFocus), 132) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:areSpellsInRangeForUnit(DataToColor.C.unitFocus), 133)
             else
                 Pixel(int, 0, 132)
+                Pixel(int, 0, 133)
             end
         
             if UnitExists(DataToColor.C.unitPartyMember1) then
-                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember1), 133) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember1), 134) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:areSpellsInRangeForUnit(DataToColor.C.unitPartyMember1), 135)
             else
-                Pixel(int, 0, 133)
+                Pixel(int, 0, 134)
+                Pixel(int, 0, 135)
             end
             
             if UnitExists(DataToColor.C.unitPartyMember2) then
-                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember2), 134) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember2), 136) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:areSpellsInRangeForUnit(DataToColor.C.unitPartyMember2), 137)
             else
-                Pixel(int, 0, 134)
+                Pixel(int, 0, 136)
+                Pixel(int, 0, 137)
             end
 
             if UnitExists(DataToColor.C.unitPartyMember3) then
-                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember3), 135) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember3), 138) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:areSpellsInRangeForUnit(DataToColor.C.unitPartyMember3), 139)
             else
-                Pixel(int, 0, 135)
+                Pixel(int, 0, 138)
+                Pixel(int, 0, 139)
             end
 
             if UnitExists(DataToColor.C.unitPartyMember4) then
-                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember4), 136) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:getRangeForUnit(DataToColor.C.unitPartyMember4), 140) -- Represents minRange-maxRange ex. 0-5 5-15
+                Pixel(int, DataToColor:areSpellsInRangeForUnit(DataToColor.C.unitPartyMember4), 141)
             else
-                Pixel(int, 0, 136)
+                Pixel(int, 0, 140)
+                Pixel(int, 0, 141)
             end
 
             UpdateGlobalTime()

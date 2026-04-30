@@ -467,6 +467,25 @@ function DataToColor:areSpellsInRange()
     return inRange
 end
 
+function DataToColor:areSpellsInRangeForUnit(unit)
+    local inRange = 0
+    local targetCount = #DataToColor.S.spellInRangeTarget
+    for i = 1, targetCount do
+        local spellIconId = DataToColor.S.spellInRangeTarget[i]
+        local spellId = DataToColor.S.playerSpellBookIconToId[spellIconId] or spellIconId -- fallback to spellId
+        local spellName = GetSpellInfo(spellId)
+        if spellName then
+            if IsSpellInRange(spellName, unit) == 1 then
+                inRange = inRange + (2 ^ (i - 1))
+            end
+        else
+            --print(spellId .. " is null")
+        end
+    end
+
+    return inRange
+end
+
 function DataToColor:arePartyMembersInRange()
     local inRange = 0
     -- CheckInteractDistance restricted in combat
