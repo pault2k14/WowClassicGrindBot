@@ -37,9 +37,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// <summary>Assist transitions to NavigatingToLeader when farther than this.
     /// Set below <see cref="LeaderPauseYards"/> (20y) so the assist corrects course
     /// before the leader's distance gate fires — the leader almost never needs to pause.
-    /// Dead-band is <see cref="FollowingMaxYards"/> (7y) to NavigatingMinYards (14y),
-    /// giving a natural 3–14y follow range.</summary>
+    /// Dead-band entry: dist > NavigatingMinYards (14y) triggers navigation from Idle.
+    /// Dead-band exit:  dist &lt; NavigatingExitYards (10y) returns to Idle.
+    /// The 4y hysteresis gap (10-14y) prevents oscillation when running alongside
+    /// the leader at ~14y — without it the state flips every 100-500ms, causing
+    /// 68+ path re-requests per run and lateral drift as the pather cuts different
+    /// mesh corridors to each slightly-off-route live position.</summary>
     private const float NavigatingMinYards = 14f;
+
+    /// <summary>Hysteresis exit threshold for NavigatingToLeader dead-band.
+    /// Must be less than <see cref="NavigatingMinYards"/> (14y) to prevent oscillation,
+    /// and greater than <see cref="FollowingMaxYards"/> (7y) to retain the circular-route
+    /// fix (assists chasing a curved route at similar speed would otherwise never exit
+    /// NavigatingToLeader via the FollowingMaxYards path alone).</summary>
+    private const float NavigatingExitYards = 10f;
 
     /// <summary>Leader must be this close before the assist exits CantFollow.
     /// MUST exceed <c>Navigation.POP_DIST</c> (3.6y) — the leader's navigation considers
@@ -422,20 +433,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Back within dead-band (FollowingMaxYards ≤ dist < NavigatingMinYards) → Idle.
-        // Without this, the assist can be trapped in NavigatingToLeader indefinitely when
-        // the leader is on a circular/curved route moving at a similar speed:
-        //   - The assist makes position progress (3y/step) → stuck timer never fires
-        //   - dist oscillates just above FollowingMaxYards (7y) → never exits NavigatingToLeader
-        //   - Leader's gap eventually grows to 80y while assist keeps chasing
-        // By exiting NavigatingToLeader as soon as dist falls below NavigatingMinYards (the
-        // same threshold that triggered navigation), we return to Idle symmetrically.
-        // Posting Following tells the leader "I'm close enough — keep moving". The dead-band
-        // logic in Idle then maintains Following until dist grows beyond NavigatingMinYards again.
-        if (dist < NavigatingMinYards && !navigation.IsApproachEscapeActive)
+        // Back within hysteresis zone (dist < NavigatingExitYards = 10y) → Idle.
+        // NavigatingExitYards (10y) is intentionally LOWER than NavigatingMinYards (14y).
+        // Using the same threshold for entry and exit creates a zero-hysteresis bang-bang
+        // controller: the assist reaches 13.9y → exits Idle, then immediately re-enters
+        // NavigatingToLeader at 14.1y, looping every 100-500ms. Each loop calls
+        // StartNavigatingToLeader() → SetSingleWaypoint() → fresh path request, causing
+        // 68+ pather restarts per run. The pather re-routes to the leader's shifted live
+        // position each time, cutting different mesh corridors and accumulating lateral drift.
+        // With NavigatingExitYards = 10y: the 10-14y zone is a stable "keep navigating" band.
+        // The assist stays in NavigatingToLeader until it actually closes to 10y, then Idle's
+        // dead-band (7-14y) holds it there without re-triggering navigation.
+        if (dist < NavigatingExitYards && !navigation.IsApproachEscapeActive)
         {
             logger.LogInformation(
-                $"[FFG] Back within dead-band ({dist:0.0}y < {NavigatingMinYards}y) — returning to Idle.");
+                $"[FFG] Back within hysteresis zone ({dist:0.0}y < {NavigatingExitYards}y) — returning to Idle.");
             navigation.Stop();
             input.StopForward(true);
             ResetNavState();
