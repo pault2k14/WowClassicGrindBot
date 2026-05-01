@@ -1,0 +1,86 @@
+{
+  "ClassName": "Warrior",
+  "Mode": "PartyLeader",
+  "Loot": true,
+  "KeyboardOnly": true,
+  "NPCMaxLevels_Below": 6,
+  "PathFilename": "_pack/1-20/Troll.Orc/01-04_Durotar_Valley of Trials.json",
+  "PathThereAndBack": false,
+  "PathReduceSteps": false,
+  "AutoPetAttack": false,
+  "Blacklist": [
+
+  ],
+  "IntVariables": {
+    "Debuff_POISON": 136067,
+    "Item_Heavy_Throwing_Dagger": 3108,
+    "Item_Balanced_Throwing_Dagger": 2946
+  },
+  "Combat": {
+    "Sequence": [
+      {
+        "Name": "StopAttack",
+        "BeforeCastDelay": 25,
+        "Requirements": [
+          "InMeleeRange",
+          "AutoAttacking",
+          "TargetHealth% > 98",
+          "Rage >= Cost_Heroic Strike"
+        ],
+        "AfterCastDelay": 25
+      },
+      {
+        "Name": "Heroic Strike",
+        "Key": "2",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "Rage > 15",
+          "MainHandSwing > -400",
+          "MobCount < 2"
+        ],
+        "AfterCastWaitSwing": true
+      },
+      {
+        "Name": "AutoAttack",
+        "BeforeCastFaceTarget": true,
+        "Requirements": [
+          "InMeleeRange",
+          "!AutoAttacking"
+        ]
+      },
+      {
+        "Name": "Approach",
+        "Log": true
+      }
+    ]
+  },
+  "Adhoc": {
+    "Sequence": [
+      {
+        "Name": "Food",
+        "Key": "F12",
+        "Requirement": "Health% < 40",
+        "Cost": 3
+      }
+    ]
+  },
+  "LootActions": {
+    "Sequence": [
+      {
+        "Name": "Destroy Junk 1",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
+        ]
+      },
+      {
+        "Name": "Destroy Junk 2",
+        "Key": "N0",
+        "BeforeCastDelay": 500,
+        "Requirements": [
+        ]
+      }
+    ]
+  }
+}

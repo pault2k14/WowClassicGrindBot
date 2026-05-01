@@ -1,7 +1,8 @@
-﻿using Core.Addon;
+using Core.Addon;
 using Core.Database;
 using Core.Extensions;
 using Core.Goals;
+using Core.Party;
 using Core.Session;
 
 using Game;
@@ -86,6 +87,13 @@ public static class DependencyInjection
             x => new(124, 125));
         s.ForwardSingleton<AuraTimeReader<IPlayerDebuffTimeReader>, IReader>(
             x => new(104, 105));
+
+        // Party state publisher: rate-limited assist→leader POSTs from the addon thread.
+        s.ForwardSingleton<PartyStatePublisher, IReader>();
+
+        // Leader state poller: rate-limited GET /party/leader/state from the addon thread.
+        // No-op on leader bot; active only when Mode == AssistFocus.
+        s.ForwardSingleton<LeaderStatePoller, IReader>();
 
         return s;
     }
@@ -186,6 +194,17 @@ public static class DependencyInjection
         s.ForwardSingleton<AuraTimeReader<IPartyMember3BuffTimeReader>>(sp);
         s.ForwardSingleton<AuraTimeReader<IPartyMember4BuffTimeReader>>(sp);
 
+        // Party API services — forwarded into the session scope so goals
+        // (FollowFocusGoal, FollowRouteGoal) can resolve them via constructor injection.
+        s.ForwardSingleton<LeaderStateService>(sp);
+        s.ForwardSingleton<AssistStateStore>(sp);
+        s.ForwardSingleton<IPartyApiClient>(sp);
+        s.ForwardSingleton<PartyStatePublisher>(sp);
+        s.ForwardSingleton<PartyModeProvider>(sp);
+        s.ForwardSingleton<AssistStatusProvider>(sp);
+        s.ForwardSingleton<LeaderConnectionStatus>(sp);
+        s.ForwardSingleton<LeaderStatePoller>(sp);
+
         return s;
     }
 
@@ -243,6 +262,25 @@ public static class DependencyInjection
         s.AddAddonComponents();
 
         s.AddSingleton<IBotController, BotController>();
+
+        // -------------------------------------------------------------------
+        // Party coordination API services (step 1 scaffold).
+        // These are singletons so they are created once and shared across plan
+        // reloads. LeaderStateService reads PlayerReader live on each request.
+        // AssistStateStore holds the last-known state per assist.
+        // IPartyApiClient is the assist-side HTTP wrapper (no-op cost on the
+        // leader bot; active on the assist bot via FollowFocusGoal in step 3+).
+        // PartyStatePublisher implements IReader — registered above in
+        // AddAddonComponents — and fires rate-limited assist→leader POSTs.
+        // -------------------------------------------------------------------
+        s.AddSingleton<LeaderStateService>();
+        s.AddSingleton<AssistStateStore>();
+        s.AddSingleton<IPartyApiClient, PartyApiClient>();
+        s.AddSingleton<PartyStatePublisher>();
+        s.AddSingleton<PartyModeProvider>();
+        s.AddSingleton<AssistStatusProvider>();
+        s.AddSingleton<LeaderConnectionStatus>();
+        s.AddSingleton<LeaderStatePoller>();
 
         return s;
     }
@@ -320,8 +358,6 @@ public static class DependencyInjection
         return new WowScreenDXGI(dxgiLogger, process, frames);
     }
 
-
-
     public static bool AddWoWProcess(
         this IServiceCollection services, ILogger log)
     {
@@ -344,7 +380,6 @@ public static class DependencyInjection
 
         if (configurator.IsDefault() || installVersion == null)
         {
-            // At this point the webpage never loads so fallback to configuration page
             configurator.Delete();
             FrameConfig.Delete();
 
@@ -356,13 +391,11 @@ public static class DependencyInjection
         if (!FrameConfig.Exists())
         {
             log.LogError($"{nameof(FrameConfig)} doesn't exists!");
-
             return false;
         }
 
         if (!FrameConfig.IsValid(rect, installVersion))
         {
-            // At this point the webpage never loads so fallback to configuration page
             FrameConfig.Delete();
 
             log.LogError($"{nameof(FrameConfig)} window rect is different then config!");
@@ -373,10 +406,8 @@ public static class DependencyInjection
             return false;
         }
 
-
         return true;
     }
-
 
     private static IScreenCapture GetScreenCapture(
         IServiceProvider sp, ILogger log)

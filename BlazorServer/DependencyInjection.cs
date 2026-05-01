@@ -1,4 +1,6 @@
-﻿using Microsoft.Extensions.Configuration;
+using Core.Party;
+
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 using SharedLib;
@@ -24,5 +26,10 @@ public static class DependencyInjection
 
         services.Configure<StartupConfigNpcOverlay>
             (configuration.GetSection(StartupConfigNpcOverlay.Position));
+
+        // Party API config — used by both leader (LeaderStateService / PartyController)
+        // and assist (PartyApiClient / FollowFocusGoal).
+        services.Configure<PartyApiConfig>
+            (configuration.GetSection(PartyApiConfig.Position));
     }
 }

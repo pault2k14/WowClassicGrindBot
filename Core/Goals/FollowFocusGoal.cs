@@ -1,8 +1,12 @@
 using Core.GOAP;
-using Core.Goals;
+using Core.Party;
+
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
 using SharedLib;
 using SharedLib.Extensions;
+
 using System;
 using System.Numerics;
 using System.Threading;
@@ -13,101 +17,100 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 {
     public override float Cost => 19f;
 
-    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
-    // While true, FFG skips the "assist focus combat" block so the assist
-    // stays in follow mode rather than trying to re-engage near the evading mob.
-    private bool _evadeRecoveryActive;
+    // -----------------------------------------------------------------------
+    // Distance thresholds (world yards, direction-agnostic XY distance)
+    // -----------------------------------------------------------------------
 
+    /// <summary>Assist posts <see cref="BotStatus.Following"/> when closer than this.</summary>
+    public const float FollowingMaxYards = 10f;
+
+    /// <summary>Assist transitions to NavigatingToLeader when farther than this.
+    /// Dead-band between FollowingMaxYards and NavigatingMinYards prevents rapid
+    /// status switching when the leader is just ahead.</summary>
+    private const float NavigatingMinYards = 15f;
+
+    /// <summary>Leader must be this close before the assist exits CantFollow.</summary>
+    public const float LeaderArrivedYards = 2f;
+
+    /// <summary>Minimum leader movement before the navigation waypoint is refreshed.</summary>
+    private const float WaypointUpdateThresholdYards = 3f;
+
+    /// <summary>Leader must pause when assist exceeds this distance.</summary>
+    public const float LeaderPauseYards = 20f;
+
+    /// <summary>Leader may resume when assist is within this distance (hysteresis).</summary>
+    public const float LeaderResumeYards = 15f;
+
+    // -----------------------------------------------------------------------
+    // Timeouts
+    // -----------------------------------------------------------------------
+    private const double NavigationActiveTimeoutSec = 30.0;
+    private const double CantFollowTimeoutSec = 120.0;
+
+    // -----------------------------------------------------------------------
+    // Stuck detection
+    // -----------------------------------------------------------------------
+    private const double StuckCheckIntervalSec = 3.0;
+    private const float StuckMinMovementWorld = 1.0f;
+    private const double StuckEscapeCooldownSec = 10.0;
+
+    // -----------------------------------------------------------------------
+    // Dependencies
+    // -----------------------------------------------------------------------
     private readonly ConfigurableInput input;
     private readonly PlayerReader playerReader;
     private readonly AddonBits bits;
     private readonly Wait wait;
-    private readonly ClassConfiguration classConfig;
     private readonly ILogger<FollowFocusGoal> logger;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
     private readonly Navigation navigation;
+    private readonly AssistStatusProvider assistStatusProvider;
+    private readonly LeaderConnectionStatus leaderConnection;
 
-    // --- Follow state ---
-    private int focusTargetGuid;
-    private Action<CancellationToken> FocusTargetInput;
-    private followMessage lastMessageSent = followMessage.None;
+    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
+    private bool _evadeRecoveryActive;
 
-    // Prevents pressing FollowTarget every single tick — gives the game time to
-    // confirm AutoFollow before we try again.
-    private const double FollowAttemptCooldownSec = 2.0;
-    private DateTime _lastFollowAttemptUtc = DateTime.MinValue;
+    // For combat-assist targeting (unchanged from original).
+    private readonly Action<CancellationToken> FocusTargetInput;
 
-    private enum followMessage
-    {
-        None,
-        ImFollowing,
-        ImNotFollowing,
-        ICantFollow
-    }
-
-    // --- Leader-navigation state machine ---
-    private enum NavState
-    {
-        Idle,
-        WaitingForPosition,
-        NavigatingToLeader,
-    }
-
+    // -----------------------------------------------------------------------
+    // Nav state machine
+    // -----------------------------------------------------------------------
+    private enum NavState { Idle, NavigatingToLeader, CantFollow }
     private NavState _navState = NavState.Idle;
-
-    // True after SendAssistCantFollow fires — the assist has given up navigating to
-    // the leader and asked the leader to come to them instead.
-    // While true, UpdateIdle does NOT send position requests (N8) — the leader is
-    // (or should be) on their way. Cleared when follow is successfully established.
-    // Falls back to allowing position requests after WantsLeaderToReturnTimeoutSec
-    // in case the leader never arrives (e.g. also stuck, or timed out returning).
-    private bool _wantsLeaderToReturn;
-    private DateTime _wantsLeaderToReturnSinceUtc;
-    private const double WantsLeaderToReturnTimeoutSec = 60.0;
-
-    // How long to wait for the leader to reply with their position.
-    private const double WaitForPositionTimeoutSec = 15.0;
-
-    // Maximum ACTIVE navigation time before escalating to AssistCantFollow.
-    // Uses elapsed-time-only-when-moving (same pattern as FRG's TickAssistReturnTimeout)
-    // so the timeout doesn't burn down while the assist is in combat or evade recovery.
-    private const double NavigationActiveTimeoutSec = 30.0;
-
     private DateTime _navStateEnteredUtc;
 
-    // --- NavigatingToLeader: rewind/retry and active-time timeout ---
-    // The leader's map position we're currently navigating to (for rewind retry).
-    private Vector3 _navLeaderTargetMapPos;
-    // True while rewinding to the last safe anchor before retrying the leader target.
-    private bool _navRewindActive;
-    // The world-space safe anchor position to rewind to on path failure.
-    private Vector3 _navRewindAnchorW;
-    // 0 = first attempt, 1 = after rewind retry. Abort on second failure.
-    private int _navAttempt;
-    // Active-time elapsed since entering NavigatingToLeader.
-    // Only increments when not in combat and not in evade recovery.
+    // -----------------------------------------------------------------------
+    // Leader position tracking
+    // -----------------------------------------------------------------------
+    /// <summary>Last leader world position we navigated toward (for waypoint update threshold).</summary>
+    private Vector3 _lastNavigatedToLeaderWorldPos;
+
+    // -----------------------------------------------------------------------
+    // Navigation active-time timeout
+    // -----------------------------------------------------------------------
     private TimeSpan _navActiveElapsed;
     private DateTime _navLastTickUtc;
     private bool _navTimerInit;
+    private int _navAttempt;
+    private bool _navRewindActive;
+    private Vector3 _navRewindAnchorW;
 
-    // Cooldown so we don't spam the position request if something goes wrong.
-    private const double RequestPositionCooldownSec = 35.0;
-    private DateTime _lastPositionRequestUtc = DateTime.MinValue;
-
-    // --- Idle stuck detection ---
-    // Detects when the assist is physically trapped on terrain while out of follow
-    // range and not in combat. Without this, the assist can sit on terrain forever
-    // while the leader repeatedly navigates to it and waits for "i'm following" —
-    // a deadlock that can kill the leader if they are soloing in the meantime.
-    private const double StuckCheckIntervalSec = 3.0;
-    private const float StuckMinMovementWorld = 1.0f;  // world units
-    private const double StuckEscapeCooldownSec = 10.0;
+    // -----------------------------------------------------------------------
+    // Stuck detection fields
+    // -----------------------------------------------------------------------
     private Vector3 _stuckCheckPosW;
     private DateTime _stuckCheckLastUtc = DateTime.MinValue;
     private DateTime _stuckEscapeLastUtc = DateTime.MinValue;
 
-    public FollowFocusGoal(ConfigurableInput input,
+    // -----------------------------------------------------------------------
+    // CantFollow: hold position, wait for leader within LeaderArrivedYards
+    // -----------------------------------------------------------------------
+    private DateTime _cantFollowEnteredUtc;
+
+    public FollowFocusGoal(
+        ConfigurableInput input,
         PlayerReader playerReader,
         AddonBits bits,
         Wait wait,
@@ -115,241 +118,152 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         ILogger<FollowFocusGoal> logger,
         RestHandler restHandler,
         ChatReader chatReader,
-        Navigation navigation
-        )
+        Navigation navigation,
+        AssistStatusProvider assistStatusProvider,
+        LeaderConnectionStatus leaderConnection,
+        IOptions<PartyApiConfig> configOptions)
         : base(nameof(FollowFocusGoal))
     {
         this.input = input;
         this.playerReader = playerReader;
         this.bits = bits;
         this.wait = wait;
-        this.classConfig = classConfig;
         this.logger = logger;
         this.restHandler = restHandler;
         this.chatReader = chatReader;
         this.navigation = navigation;
+        this.assistStatusProvider = assistStatusProvider;
+        this.leaderConnection = leaderConnection;
 
         if (classConfig.UnitToFollow == "focus")
-        {
             AddPrecondition(GoapKey.hasfocus, true);
-        }
 
         AddPrecondition(GoapKey.assistshouldfollow, true);
-
-        // Try adding these preconditions to let the assit loot
         AddPrecondition(GoapKey.shouldloot, false);
         AddPrecondition(GoapKey.shouldgather, false);
         AddPrecondition(GoapKey.consumecorpse, false);
 
-        switch (classConfig.UnitToFollow)
+        FocusTargetInput = classConfig.UnitToFollow switch
         {
-            case "focus":
-                focusTargetGuid = playerReader.FocusGuid;
-                FocusTargetInput = input.PressTargetFocus;
-                break;
-            case "party1":
-                focusTargetGuid = playerReader.PartyMember1Guid;
-                FocusTargetInput = input.PressTargetFocus;
-                break;
-            case "party2":
-                focusTargetGuid = playerReader.PartyMember2Guid;
-                FocusTargetInput = input.PressTargetFocusPartyMemberTwo;
-                break;
-            case "party3":
-                focusTargetGuid = playerReader.PartyMember3Guid;
-                FocusTargetInput = input.PressTargetFocusPartyMemberThree;
-                break;
-            case "party4":
-                focusTargetGuid = playerReader.PartyMember4Guid;
-                FocusTargetInput = input.PressTargetFocusPartyMemberFour;
-                break;
-            default:
-                focusTargetGuid = playerReader.FocusGuid;
-                FocusTargetInput = input.PressTargetFocus;
-                break;
-        }
+            "party2" => input.PressTargetFocusPartyMemberTwo,
+            "party3" => input.PressTargetFocusPartyMemberThree,
+            "party4" => input.PressTargetFocusPartyMemberFour,
+            _        => input.PressTargetFocus
+        };
 
-        // Subscribe to navigation events.
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
-        navigation.OnWayPointReached += Navigation_OnWayPointReached;
-        navigation.OnPathFailed += Navigation_OnPathFailed;
+        navigation.OnWayPointReached    += Navigation_OnWayPointReached;
+        navigation.OnPathFailed         += Navigation_OnPathFailed;
     }
 
-    // Called when the goal is disposed or the agent shuts down.
-    // Unsubscribes the navigation event to prevent callbacks after teardown.
     private void Cleanup()
     {
         navigation.OnDestinationReached -= Navigation_OnDestinationReached;
-        navigation.OnWayPointReached -= Navigation_OnWayPointReached;
-        navigation.OnPathFailed -= Navigation_OnPathFailed;
+        navigation.OnWayPointReached    -= Navigation_OnWayPointReached;
+        navigation.OnPathFailed         -= Navigation_OnPathFailed;
     }
+
+    // -----------------------------------------------------------------------
+    // IGoapEventListener
+    // -----------------------------------------------------------------------
+
+    public void OnGoapEvent(GoapEventArgs e)
+    {
+        if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
+            _evadeRecoveryActive = s.Value;
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
 
     public override void OnEnter()
     {
         while (restHandler.IsResting())
-        {
             wait.Update(1000);
-        }
 
-        // Reset stuck detection snapshot on re-entry so stale position data
-        // from a previous plan cycle doesn't cause a false positive.
         _stuckCheckLastUtc = DateTime.MinValue;
-        // Always reset approach escape on FFG entry — do NOT guard with !IsApproachEscapeActive.
-        // Evidence: 00:12 log — a mob-approach escape started at 07:11:08 UTC (during ATG)
-        // survived through CombatGoal, LootGoal, CorpseConsumedGoal, FFG #1, and FFG #2
-        // because every goal's "if (!IsApproachEscapeActive) reset" check was skipped.
-        // When FFG #2 entered, it drove the stale escape for 8 seconds, moving the bot
-        // ~53 world units off course before escape-stuck fired and the bot requested position.
-        // FFG never needs to inherit a mob approach escape. If FFG starts its own escape
-        // (via TickIdleStuckDetection → TryUnstuck), it will be restarted within 3s if needed.
         navigation.ResetApproachEscape();
 
         if (input.IsKeyDown(input.ForwardKey))
-        {
             input.StopForward(true);
-        }
 
-        // If we were navigating and got preempted (e.g. entered combat), stop nav cleanly.
         if (_navState == NavState.NavigatingToLeader)
         {
-            logger.LogInformation("[FFG] OnEnter: was NavigatingToLeader, stopping navigation.");
+            logger.LogInformation("[FFG] OnEnter: was NavigatingToLeader — stopping navigation.");
             navigation.Stop();
-            ResetNavRetryState();
+            ResetNavState();
             _navState = NavState.Idle;
         }
-        else if (_navState == NavState.WaitingForPosition)
+        else if (_navState == NavState.CantFollow)
         {
-            // Re-entering after a plan cycle while waiting for a position reply.
-            if (chatReader.LeaderPositionReceived)
-            {
-                // Position arrived during the cycle — leave state as-is so
-                // UpdateWaitingForPosition consumes it on the very first tick.
-                logger.LogInformation("[FFG] OnEnter: leader position received during plan cycle — will consume immediately.");
-            }
-            else
-            {
-                double elapsed = (DateTime.UtcNow - _navStateEnteredUtc).TotalSeconds;
-                if (elapsed >= WaitForPositionTimeoutSec)
-                {
-                    // Timed out while we were in another goal — escalate now.
-                    logger.LogWarning($"[FFG] OnEnter: WaitingForPosition timed out while goal was inactive ({elapsed:0.0}s) — escalating to AssistCantFollow.");
-                    SendAssistCantFollow();
-                    _navState = NavState.Idle;
-                }
-                else
-                {
-                    logger.LogInformation($"[FFG] OnEnter: resuming WaitingForPosition ({elapsed:0.0}s / {WaitForPositionTimeoutSec}s elapsed).");
-                }
-            }
+            // Remain in CantFollow across plan cycles — the assist should not start
+            // moving just because another goal briefly preempted us.
+            logger.LogInformation("[FFG] OnEnter: resuming CantFollow state.");
         }
     }
 
     public override void OnExit()
     {
-        if (playerReader.TargetGuid == focusTargetGuid)
-        {
-            input.PressClearTarget();
-            wait.Update();
-        }
-
-        // Always reset approach escape on exit — same reasoning as OnEnter.
-        // Ensures any stale mob-approach escape is cleared before the next goal inherits it.
         navigation.ResetApproachEscape();
         input.StepBackwards();
-        input.PressAssistIsNotFollowing();
-        lastMessageSent = followMessage.ImNotFollowing;
         wait.Update();
 
-        // Stop any in-progress navigation so it doesn't continue after we leave.
         if (_navState == NavState.NavigatingToLeader)
         {
             logger.LogInformation("[FFG] OnExit: stopping navigation.");
             navigation.Stop();
         }
 
-        // If we are waiting for a position reply, preserve both the nav state and
-        // the LeaderPositionReceived flag across the plan cycle. The leader's reply
-        // can arrive at exactly the moment the GOAP planner picks a different goal
-        // and OnExit fires — clearing these here discards valid data and leaves the
-        // assist stuck waiting out the full 35s cooldown before it can request again.
-        // For any other state, reset to Idle and clear the flag as normal.
-        if (_navState == NavState.WaitingForPosition)
-        {
-            logger.LogInformation("[FFG] OnExit: preserving WaitingForPosition state and position data across plan cycle.");
-            // Leave _navState and LeaderPositionReceived intact.
-        }
-        else
-        {
+        if (_navState != NavState.CantFollow)
             _navState = NavState.Idle;
-            chatReader.LeaderPositionReceived = false;
-        }
+        // CantFollow persists across plan cycles so the assist holds position.
     }
+
+    // -----------------------------------------------------------------------
+    // Main update
+    // -----------------------------------------------------------------------
 
     public override void Update()
     {
         if (bits.Drowning())
-        {
             input.PressJump();
-        }
 
-        // --- Assist-side evade blacklist handling ---
-        // If the leader has broadcast "blacklist target: {guid}", the assist must
-        // immediately stop attacking, ignore that target, and clear it. This ensures
-        // both bots disengage from evading mobs simultaneously.
+        // ── Evade blacklist (still chat-based) ─────────────────────────────
         if (chatReader.LeaderBlacklistTarget)
         {
             int blacklistGuid = chatReader.LeaderBlacklistTargetId;
             chatReader.LeaderBlacklistTarget = false;
             chatReader.LeaderBlacklistTargetId = 0;
 
-            logger.LogInformation($"[FFG] OnGoapEvent LeaderBlacklistTarget received guid={blacklistGuid}");
+            logger.LogInformation($"[FFG] LeaderBlacklistTarget received guid={blacklistGuid}");
 
             if (blacklistGuid != 0)
             {
-                logger.LogInformation($"[FFG] Leader blacklisted target guid={blacklistGuid} — stopping attack, ignoring and starting evade recovery.");
                 input.PressStopAttack();
                 wait.Update();
                 playerReader.IgnoreTarget(blacklistGuid);
                 input.PressClearTarget();
                 wait.Update();
 
-                // Fire EvadeBlacklistEvent so the assist's own GoapAgent starts its
-                // evadeRecovery timer. Without this, _evadeRecoveryActive stays false
-                // and the Focus_Combat block below immediately re-engages the mob.
                 SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
-
-                // Set AssistRequestReturn=true immediately on the assist side so
-                // FollowFocusGoal is selectable right now — no ~1.5s wait for the
-                // chat message to echo back. The N5 press below delivers real position
-                // coordinates to the leader; the local flag just bridges the gap.
+                // Keep chatReader.AssistRequestReturn as local override so
+                // assistshouldfollow stays true during evade recovery.
                 chatReader.AssistRequestReturn = true;
-
-                // Press N5 (AssistCantFollow) — sends real position coordinates to the
-                // leader, setting AssistRequestReturn=true on the leader side with
-                // AssistXPos/AssistYPos populated for PauseForAssistNavigation.
-                input.PressAssistCantFollow();
             }
             else
             {
-                // Ghost combat escape (guid=0): same stop-wait-coordinate flow as real
-                // evade, just without IgnoreTarget. Assist fires EvadeBlacklistEvent(0)
-                // locally, sets AssistRequestReturn and presses N5 so the leader gets
-                // real coordinates and navigates here (or assist navigates to leader via
-                // N8/N9). Once following, both continue the route.
-                logger.LogInformation("[FFG] Leader ghost combat escape (guid=0) — starting evade recovery, pressing N5.");
+                logger.LogInformation("[FFG] Ghost combat escape (guid=0) — starting evade recovery.");
                 SendGoapEvent(new EvadeBlacklistEvent(0));
                 chatReader.AssistRequestReturn = true;
-                input.PressAssistCantFollow();
             }
         }
 
-        // If focus is in combat, try to assist instead of following.
-        // Skip during evade recovery — the assist must stay in follow mode
-        // and not try to re-engage while both bots are moving away from the evading mob.
+        // ── Combat assist ─────────────────────────────────────────────────
         if (!_evadeRecoveryActive && bits.Focus_Combat() && bits.FocusTarget())
         {
             wait.Update();
-            input.PressTargetFocus();
+            FocusTargetInput(default);
             input.PressTargetOfTarget();
             wait.Update();
             input.PressInteract();
@@ -369,371 +283,253 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             wait.Update(1000);
         }
 
-        // --- Drive the leader-navigation state machine ---
+        // ── State machine ──────────────────────────────────────────────────
         switch (_navState)
         {
-            case NavState.Idle:
-                UpdateIdle();
-                break;
-
-            case NavState.WaitingForPosition:
-                UpdateWaitingForPosition();
-                break;
-
-            case NavState.NavigatingToLeader:
-                UpdateNavigatingToLeader();
-                break;
+            case NavState.Idle:              UpdateIdle();              break;
+            case NavState.NavigatingToLeader: UpdateNavigatingToLeader(); break;
+            case NavState.CantFollow:        UpdateCantFollow();        break;
         }
     }
 
-    // -------------------------------------------------------------------------
-    // State: Idle
-    // Normal follow behaviour. If the leader is too far to follow, request
-    // their position so we can navigate to them.
-    // -------------------------------------------------------------------------
-    public void OnGoapEvent(GoapEventArgs e)
-    {
-        if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
-        {
-            _evadeRecoveryActive = s.Value;
-        }
-    }
-
+    // -----------------------------------------------------------------------
+    // State: Idle — within FollowingMaxYards, posting Following
+    // -----------------------------------------------------------------------
     private void UpdateIdle()
     {
-        // Safety net: if LeaderPositionReceived is true but _navState is Idle, a position
-        // reply arrived during a plan cycle after _navState was already reset (e.g. from a
-        // NavigatingToLeader → Idle transition that raced with the reply). Consume it
-        // immediately by entering WaitingForPosition rather than ignoring it.
-        if (chatReader.LeaderPositionReceived)
+        LeaderState? leader = leaderConnection.LastLeaderState;
+
+        if (leader == null || leader.AgeMs > leaderConnection.StaleThresholdMs)
         {
-            logger.LogInformation("[FFG] UpdateIdle: leader position received while in Idle — entering WaitingForPosition to consume.");
-            EnterState(NavState.WaitingForPosition);
+            // No fresh data — stay put, don't post Following.
+            assistStatusProvider.CurrentStatus = BotStatus.Waiting;
+            wait.Update();
             return;
         }
 
-        // If we've already sent "i'm following" and the leader is still in
-        // inspect range AND AutoFollow is active, we're following fine — do nothing.
-        // If AutoFollow has dropped (terrain bump, manual keypress, etc.) we must
-        // fall through immediately so the follow attempt below re-establishes it,
-        // rather than waiting up to ~30 yards for the leader to leave inspect range.
-        if (lastMessageSent == followMessage.ImFollowing &&
-            playerReader.SpellInRange.Focus_Inspect &&
-            bits.AutoFollow())
+        float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+
+        if (logger.IsEnabled(LogLevel.Debug))
         {
+            logger.LogDebug(
+                $"[FFG] Idle: dist={dist:0.0}y to leader " +
+                $"status={leader.Status} age={leader.AgeMs:0}ms");
+        }
+
+        // Leader moved beyond the dead-band upper threshold → start navigating.
+        if (dist > NavigatingMinYards)
+        {
+            logger.LogInformation(
+                $"[FFG] Leader out of range ({dist:0.0}y > {NavigatingMinYards}y) — starting navigation.");
+            StartNavigatingToLeader(leader);
             return;
         }
 
-        // Target the unit we want to follow.
-        if (playerReader.TargetGuid != focusTargetGuid)
+        // Within range — post Following.
+        if (assistStatusProvider.CurrentStatus != BotStatus.Following)
         {
-            FocusTargetInput(default);
-            wait.Update();
-        }
-
-        // Leader is in range — press follow once and announce it.
-        // Focus_Inspect range (~30 yards) is larger than AutoFollow range, so we
-        // must verify AutoFollow actually established before sending "i'm following".
-        // If we send it prematurely the leader resumes patrol and the assist
-        // immediately loses them again.
-        if (playerReader.TargetGuid == focusTargetGuid &&
-            playerReader.SpellInRange.Focus_Inspect &&
-            (DateTime.UtcNow - _lastFollowAttemptUtc).TotalSeconds >= FollowAttemptCooldownSec)
-        {
-            _lastFollowAttemptUtc = DateTime.UtcNow;
-
-            // Stop movement before pressing follow — if the character is still
-            // running (or the leader is walking past), AutoFollow may not establish.
-            // TryFollowIfInRange does the same thing for consistency.
-            input.StopForward(true);
-            wait.Update();
-
-            input.PressFollowTarget();
-            wait.Update();
-            wait.Update();
-            wait.Update();
-
-            if (bits.AutoFollow())
-            {
-                input.StopForward(true);
-                chatReader.AssistRequestReturn = false;
-                _wantsLeaderToReturn = false;
-                SendImFollowing();
-                return;
-            }
-
-            // AutoFollow didn't establish — leader is in inspect range but not
-            // close enough to follow. Stay in UpdateIdle so the out-of-range path
-            // below can fire and request their position if needed.
-            logger.LogInformation("[FFG] PressFollowTarget in range but AutoFollow not established — staying in Idle.");
-        }
-
-        // Leader is out of inspect range — request their position to navigate back.
-        // Guard: only proceed if we have confirmed the leader is actually targeted.
-        // If TargetGuid doesn't match yet (the game hasn't registered the TargetFocus
-        // press from above), Focus_Inspect will be stale/false even if the leader is
-        // standing right next to us. Returning here lets the next tick re-evaluate
-        // after the addon has updated — preventing a spurious N8 request when the
-        // assist and leader are essentially co-located immediately after a plan transition.
-        if (!playerReader.SpellInRange.Focus_Inspect)
-        {
-            if (playerReader.TargetGuid != focusTargetGuid)
-            {
-                // Target not confirmed yet — skip this tick, don't request position.
-                wait.Update();
-                return;
-            }
-
-            // Check if the assist is stuck on terrain.
-            TickIdleStuckDetection();
-
-            // If a pather-based escape was initiated by TickIdleStuckDetection,
-            // drive Navigation this tick and check for completion.
-            if (navigation.IsApproachEscapeActive)
-            {
-                navigation.Update(CancellationToken.None);
-                if (navigation.IsApproachEscapeActive)
-                {
-                    if (!navigation.TryUnstuck())
-                        InjectPhysStuckEscape();
-                }
-                return;
-            }
-
-            // If the assist already gave up navigating and asked the leader to come back
-            // (_wantsLeaderToReturn=true), do NOT send position requests (N8) again —
-            // the leader should be on their way and we must stay put and wait.
-            // Allow a fallback after WantsLeaderToReturnTimeoutSec in case the leader
-            // never arrives (stuck, timed out, etc.).
-            if (_wantsLeaderToReturn)
-            {
-                // If the leader position reply arrived just after our WaitForPosition
-                // timeout fired (a common race at high latency), LeaderPositionReceived
-                // will be true even though we've already sent N5 and entered
-                // _wantsLeaderToReturn. Consume it and navigate to the leader rather
-                // than waiting up to 60s for them to walk to us.
-                if (chatReader.LeaderPositionReceived)
-                {
-                    logger.LogInformation("[FFG] Stale leader position received after timeout — consuming and navigating instead of waiting for leader to return.");
-                    _wantsLeaderToReturn = false;
-                    EnterState(NavState.WaitingForPosition);
-                    return;
-                }
-
-                double waitedSec = (DateTime.UtcNow - _wantsLeaderToReturnSinceUtc).TotalSeconds;
-                if (waitedSec < WantsLeaderToReturnTimeoutSec)
-                {
-                    logger.LogInformation(
-                        $"[FFG] Waiting for leader to return ({waitedSec:0.0}s / {WantsLeaderToReturnTimeoutSec}s) — suppressing position request.");
-                    wait.Update();
-                    return;
-                }
-
-                // Timeout: leader hasn't arrived. Reset and allow position request as fallback.
-                logger.LogWarning(
-                    $"[FFG] Leader did not return after {waitedSec:0.0}s — resetting to allow position request.");
-                _wantsLeaderToReturn = false;
-            }
-
-            double secSinceLastRequest =
-                (DateTime.UtcNow - _lastPositionRequestUtc).TotalSeconds;
-
-            if (secSinceLastRequest >= RequestPositionCooldownSec)
-            {
-                logger.LogInformation("[FFG] Leader out of range — requesting position.");
-                _lastPositionRequestUtc = DateTime.UtcNow;
-                chatReader.LeaderPositionReceived = false;
-
-                input.StepBackwards();
-                wait.Update();
-                input.PressAssistRequestLeaderPosition();
-                lastMessageSent = followMessage.ICantFollow;
-
-                EnterState(NavState.WaitingForPosition);
-            }
-            else if (_navLeaderTargetMapPos != default)
-            {
-                // Cooldown is active but we already have the leader's position from a
-                // previous NavigatingToLeader session. Immediately resume navigation to
-                // it rather than doing nothing until the cooldown expires.
-                //
-                // Root cause: the bot was being preempted every ~1s by Party Member1,
-                // resetting the NavigationActiveTimeout each time FFG re-entered so
-                // AssistCantFollow never fired. With no stored-position fallback in the
-                // cooldown-active branch, the bot just logged "on cooldown" and sat idle
-                // for the full 35s until it could send another position request.
-                // Evidence: assist_cant_follow_doesnt_ask_leader_to_return.txt —
-                // _navLeaderTargetMapPos was set at 19:33:14 when dist=0.18 was received,
-                // but from 19:33:33 to 19:33:45 the bot did nothing while the cooldown
-                // ticked down, cycling Idle → Party Member1 → Idle every ~1s.
-                logger.LogInformation(
-                    $"[FFG] Leader out of range — cooldown active ({secSinceLastRequest:0.0}s / {RequestPositionCooldownSec}s) " +
-                    "but stored position available. Resuming navigation to last known leader position.");
-                navigation.SetSingleWaypoint(_navLeaderTargetMapPos);
-                EnterState(NavState.NavigatingToLeader);
-            }
-            else
-            {
-                logger.LogInformation(
-                    $"[FFG] Leader out of range — position request on cooldown " +
-                    $"({secSinceLastRequest:0.0}s / {RequestPositionCooldownSec}s).");
-            }
-
-            wait.Update();
+            logger.LogInformation(
+                $"[FFG] Within {dist:0.0}y of leader — posting Following.");
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            chatReader.AssistRequestReturn = false;
         }
 
         wait.Update();
     }
 
-    // -------------------------------------------------------------------------
-    // State: WaitingForPosition
-    // We sent the position request. Wait up to 5 seconds for the leader to reply.
-    // -------------------------------------------------------------------------
-    private void UpdateWaitingForPosition()
-    {
-        if (chatReader.LeaderPositionReceived)
-        {
-            float lx = chatReader.LeaderXPos;
-            float ly = chatReader.LeaderYPos;
-            chatReader.LeaderPositionReceived = false;
-
-            Vector3 leaderMapPos = new Vector3(lx, ly, playerReader.MapPos.Z);
-            float dx = lx - playerReader.MapPos.X;
-            float dy = ly - playerReader.MapPos.Y;
-            float dist = (float)Math.Sqrt(dx * dx + dy * dy);
-
-            logger.LogInformation($"[FFG] Leader position received: X={lx} Y={ly} dist={dist:0.00} map units. Starting navigation.");
-
-            // Store target for rewind retry, reset retry state and active-time timer.
-            _navLeaderTargetMapPos = leaderMapPos;
-            _navAttempt = 0;
-            _navRewindActive = false;
-            _navRewindAnchorW = default;
-            _navTimerInit = false;
-            _navActiveElapsed = TimeSpan.Zero;
-
-            // If the leader is essentially co-located (dist < 1 map unit), skip
-            // navigation entirely and attempt follow directly. At this distance
-            // SetSingleWaypoint fires OnDestinationReached almost immediately on the
-            // first tick before Focus_Inspect or TargetGuid have settled after a plan
-            // transition, causing a spurious AssistCantFollow escalation even when
-            // the two are standing on top of each other.
-            if (dist < 1.0f)
-            {
-                logger.LogInformation("[FFG] Leader is co-located — skipping navigation, attempting follow directly.");
-                EnterState(NavState.NavigatingToLeader);
-                if (TryFollowIfInRange())
-                    return;
-                // If follow didn't establish immediately, stay in NavigatingToLeader
-                // so the next Update tick continues trying via TryFollowIfInRange.
-                return;
-            }
-
-            // Pass only the destination and let the pather plan the full route.
-            navigation.SetSingleWaypoint(leaderMapPos);
-
-            EnterState(NavState.NavigatingToLeader);
-            return;
-        }
-
-        double elapsed = (DateTime.UtcNow - _navStateEnteredUtc).TotalSeconds;
-        if (elapsed >= WaitForPositionTimeoutSec)
-        {
-            logger.LogWarning(
-                $"[FFG] No position reply after {elapsed:0.0}s — " +
-                "escalating to AssistCantFollow.");
-            SendAssistCantFollow();
-            EnterState(NavState.Idle);
-        }
-
-        wait.Update();
-    }
-
-    // -------------------------------------------------------------------------
-    // State: NavigatingToLeader
-    // Drive navigation each tick. Try to re-establish follow whenever we can.
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // State: NavigatingToLeader — pather routing to leader's live position
+    // -----------------------------------------------------------------------
     private void UpdateNavigatingToLeader()
     {
-        // Active-time timeout — only counts time when not in combat / evade recovery.
+        // ── Active-time timeout ─────────────────────────────────────────────
         TickNavActiveTimeout();
         if (_navState != NavState.NavigatingToLeader)
             return;
 
-        // Record position for approach vector so TryUnstuck has a direction
-        // to project from if the assist gets stuck during navigation.
-        navigation.RecordApproachPosition(playerReader.WorldPos);
+        LeaderState? leader = leaderConnection.LastLeaderState;
 
-        // Drive navigation this tick.
-        navigation.Update(CancellationToken.None);
-
-        // If an escape is active (launched by a prior TryUnstuck call from TickIdleStuckDetection
-        // or this block), drive it with TryUnstuck so the escape-stuck and physStuck checks fire.
-        // Without this, a bot physically trapped while navigating to the leader would only be
-        // rescued by the 30s active-time timeout — TryUnstuck provides a much faster escape.
-        if (navigation.IsApproachEscapeActive)
+        if (leader == null || leader.AgeMs > leaderConnection.StaleThresholdMs)
         {
-            if (!navigation.TryUnstuck())
-                InjectPhysStuckEscape();
-            return; // don't try follow while escape is navigating
-        }
-
-        // Position-based stuck detection for NavigatingToLeader: reuse TickIdleStuckDetection
-        // (already handles combat/evade guards, 3s interval, 10s cooldown). If the bot is
-        // physically stuck on terrain mid-navigation and there's no active escape yet,
-        // this will fire TryUnstuck to start one.
-        //
-        // GUARD: only fire when navigation actually has work to do (a waypoint or route exists).
-        // Evidence: leader_stuck_in_terrain.txt — when the leader was co-located (dist=0.48 map
-        // units), the co-located path skipped SetSingleWaypoint and entered NavigatingToLeader
-        // directly. Navigation had no waypoints so Update() returned immediately (EXIT noWork).
-        // TickIdleStuckDetection saw 0.52y movement over 3s, called TryUnstuck, and launched
-        // a 10y escape AWAY from the leader — then OnDestinationReached fired and the bot sent
-        // AssistCantFollow. The bot was NOT stuck: it was stationary waiting for AutoFollow to
-        // establish. Stuck detection must not run when there is no active navigation to be stuck on.
-        if (navigation.HasWaypoint() || navigation.HasNext())
-            TickIdleStuckDetection();
-
-        // Opportunistically try to follow if we are now in range.
-        if (TryFollowIfInRange())
-        {
+            logger.LogWarning(
+                $"[FFG] NavigatingToLeader: leader state stale/missing " +
+                $"(age={leader?.AgeMs:0}ms) — holding current waypoint.");
+            assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
+            navigation.Update(CancellationToken.None);
+            wait.Update();
             return;
         }
 
-        // Co-located pather fallback: when no waypoints exist (co-located path skipped
-        // SetSingleWaypoint) and SpellInRange.Focus_Inspect is false, terrain is blocking
-        // LOS between the assist and the leader despite their close map distance. The co-located
-        // assumption ("just press FollowTarget") is wrong — the pather needs to route around it.
-        //
-        // Switch immediately (no grace period) — if TryFollowIfInRange just returned false and
-        // Focus_Inspect is already false, we have nothing to gain by waiting. The only worry
-        // was game-frame latency on Focus_Inspect, but TryFollowIfInRange already guards on
-        // TargetGuid so a stale inspect value would simply cause the pather to start and then
-        // TryFollowIfInRange to succeed once inspect settles (harmless).
-        //
-        // Evidence: assist_3_side_stuck_2.txt — co-located path, Focus_Inspect=false from
-        // the first tick due to terrain. TryUnstuck fired toward old stuck rects instead
-        // of toward the leader. Switching to pather here gives the correct route immediately.
-        if (!navigation.HasWaypoint() && !navigation.HasNext() && !navigation.IsApproachEscapeActive)
+        float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+
+        if (logger.IsEnabled(LogLevel.Debug))
         {
-            if (!playerReader.SpellInRange.Focus_Inspect && _navLeaderTargetMapPos != default)
+            logger.LogDebug(
+                $"[FFG] NavigatingToLeader: dist={dist:0.0}y " +
+                $"leaderStatus={leader.Status} age={leader.AgeMs:0}ms");
+        }
+
+        // Within FollowingMaxYards → transition to Idle.
+        if (dist < FollowingMaxYards && !navigation.IsApproachEscapeActive)
+        {
+            logger.LogInformation(
+                $"[FFG] Reached leader (dist={dist:0.0}y < {FollowingMaxYards}y) — entering Idle.");
+            navigation.Stop();
+            ResetNavState();
+            EnterState(NavState.Idle);
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            chatReader.AssistRequestReturn = false;
+            return;
+        }
+
+        // Update waypoint if leader has moved significantly from the last target.
+        float waypointDrift = leader.WorldPos.WorldDistanceXYTo(_lastNavigatedToLeaderWorldPos);
+        if (waypointDrift > WaypointUpdateThresholdYards)
+        {
+            logger.LogDebug(
+                $"[FFG] Leader moved {waypointDrift:0.0}y — refreshing waypoint " +
+                $"to ({leader.MapX:0.00},{leader.MapY:0.00}).");
+            _lastNavigatedToLeaderWorldPos = leader.WorldPos;
+            navigation.SetSingleWaypoint(leader.MapPosNoZ);
+        }
+
+        // Record position for TryUnstuck direction.
+        navigation.RecordApproachPosition(playerReader.WorldPos);
+        navigation.Update(CancellationToken.None);
+
+        // ── Escape handling ─────────────────────────────────────────────────
+        if (navigation.IsApproachEscapeActive)
+        {
+            assistStatusProvider.CurrentStatus = BotStatus.Stuck;
+            if (!navigation.TryUnstuck())
+                InjectPhysStuckEscape();
+            return;
+        }
+
+        // ── Idle stuck detection ────────────────────────────────────────────
+        if (navigation.HasWaypoint() || navigation.HasNext())
+            TickIdleStuckDetection();
+
+        // ── Co-located terrain fallback ─────────────────────────────────────
+        if (!navigation.HasWaypoint() && !navigation.HasNext() && !navigation.IsApproachEscapeActive
+            && dist > NavigatingMinYards)
+        {
+            logger.LogWarning(
+                "[FFG] No active waypoint but still far from leader — refreshing waypoint.");
+            _lastNavigatedToLeaderWorldPos = leader.WorldPos;
+            navigation.SetSingleWaypoint(leader.MapPosNoZ);
+        }
+
+        assistStatusProvider.CurrentStatus = navigation.IsApproachEscapeActive
+            ? BotStatus.Stuck
+            : BotStatus.NavigatingToLeader;
+
+        wait.Update();
+    }
+
+    // -----------------------------------------------------------------------
+    // State: CantFollow — hold position, wait for leader to arrive
+    // -----------------------------------------------------------------------
+    private void UpdateCantFollow()
+    {
+        assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
+        navigation.Stop();
+
+        LeaderState? leader = leaderConnection.LastLeaderState;
+
+        double cantFollowSec = (DateTime.UtcNow - _cantFollowEnteredUtc).TotalSeconds;
+
+        if (leader != null && leader.AgeMs <= leaderConnection.StaleThresholdMs)
+        {
+            float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+
+            if (logger.IsEnabled(LogLevel.Debug))
             {
-                logger.LogWarning(
-                    "[FFG] Co-located follow: Focus_Inspect=false on first tick — " +
-                    "terrain likely blocking LOS. Switching immediately to pather navigation.");
-                navigation.SetSingleWaypoint(_navLeaderTargetMapPos);
-                // HasWaypoint() is now true; subsequent ticks drive navigation toward the leader.
-                // TickIdleStuckDetection will fire if the bot gets stuck en-route.
+                logger.LogDebug(
+                    $"[FFG] CantFollow: leader dist={dist:0.0}y " +
+                    $"(threshold={LeaderArrivedYards}y) waited={cantFollowSec:0.0}s");
             }
+
+            if (dist <= LeaderArrivedYards)
+            {
+                logger.LogInformation(
+                    $"[FFG] CantFollow: leader arrived ({dist:0.0}y) — resuming navigation.");
+                chatReader.AssistRequestReturn = false;
+                ResetNavState();
+                StartNavigatingToLeader(leader);
+                return;
+            }
+        }
+
+        if (cantFollowSec >= CantFollowTimeoutSec)
+        {
+            logger.LogWarning(
+                $"[FFG] CantFollow timed out after {cantFollowSec:0.0}s — " +
+                "retrying navigation in case leader moved.");
+            if (leader != null)
+                StartNavigatingToLeader(leader);
+            else
+                EnterState(NavState.Idle);
+            return;
         }
 
         wait.Update();
     }
 
-    // Active-time navigation timeout.
-    // Only accumulates elapsed time when the assist is actively moving toward the leader
-    // (not in combat, not in evade recovery) so a stuck or paused assist doesn't burn
-    // through its budget while standing still.
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    private void StartNavigatingToLeader(LeaderState leader)
+    {
+        _lastNavigatedToLeaderWorldPos = leader.WorldPos;
+        _navAttempt = 0;
+        _navRewindActive = false;
+        _navRewindAnchorW = default;
+        _navTimerInit = false;
+        _navActiveElapsed = TimeSpan.Zero;
+
+        navigation.SetSingleWaypoint(leader.MapPosNoZ);
+        EnterState(NavState.NavigatingToLeader);
+        assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
+    }
+
+    private void EnterCantFollow()
+    {
+        logger.LogWarning(
+            $"[FFG] Navigation exhausted — entering CantFollow. " +
+            "Assist will hold position until leader arrives within " +
+            $"{LeaderArrivedYards}y.");
+        navigation.Stop();
+        chatReader.AssistRequestReturn = true;
+        _cantFollowEnteredUtc = DateTime.UtcNow;
+        assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
+        EnterState(NavState.CantFollow);
+    }
+
+    private void EnterState(NavState newState)
+    {
+        logger.LogInformation($"[FFG] NavState: {_navState} → {newState}");
+        _navState = newState;
+        _navStateEnteredUtc = DateTime.UtcNow;
+
+        if (newState == NavState.NavigatingToLeader)
+            _stuckCheckLastUtc = DateTime.MinValue;
+    }
+
+    private void ResetNavState()
+    {
+        _navAttempt = 0;
+        _navRewindActive = false;
+        _navRewindAnchorW = default;
+        _navTimerInit = false;
+        _navActiveElapsed = TimeSpan.Zero;
+        _lastNavigatedToLeaderWorldPos = default;
+    }
+
+    // -----------------------------------------------------------------------
+    // Active-time navigation timeout
+    // -----------------------------------------------------------------------
     private void TickNavActiveTimeout()
     {
         var now = DateTime.UtcNow;
@@ -748,70 +544,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         bool countActive = !bits.Combat() && !_evadeRecoveryActive;
         if (countActive)
-            _navActiveElapsed += (now - _navLastTickUtc);
+            _navActiveElapsed += now - _navLastTickUtc;
 
         _navLastTickUtc = now;
 
         if (_navActiveElapsed.TotalSeconds >= NavigationActiveTimeoutSec)
         {
             logger.LogWarning(
-                $"[FFG] Navigation active timeout after {_navActiveElapsed.TotalSeconds:0.0}s — " +
-                "escalating to AssistCantFollow.");
-            navigation.Stop();
-            ResetNavRetryState();
-            SendAssistCantFollow();
-            EnterState(NavState.Idle);
+                $"[FFG] Navigation active timeout ({_navActiveElapsed.TotalSeconds:0.0}s) — escalating to CantFollow.");
+            EnterCantFollow();
         }
     }
 
-    private void ResetNavRetryState()
-    {
-        _navLeaderTargetMapPos = default;
-        _navRewindActive = false;
-        _navRewindAnchorW = default;
-        _navAttempt = 0;
-        _navTimerInit = false;
-        _navActiveElapsed = TimeSpan.Zero;
-    }
-
-    // -------------------------------------------------------------------------
-    // PhysStuck injection helper — shared by Idle and NavigatingToLeader escape paths.
-    // Injects the same jump+reverse sequence as ATG when TryUnstuck returns false
-    // with IsApproachEscapePhysicallyStuck=true (zero displacement detected).
-    // Thread.Sleep gives true wall-clock delays — confirmed necessary after ATG Run 21
-    // showed wait.Update(N) returning in <30ms regardless of N.
-    // -------------------------------------------------------------------------
-    private void InjectPhysStuckEscape()
-    {
-        if (!navigation.IsApproachEscapePhysicallyStuck)
-            return;
-
-        navigation.IsApproachEscapePhysicallyStuck = false;
-        logger.LogWarning("[FFG] Physically trapped in terrain — injecting jump + reverse to escape.");
-        input.StopForward(false);
-        input.PressJump();
-        Thread.Sleep(400);
-        input.StartBackward(false);
-        input.PressJump();
-        Thread.Sleep(600);
-        input.PressJump();
-        Thread.Sleep(400);
-        input.StopBackward(false);
-    }
-
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
     // Idle stuck detection
-    // Fires when the assist hasn't moved while out of follow range and not in
-    // combat. This catches the case where the assist is physically trapped on
-    // terrain — the leader keeps navigating to it and waiting for "i'm following"
-    // but the assist can never establish AutoFollow because it can't move.
-    // On detection: turn random direction, step back, jump, reset wantsLeaderToReturn,
-    // and force a fresh N8 position request so the leader gets updated coordinates
-    // after the escape attempt.
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
     private void TickIdleStuckDetection()
     {
-        // Don't run during combat or evade recovery.
         if (bits.Combat() || _evadeRecoveryActive)
         {
             _stuckCheckLastUtc = DateTime.MinValue;
@@ -821,7 +570,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         var now = DateTime.UtcNow;
         Vector3 currentW = playerReader.WorldPos;
 
-        // Initialise snapshot on first call or after a reset.
         if (_stuckCheckLastUtc == DateTime.MinValue)
         {
             _stuckCheckPosW = currentW;
@@ -834,47 +582,51 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
 
         float moved = currentW.WorldDistanceXYTo(_stuckCheckPosW);
-
-        // Reset snapshot regardless — if we moved enough we just take a new baseline.
         _stuckCheckPosW = currentW;
         _stuckCheckLastUtc = now;
 
         if (moved >= StuckMinMovementWorld)
             return;
 
-        // Haven't moved enough — check escape cooldown.
         if ((now - _stuckEscapeLastUtc).TotalSeconds < StuckEscapeCooldownSec)
             return;
 
         _stuckEscapeLastUtc = now;
         logger.LogWarning(
-            $"[FFG] Idle stuck detected — moved only {moved:0.00} world units in {elapsed:0.0}s. " +
+            $"[FFG] Stuck detected — moved only {moved:0.00}y in {elapsed:0.0}s. " +
             "Attempting pather-based escape.");
 
-        // Use pather-based escape: project a waypoint along the approach vector
-        // (10-30 yards) to route around the terrain obstacle, falling back to
-        // physStuck injection (jump+reverse) if the pather reports zero displacement.
-        bool escapeStillActive = navigation.TryUnstuck();
-        if (!escapeStillActive)
-        {
-            // TryUnstuck returned false: escape-stuck or exhausted.
-            // If the character made zero movement, inject jump+reverse to break free.
-            InjectPhysStuckEscape();
-        }
+        assistStatusProvider.CurrentStatus = BotStatus.Stuck;
 
-        // Reset wantsLeaderToReturn so a fresh N8 fires immediately,
-        // giving the leader the assist's new position after the escape attempt
-        // rather than waiting up to 60s for the leader to walk to the old stuck spot.
-        _wantsLeaderToReturn = false;
-        _lastPositionRequestUtc = DateTime.MinValue;
-        logger.LogInformation("[FFG] Idle stuck escape: reset wantsLeaderToReturn and position cooldown — will request fresh position.");
+        if (!navigation.TryUnstuck())
+            InjectPhysStuckEscape();
     }
 
-    // -------------------------------------------------------------------------
-    // Navigation event: fires when we reach the current navigation destination.
-    // If rewinding, retry the leader target. Otherwise make one final follow
-    // attempt; if still out of range, escalate to AssistCantFollow.
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // PhysStuck injection
+    // -----------------------------------------------------------------------
+    private void InjectPhysStuckEscape()
+    {
+        if (!navigation.IsApproachEscapePhysicallyStuck)
+            return;
+
+        navigation.IsApproachEscapePhysicallyStuck = false;
+        logger.LogWarning("[FFG] Physically trapped — injecting jump + reverse.");
+        input.StopForward(false);
+        input.PressJump();
+        Thread.Sleep(400);
+        input.StartBackward(false);
+        input.PressJump();
+        Thread.Sleep(600);
+        input.PressJump();
+        Thread.Sleep(400);
+        input.StopBackward(false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Navigation events
+    // -----------------------------------------------------------------------
+
     private void Navigation_OnDestinationReached()
     {
         if (_navState != NavState.NavigatingToLeader)
@@ -882,86 +634,84 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         if (_navRewindActive)
         {
-            // Rewind destination reached — retry the leader target.
             _navRewindActive = false;
-            logger.LogInformation($"[FFG] Rewind destination reached. Retrying leader target {_navLeaderTargetMapPos}.");
-            navigation.SetSingleWaypoint(_navLeaderTargetMapPos);
+            LeaderState? leader = leaderConnection.LastLeaderState;
+            if (leader != null)
+            {
+                logger.LogInformation("[FFG] Rewind reached — retrying leader target.");
+                _lastNavigatedToLeaderWorldPos = leader.WorldPos;
+                navigation.SetSingleWaypoint(leader.MapPosNoZ);
+            }
             return;
         }
 
-        logger.LogInformation("[FFG] Reached leader's last known position. Attempting follow.");
+        LeaderState? currentLeader = leaderConnection.LastLeaderState;
+        if (currentLeader == null) return;
 
-        wait.Update();
+        float dist = playerReader.WorldPos.WorldDistanceXYTo(currentLeader.WorldPos);
 
-        if (TryFollowIfInRange())
+        logger.LogInformation(
+            $"[FFG] Destination reached. dist={dist:0.0}y to leader.");
+
+        if (dist < FollowingMaxYards)
+        {
+            ResetNavState();
+            EnterState(NavState.Idle);
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            chatReader.AssistRequestReturn = false;
             return;
+        }
 
-        // First failure after arriving at a navigation destination. This can happen when
-        // the bot arrived at an escape target (TryUnstuck toward stuck rects), not the
-        // leader's actual position. Try navigating directly to the leader with the pather
-        // before giving up — the pather can route around terrain that the escape couldn't.
-        //
-        // Evidence: assist_3_side_stuck_2.txt — escape toward stuck rect center completed,
-        // bot was still not in follow range, AssistCantFollow sent immediately. Direct pather
-        // navigation from the escaped position would have reached the leader without involving
-        // the leader at all.
-        if (_navAttempt == 0 && _navLeaderTargetMapPos != default)
+        // Leader moved while we were navigating — try once more.
+        if (_navAttempt == 0)
         {
             logger.LogWarning(
-                "[FFG] Reached destination but not in follow range — " +
-                "trying direct pather navigation to leader's last known position.");
+                $"[FFG] Arrived but still {dist:0.0}y from leader — refreshing waypoint.");
             _navAttempt = 1;
-            navigation.SetSingleWaypoint(_navLeaderTargetMapPos);
+            _lastNavigatedToLeaderWorldPos = currentLeader.WorldPos;
+            navigation.SetSingleWaypoint(currentLeader.MapPosNoZ);
             return;
         }
 
-        logger.LogWarning("[FFG] Reached leader position but still out of follow range. Escalating to AssistCantFollow.");
-        ResetNavRetryState();
-        SendAssistCantFollow();
-        EnterState(NavState.Idle);
+        logger.LogWarning("[FFG] Arrived at destination but still out of range after retry — escalating to CantFollow.");
+        EnterCantFollow();
     }
 
-    // -------------------------------------------------------------------------
-    // Navigation event: fires when an intermediate waypoint is reached.
-    // Try opportunistically to follow — the leader may now be in range.
-    // -------------------------------------------------------------------------
     private void Navigation_OnWayPointReached()
     {
         if (_navState != NavState.NavigatingToLeader)
             return;
 
-        TryFollowIfInRange();
+        LeaderState? leader = leaderConnection.LastLeaderState;
+        if (leader == null) return;
+
+        float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+        if (dist < FollowingMaxYards)
+        {
+            navigation.Stop();
+            ResetNavState();
+            EnterState(NavState.Idle);
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            chatReader.AssistRequestReturn = false;
+        }
     }
 
-    // -------------------------------------------------------------------------
-    // Navigation event: fires when the pather fails to find a path.
-    // On first failure, rewind to last safe anchor then retry the leader target.
-    // On second failure, escalate to AssistCantFollow.
-    // -------------------------------------------------------------------------
     private void Navigation_OnPathFailed(Vector3 startW, Vector3 endW)
     {
         if (_navState != NavState.NavigatingToLeader)
             return;
 
-        // FFG only ever has one navigation target active at a time so we don't
-        // need to verify endW against our target — any path failure while in
-        // NavigatingToLeader is for the leader destination or rewind anchor.
-
         if (_navAttempt >= 1)
         {
-            logger.LogWarning("[FFG] Path to leader failed after rewind retry — escalating to AssistCantFollow.");
-            ResetNavRetryState();
-            SendAssistCantFollow();
-            EnterState(NavState.Idle);
+            logger.LogWarning("[FFG] Path to leader failed after retry — escalating to CantFollow.");
+            EnterCantFollow();
             return;
         }
 
         if (!navigation.HasLastSafeAnchor)
         {
-            logger.LogWarning("[FFG] Path to leader failed — no safe anchor available. Escalating to AssistCantFollow.");
-            ResetNavRetryState();
-            SendAssistCantFollow();
-            EnterState(NavState.Idle);
+            logger.LogWarning("[FFG] Path failed — no safe anchor. Escalating to CantFollow.");
+            EnterCantFollow();
             return;
         }
 
@@ -970,115 +720,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navRewindAnchorW = navigation.LastSafeAnchorW;
 
         logger.LogWarning(
-            $"[FFG] Path to leader failed. Rewinding to anchor={_navRewindAnchorW} then retrying target={_navLeaderTargetMapPos}.");
-
+            $"[FFG] Path failed. Rewinding to anchor={_navRewindAnchorW}.");
         navigation.SetSingleWaypoint(_navRewindAnchorW);
-    }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
-
-    /// <summary>
-    /// Targets the leader and attempts to follow. Returns true if AutoFollow
-    /// was established (success), false otherwise.
-    /// </summary>
-    private bool TryFollowIfInRange()
-    {
-        if (playerReader.TargetGuid != focusTargetGuid)
-        {
-            FocusTargetInput(default);
-            wait.Update();
-        }
-
-        if (playerReader.TargetGuid == focusTargetGuid &&
-            playerReader.SpellInRange.Focus_Inspect &&
-            (DateTime.UtcNow - _lastFollowAttemptUtc).TotalSeconds >= FollowAttemptCooldownSec)
-        {
-            _lastFollowAttemptUtc = DateTime.UtcNow;
-
-            // Stop moving before pressing follow so the character doesn't
-            // overshoot past the leader due to momentum from navigation.
-            navigation.Stop();
-            input.StopForward(true);
-            wait.Update();
-
-            input.PressFollowTarget();
-            wait.Update();
-            wait.Update();
-            wait.Update();
-
-            if (bits.AutoFollow())
-            {
-                logger.LogInformation("[FFG] AutoFollow established while navigating to leader. Success.");
-                input.StopForward(true);
-                SendImFollowing();
-                chatReader.AssistRequestReturn = false;
-                _wantsLeaderToReturn = false;
-                wait.Update();
-
-                EnterState(NavState.Idle);
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Sends "i'm following" to party chat and records the time.
-    /// All callers must go through here to respect the send cooldown.
-    /// </summary>
-    private void SendImFollowing()
-    {
-        input.PressAssistIsFollowing();
-        lastMessageSent = followMessage.ImFollowing;
-        logger.LogInformation("[FFG] Sent AssistIsFollowing.");
-        wait.Update();
-    }
-
-    /// <summary>
-    /// Sends the "i tried following but you are too far away" message,
-    /// which triggers AssistRequestReturn on the leader side.
-    /// </summary>
-    private void SendAssistCantFollow()
-    {
-        input.StepBackwards();
-        wait.Update();
-        input.PressAssistCantFollow();
-        lastMessageSent = followMessage.ICantFollow;
-        logger.LogInformation("[FFG] Sent AssistCantFollow to leader.");
-
-        // Switch to 'wants leader to return' mode. UpdateIdle will not send further
-        // position requests (N8) while this is true — the leader should now be moving
-        // toward us and we should wait. Cleared when follow is established.
-        _wantsLeaderToReturn = true;
-        _wantsLeaderToReturnSinceUtc = DateTime.UtcNow;
-
-        // Reset the position request cooldown from NOW, not from the original request.
-        // Without this, if NavigatingToLeader took ~30s and RequestPositionCooldownSec
-        // is 35s, the assist would fire another position request only 5s after sending N5 —
-        // before the leader has even processed the N5 and started returning.
-        // That creates a crossing-paths loop: leader starts returning, assist immediately
-        // asks for position again, leader cancels return, both confused.
-        _lastPositionRequestUtc = DateTime.UtcNow;
-    }
-
-    private void EnterState(NavState newState)
-    {
-        logger.LogInformation($"[FFG] NavState: {_navState} → {newState}");
-        _navState = newState;
-        _navStateEnteredUtc = DateTime.UtcNow;
-
-        // When entering NavigatingToLeader, reset the stuck detection timer so any
-        // stale timestamp from UpdateIdle (which briefly runs before WaitingForPosition)
-        // doesn't make TickIdleStuckDetection fire immediately.
-        // Evidence: assist_3_side_stuck_2.txt — UpdateIdle set _stuckCheckLastUtc at
-        // ~13:28:27:175, then 2.8s of WaitingForPosition elapsed. When NavigatingToLeader
-        // was entered co-located (no waypoints), the timer expired within 140ms and fired
-        // TickIdleStuckDetection, which launched an escape toward old stuck rects instead
-        // of toward the leader. The timer must restart when we actually begin navigating.
-        if (newState == NavState.NavigatingToLeader)
-            _stuckCheckLastUtc = DateTime.MinValue;
     }
 }

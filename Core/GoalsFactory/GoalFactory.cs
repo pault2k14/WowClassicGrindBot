@@ -2,6 +2,7 @@ using Core.AreaBlacklist;
 using Core.Database;
 using Core.Goals;
 using Core.GOAP;
+using Core.Party;
 using Core.Session;
 
 using Microsoft.Extensions.DependencyInjection;
@@ -329,7 +330,8 @@ public static class GoalFactory
                 x.GetRequiredService<TargetFinder>(),
                 x.GetRequiredService<IBlacklist>(),
                 x.GetRequiredService<RestHandler>(),
-                x.GetRequiredService<ChatReader>()
+                x.GetRequiredService<ChatReader>(),
+                x.GetRequiredService<AssistStateStore>()  // API-based assist tracking
                 ));
         }
     }

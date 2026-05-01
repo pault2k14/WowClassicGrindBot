@@ -1,5 +1,6 @@
 using Core.Goals;
 using Core.GOAP;
+using Core.Party;
 using Core.Session;
 using Game;
 
@@ -332,6 +333,11 @@ public sealed partial class BotController : IBotController, IDisposable
 
             // Tell ChatReader which mode this bot is running so its message guards work.
             serviceProvider.GetRequiredService<ChatReader>().BotMode = ClassConfig.Mode;
+
+            // Tell PartyStatePublisher and LeaderStateService which mode this bot is running.
+            // PartyStatePublisher is a singleton IReader instantiated before any profile loads,
+            // so it cannot take ClassConfiguration directly — PartyModeProvider is the bridge.
+            serviceProvider.GetRequiredService<PartyModeProvider>().BotMode = ClassConfig.Mode;
 
             LogProfileLoaded(logger, classFile, ClassConfig.PathFilename);
 
