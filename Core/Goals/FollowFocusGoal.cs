@@ -38,8 +38,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// giving the user's preferred 5–20y comfortable follow range.</summary>
     private const float NavigatingMinYards = 20f;
 
-    /// <summary>Leader must be this close before the assist exits CantFollow.</summary>
-    public const float LeaderArrivedYards = 2f;
+    /// <summary>Leader must be this close before the assist exits CantFollow.
+    /// MUST exceed <c>Navigation.POP_DIST</c> (3.6y) — the leader's navigation considers
+    /// a waypoint reached at POP_DIST and parks there. If LeaderArrivedYards were below
+    /// that threshold the leader would stop at ~3.5y and the assist would never see
+    /// dist &lt;= LeaderArrivedYards, causing a permanent deadlock where neither bot moves.
+    /// 6y gives comfortable clearance above POP_DIST while still being well inside the
+    /// dead-band zone (FollowingMaxYards = 10y).</summary>
+    public const float LeaderArrivedYards = 6f;
 
     /// <summary>Minimum leader movement before the navigation waypoint is refreshed.</summary>
     private const float WaypointUpdateThresholdYards = 3f;
@@ -55,6 +61,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     private const double NavigationActiveTimeoutSec = 30.0;
     private const double CantFollowTimeoutSec = 120.0;
+
+    /// <summary>Minimum position change that resets the navigation active timer.
+    /// While the assist moves at least this far the timer does not accumulate —
+    /// it only counts time spent genuinely stuck with no forward progress.
+    /// Prevents the 30s wall from firing while the assist is actively covering
+    /// ground but the pather is slow (e.g. elevated terrain, long path).</summary>
+    private const float NavigationProgressResetYards = 3f;
 
     // -----------------------------------------------------------------------
     // Stuck detection
@@ -105,6 +118,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private int _navAttempt;
     private bool _navRewindActive;
     private Vector3 _navRewindAnchorW;
+    /// <summary>Last recorded position used to detect forward progress during navigation.
+    /// Reset each time the assist moves <see cref="NavigationProgressResetYards"/>, which
+    /// resets <see cref="_navActiveElapsed"/> so the timeout only accumulates when truly stuck.</summary>
+    private Vector3 _navProgressCheckPosW;
 
     // -----------------------------------------------------------------------
     // Stuck detection fields
@@ -525,6 +542,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navRewindAnchorW = default;
         _navTimerInit = false;
         _navActiveElapsed = TimeSpan.Zero;
+        _navProgressCheckPosW = playerReader.WorldPos;
 
         navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(leader));
         EnterState(NavState.NavigatingToLeader);
@@ -596,6 +614,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navRewindAnchorW = default;
         _navTimerInit = false;
         _navActiveElapsed = TimeSpan.Zero;
+        _navProgressCheckPosW = default;
         _lastNavigatedToLeaderWorldPos = default;
     }
 
@@ -611,6 +630,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             _navTimerInit = true;
             _navLastTickUtc = now;
             _navActiveElapsed = TimeSpan.Zero;
+            _navProgressCheckPosW = playerReader.WorldPos;
             return;
         }
 
@@ -620,10 +640,29 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         _navLastTickUtc = now;
 
+        // Reset the timeout whenever the assist makes meaningful forward progress.
+        // Without this, the 30s wall fires even when the assist is actively navigating —
+        // e.g. the pather gets slow on elevated terrain near the final waypoint and the
+        // character stops briefly while waiting for the route result, burning the remaining
+        // timer budget even though 170 yards of progress was made in the preceding 28 seconds.
+        // By resetting on NavigationProgressResetYards of movement, the timer only accumulates
+        // during genuine stalls with zero position change.
+        Vector3 currentPos = playerReader.WorldPos;
+        float moved = currentPos.WorldDistanceXYTo(_navProgressCheckPosW);
+        if (moved >= NavigationProgressResetYards)
+        {
+            _navProgressCheckPosW = currentPos;
+            _navActiveElapsed = TimeSpan.Zero;
+
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(
+                    $"[FFG] Nav progress {moved:0.0}y — resetting stuck timer.");
+        }
+
         if (_navActiveElapsed.TotalSeconds >= NavigationActiveTimeoutSec)
         {
             logger.LogWarning(
-                $"[FFG] Navigation active timeout ({_navActiveElapsed.TotalSeconds:0.0}s) — escalating to CantFollow.");
+                $"[FFG] Navigation stuck timeout ({_navActiveElapsed.TotalSeconds:0.0}s without progress) — escalating to CantFollow.");
             EnterCantFollow();
         }
     }
