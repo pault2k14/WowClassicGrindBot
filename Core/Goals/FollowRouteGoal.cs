@@ -364,28 +364,40 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     if (!assistStateStore.AnyAssistIsFollowing() && !assistStateStore.AnyAssistNavigating())
                     {
                         // Assist is genuinely unavailable — not following and not navigating toward us.
-                        // This fires only when the assist goes stale or enters CantFollow with no
-                        // navigation activity. It does NOT fire during normal Following→NavigatingToLeader
-                        // transitions (those are suppressed in GoapAgent.GoapThread by Fix A).
                         logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist truly unavailable (not following, not navigating) — aborting.");
                         Abort();
                     }
                     else
                     {
-                        // Assist is following or actively catching up — resume patrol.
-                        logger.LogInformation(
-                            $"FollowRouteGoal: OnGoapEvent - assist available " +
-                            $"(following={assistStateStore.AnyAssistIsFollowing()} " +
-                            $"navigating={assistStateStore.AnyAssistNavigating()}) — resuming.");
-
                         bool wasWaiting = _assistWaitingForFollowing;
                         ClearAssistReturnState();
 
                         if (wasWaiting)
-                            logger.LogInformation("[FRG] Assist confirmed following - resuming patrol.");
-
-                        navigation.ClearAllRoutes();
-                        Resume();
+                        {
+                            // Leader navigated to the assist's position and was paused
+                            // waiting for "i'm following" confirmation. Now the assist has
+                            // confirmed — clear the old return route and refill from here.
+                            logger.LogInformation("[FRG] Assist confirmed following after leader navigated to them — resuming patrol.");
+                            navigation.ClearAllRoutes();
+                            Resume();
+                        }
+                        else
+                        {
+                            // Assist became available (initial connection or stale recovery).
+                            // Do NOT call ClearAllRoutes() here — if the leader already has
+                            // active waypoints from a normal patrol, wiping them causes a stall:
+                            // Resume() would then call RefillWaypoints(true) (single closest
+                            // waypoint), the leader walks to it, OnDestinationReached fires, and
+                            // RefillWaypoints starts over — freezing the leader for several seconds
+                            // whenever the assist's POST delivery briefly goes stale and recovers.
+                            // Resume() already handles "HasWaypoint → preserve, no waypoints →
+                            // refill" correctly without any pre-clearing.
+                            logger.LogInformation(
+                                $"[FRG] Assist available (following={assistStateStore.AnyAssistIsFollowing()} " +
+                                $"navigating={assistStateStore.AnyAssistNavigating()}) — resuming. " +
+                                $"navActive={navigation.Active} wp={navigation.WaypointCount}");
+                            Resume();
+                        }
                     }
                     break;
 
