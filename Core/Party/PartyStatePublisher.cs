@@ -96,6 +96,7 @@ public sealed class PartyStatePublisher : IReader
             MapX = map.X,
             MapY = map.Y,
             Status = status,
+            CantFollow = assistStatusProvider.CantFollow,
             HealthPercent = playerReader.HealthPercent(),
             InCombat = bits.Combat(),
             Timestamp = DateTime.UtcNow

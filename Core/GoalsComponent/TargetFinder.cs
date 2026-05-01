@@ -1,4 +1,7 @@
-﻿using Microsoft.Extensions.Logging;
+using Core.Party;
+
+using Microsoft.Extensions.Logging;
+
 using SharedLib.NpcFinder;
 
 using System;
@@ -18,6 +21,10 @@ public sealed class TargetFinder : IDisposable
     private readonly ChatReader chatReader;
     private readonly Navigation navigation;
     private readonly IBlacklist targetBlacklist;
+    private readonly AssistStateStore assistStateStore;
+    private readonly ClassConfiguration classConfig;
+    private readonly AssistStatusProvider assistStatusProvider;
+
     private DateTime targetFinderDisabledUntilUtc;
 
     private DateTime lastActive;
@@ -37,7 +44,10 @@ public sealed class TargetFinder : IDisposable
     public TargetFinder(ConfigurableInput input,
         AddonBits bits, NpcNameTargeting npcNameTargeting, 
         Wait wait, ChatReader chatReader, Navigation navigation,
-        IBlacklist targetBlacklist)
+        IBlacklist targetBlacklist,
+        AssistStateStore assistStateStore,
+        ClassConfiguration classConfig,
+        AssistStatusProvider assistStatusProvider)
     {
         this.input = input;
         this.bits = bits;
@@ -46,9 +56,11 @@ public sealed class TargetFinder : IDisposable
         this.chatReader = chatReader;
         this.navigation = navigation;
         this.targetBlacklist = targetBlacklist;
+        this.assistStateStore = assistStateStore;
+        this.classConfig = classConfig;
+        this.assistStatusProvider = assistStatusProvider;
 
         lastActive = DateTime.UtcNow;
-        this.chatReader = chatReader;
     }
 
     private bool IsTargetFinderDisabled()
@@ -59,7 +71,7 @@ public sealed class TargetFinder : IDisposable
         Console.WriteLine("DisablingTargetFinderForBlacklist: Disabling for " + DISABLE_DUE_TO_BLACKLIST_SECONDS + " seconds!");
         var until = DateTime.UtcNow.Add(DisableDueToBlacklistTimeSpan);
         if (until > targetFinderDisabledUntilUtc)
-            targetFinderDisabledUntilUtc = until; // extend, don’t shorten
+            targetFinderDisabledUntilUtc = until; // extend, don't shorten
     }
 
     public void Reset()
@@ -71,10 +83,15 @@ public sealed class TargetFinder : IDisposable
     public bool Search(
         NpcNames target, Func<bool> validTarget, CancellationToken token)
     {
-        // If Assist has requested return we shouldn't be actively looking for
-        // a target, but rather than kill the looking for target thread, we
-        // simply return false.
-        if(chatReader.AssistRequestReturn || navigation.IsInBlacklistArea() || IsTargetFinderDisabled())
+        // PartyLeader: stop searching while assist is stuck (leader needs to navigate back).
+        // AssistFocus: assistStatusProvider.CantFollow is the assist's own self-reported flag
+        // (set on evade/CantFollow, cleared when back in Following range) — replaces
+        // chatReader.AssistRequestReturn which was never designed as a state container.
+        bool cantReturn = classConfig.Mode == Mode.PartyLeader
+            ? assistStateStore.AnyAssistCantFollow()
+            : assistStatusProvider.CantFollow;
+
+        if (cantReturn || navigation.IsInBlacklistArea() || IsTargetFinderDisabled())
         {
             return false;
         }
@@ -134,5 +151,4 @@ public sealed class TargetFinder : IDisposable
 
         return bits.Target();
     }
-
 }

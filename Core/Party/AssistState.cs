@@ -30,6 +30,15 @@ public sealed class AssistState
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public BotStatus Status { get; set; }
 
+    /// <summary>
+    /// True when the assist cannot navigate to the leader and needs the leader
+    /// to return. Distinct from <see cref="Status"/> == CantFollow because this
+    /// flag is also set during evade recovery (when the status may still be
+    /// NavigatingToLeader or Waiting). The leader checks either condition via
+    /// <see cref="AssistStateStore.AnyAssistCantFollow"/>.
+    /// </summary>
+    public bool CantFollow { get; set; }
+
     public int HealthPercent { get; set; }
     public bool InCombat { get; set; }
 

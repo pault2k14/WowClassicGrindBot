@@ -18,4 +18,16 @@ public sealed class AssistStatusProvider
     /// <see cref="BotStatus.Patrolling"/> until FFG first runs.
     /// </summary>
     public BotStatus CurrentStatus { get; set; } = BotStatus.Patrolling;
+
+    /// <summary>
+    /// True when the assist cannot follow the leader and needs the leader to
+    /// come back — set by FollowFocusGoal (navigation exhausted, path failed)
+    /// and by combat goals on evade (ATG, CombatGoal, PullTargetGoal) to keep
+    /// FollowFocusGoal selectable via the <c>assistshouldfollow</c> world-state
+    /// override even when combat conditions would normally block it.
+    /// Cleared by FollowFocusGoal when the assist re-enters Following range.
+    /// Replaces <c>chatReader.AssistRequestReturn</c> which was never designed
+    /// to hold mutable coordination state.
+    /// </summary>
+    public bool CantFollow { get; set; }
 }

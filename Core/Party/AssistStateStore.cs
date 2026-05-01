@@ -99,7 +99,7 @@ public sealed class AssistStateStore
     public bool AnyAssistCantFollow()
     {
         foreach (AssistState s in _states.Values)
-            if (!IsStale(s) && s.Status == BotStatus.CantFollow)
+            if (!IsStale(s) && (s.Status == BotStatus.CantFollow || s.CantFollow))
                 return true;
         return false;
     }

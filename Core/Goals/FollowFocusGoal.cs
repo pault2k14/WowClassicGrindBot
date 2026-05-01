@@ -256,15 +256,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 wait.Update();
 
                 SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
-                // Keep chatReader.AssistRequestReturn as local override so
-                // assistshouldfollow stays true during evade recovery.
-                chatReader.AssistRequestReturn = true;
+                // assistStatusProvider.CantFollow keeps assistshouldfollow=true so FFG
+                // remains selectable throughout evade recovery, even when dmgTaken/dmgDone
+                // would otherwise block it. Cleared when the assist re-enters Following range.
+                assistStatusProvider.CantFollow = true;
             }
             else
             {
                 logger.LogInformation("[FFG] Ghost combat escape (guid=0) — starting evade recovery.");
                 SendGoapEvent(new EvadeBlacklistEvent(0));
-                chatReader.AssistRequestReturn = true;
+                assistStatusProvider.CantFollow = true;
             }
         }
 
@@ -342,7 +343,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation(
                     $"[FFG] Within {dist:0.0}y of leader (threshold={FollowingMaxYards}y) — posting Following.");
                 assistStatusProvider.CurrentStatus = BotStatus.Following;
-                chatReader.AssistRequestReturn = false;
+                assistStatusProvider.CantFollow = false;
             }
         }
         else
@@ -415,7 +416,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
-            chatReader.AssistRequestReturn = false;
+            assistStatusProvider.CantFollow = false;
             return;
         }
 
@@ -490,7 +491,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             {
                 logger.LogInformation(
                     $"[FFG] CantFollow: leader arrived ({dist:0.0}y) — resuming navigation.");
-                chatReader.AssistRequestReturn = false;
+                assistStatusProvider.CantFollow = false;
                 ResetNavState();
                 StartNavigatingToLeader(leader);
                 return;
@@ -572,7 +573,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             "Assist will hold position until leader arrives within " +
             $"{LeaderArrivedYards}y.");
         navigation.Stop();
-        chatReader.AssistRequestReturn = true;
+        assistStatusProvider.CantFollow = true;
         _cantFollowEnteredUtc = DateTime.UtcNow;
         assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
         EnterState(NavState.CantFollow);
@@ -731,7 +732,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
-            chatReader.AssistRequestReturn = false;
+            assistStatusProvider.CantFollow = false;
             return;
         }
 
@@ -765,7 +766,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
-            chatReader.AssistRequestReturn = false;
+            assistStatusProvider.CantFollow = false;
         }
     }
 

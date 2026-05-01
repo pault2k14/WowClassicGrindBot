@@ -52,6 +52,7 @@ public sealed partial class GoapAgent : IDisposable
     // Party API services
     private readonly AssistStateStore assistStateStore;
     private readonly LeaderConnectionStatus leaderConnection;
+    private readonly AssistStatusProvider assistStatusProvider;
 
     private DateTime _evadeRecoveryUntilUtc = DateTime.MinValue;
     private const double EvadeRecoveryDurationSec = 25.0;
@@ -137,7 +138,8 @@ public sealed partial class GoapAgent : IDisposable
         RestHandler restHandler,
         Navigation navigation,
         AssistStateStore assistStateStore,
-        LeaderConnectionStatus leaderConnection)
+        LeaderConnectionStatus leaderConnection,
+        AssistStatusProvider assistStatusProvider)
     {
         this.routeInfo = routeInfo;
         this.cts = cts;
@@ -163,6 +165,7 @@ public sealed partial class GoapAgent : IDisposable
         this.navigation = navigation;
         this.assistStateStore = assistStateStore;
         this.leaderConnection = leaderConnection;
+        this.assistStatusProvider = assistStatusProvider;
 
         combatLog.KillCredit += OnKillCredit;
         combatLog.PlayerDeath += PlayerDied;
@@ -403,12 +406,10 @@ public sealed partial class GoapAgent : IDisposable
         bool hasTarget = b.Target();
         bool playerCombat = b.Combat();
 
-        bool assistIsFollowing = classConfig.Mode == Mode.PartyLeader
-            ? assistStateStore.AnyAssistIsFollowing()
-            : chatReader.AssistIsFollowing;
+        bool assistIsFollowing = assistStateStore.AnyAssistIsFollowing();
         bool assistCantFollow = classConfig.Mode == Mode.PartyLeader
             ? assistStateStore.AnyAssistCantFollow()
-            : chatReader.AssistRequestReturn;
+            : assistStatusProvider.CantFollow;
 
         logger.LogInformation("---- Complate GoapKey State ----");
         logger.LogInformation("GoapKey.hastarget: " + hasTarget);
@@ -448,7 +449,7 @@ public sealed partial class GoapAgent : IDisposable
             (assistIsFollowing || assistCantFollow || assistNavigatingLog || _evadeLeaderWaiting));
         logger.LogInformation("GoapKey.assistshouldfollow: " + (
             leaderConnection.HasValidLeaderState &&
-            (chatReader.AssistRequestReturn ||
+            (assistStatusProvider.CantFollow ||
              (!chatReader.ForcedFollow && !(playerCombat && dmgTaken) && !dmgDone && !dmgTaken))));
         logger.LogInformation("GoapKey.drinking: " + restHandler.IsDrinking());
         logger.LogInformation("GoapKey.eating: " + restHandler.IsEating());
@@ -534,13 +535,15 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.forcedfollow]           = chatReader.ForcedFollow;
 
         // ── Leader side: read from API store ──────────────────────────────
-        bool assistIsFollowing = classConfig.Mode == Mode.PartyLeader
-            ? assistStateStore.AnyAssistIsFollowing()
-            : chatReader.AssistIsFollowing;
+        // AssistFocus / Grind modes don't post to the store; AnyAssistIsFollowing() returns
+        // false for them, which is correct — those modes have no "assist is following" concept.
+        bool assistIsFollowing = assistStateStore.AnyAssistIsFollowing();
 
+        // PartyLeader reads from the API store. AssistFocus reads from AssistStatusProvider —
+        // the assist's own self-reported flag that replaces chatReader.AssistRequestReturn.
         bool assistCantFollow = classConfig.Mode == Mode.PartyLeader
             ? assistStateStore.AnyAssistCantFollow()
-            : chatReader.AssistRequestReturn;
+            : assistStatusProvider.CantFollow;
 
         WorldState[GoapKey.assistisfollowing]  = assistIsFollowing;
         WorldState[GoapKey.assistrequestreturn] = assistCantFollow;
@@ -560,14 +563,13 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.assistrequestreturnorisfollowing] =
             assistIsFollowing || assistCantFollow || assistNavigating || _evadeLeaderWaiting;
 
-        // ── Assist side: gate on leader API reachability ──────────────────
-        // FollowFocusGoal requires assistshouldfollow=true.
-        // In API mode the assist must have a valid fresh leader state before
-        // it can enter FFG. leaderConnection.HasValidLeaderState is false until
-        // the first successful GET and becomes false again if the leader goes stale.
+        // assistshouldfollow gates FollowFocusGoal on the assist.
+        // assistStatusProvider.CantFollow acts as the override that keeps FFG selectable
+        // during evade recovery and genuine CantFollow — even when combat conditions
+        // (dmgTaken/dmgDone) would otherwise set this false and leave the assist with NO PLAN.
         WorldState[GoapKey.assistshouldfollow] =
             leaderConnection.HasValidLeaderState &&
-            (chatReader.AssistRequestReturn || // local override (evade scenario)
+            (assistStatusProvider.CantFollow || // override: keep FFG selectable during evade/CantFollow
              (!chatReader.ForcedFollow && !(playerCombat && dmgTaken) && !dmgDone && !dmgTaken));
 
         WorldState[GoapKey.partymembercombat]  = PartyMemberInCombat();
@@ -645,10 +647,10 @@ public sealed partial class GoapAgent : IDisposable
             switch (g.Key)
             {
                 case GoapKey.consumecorpse:
-                    // Use chat flag or store flag depending on mode
+                    // Use assist provider flag or store flag depending on mode
                     bool cantFollow = classConfig.Mode == Mode.PartyLeader
                         ? assistStateStore.AnyAssistCantFollow()
-                        : chatReader.AssistRequestReturn;
+                        : assistStatusProvider.CantFollow;
                     if (!cantFollow)
                         State.ShouldConsumeCorpse = g.Value;
                     break;
@@ -719,7 +721,7 @@ public sealed partial class GoapAgent : IDisposable
     {
         bool assistCantFollow = classConfig.Mode == Mode.PartyLeader
             ? assistStateStore.AnyAssistCantFollow()
-            : chatReader.AssistRequestReturn;
+            : assistStatusProvider.CantFollow;
 
         if (Active && !assistCantFollow)
         {

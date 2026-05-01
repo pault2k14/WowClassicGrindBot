@@ -1,4 +1,5 @@
-﻿using Core.GOAP;
+using Core.GOAP;
+using Core.Party;
 
 using Microsoft.Extensions.Logging;
 
@@ -17,12 +18,14 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
     private readonly ChatReader chatReader;
     private readonly ClassConfiguration classConfig;
     private readonly AddonBits bits;
+    private readonly AssistStateStore assistStateStore;
 
     private readonly bool lootEnabled;
 
     public CorpseConsumedGoal(ILogger<CorpseConsumedGoal> logger,
         ClassConfiguration classConfig, GoapAgentState goapAgentState, 
-        Wait wait, RestHandler restHandler, ChatReader chatReader, AddonBits bits)
+        Wait wait, RestHandler restHandler, ChatReader chatReader, AddonBits bits,
+        AssistStateStore assistStateStore)
         : base(nameof(CorpseConsumedGoal))
     {
         this.logger = logger;
@@ -31,6 +34,8 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
         this.chatReader = chatReader;
         this.classConfig = classConfig;
         this.bits = bits;
+        this.restHandler = restHandler;
+        this.assistStateStore = assistStateStore;
 
         this.lootEnabled = classConfig.Loot;
 
@@ -58,7 +63,6 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.consumecorpse, true);
 
         AddEffect(GoapKey.consumecorpse, false);
-        this.restHandler = restHandler;
     }
 
     public override void OnEnter()
@@ -105,12 +109,14 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
             switch (g.Key)
             {
                 case GoapKey.assistrequestreturn:
-                    if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+                    if (classConfig.Mode == Mode.PartyLeader && assistStateStore.AnyAssistCantFollow())
                     {
-                        logger.LogInformation("CorpseConsumedGoal: OnGoapEvent - AssistRequestReturn to X: "
-                            + chatReader.AssistXPos
-                            + " Y: "
-                            + chatReader.AssistYPos);
+                        AssistState? cantFollow = assistStateStore.GetCantFollowState();
+                        logger.LogInformation(
+                            $"CorpseConsumedGoal: OnGoapEvent - AssistRequestReturn " +
+                            (cantFollow != null
+                                ? $"to X: {cantFollow.MapX:0.00} Y: {cantFollow.MapY:0.00}"
+                                : "(no position available)"));
 
                         AddEffect(GoapKey.producedcorpse, false);
                         AddEffect(GoapKey.consumecorpse, false);
@@ -118,12 +124,10 @@ public sealed partial class CorpseConsumedGoal : GoapGoal, IGoapEventListener
                         AddEffect(GoapKey.shouldgather, false);
                         AddEffect(GoapKey.consumablecorpsenearby, false);
                     }
-
                     break;
             }
         }
     }
-
 
     [LoggerMessage(
         EventId = 0120,

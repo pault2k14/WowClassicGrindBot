@@ -1,4 +1,5 @@
-﻿using Core.GOAP;
+using Core.GOAP;
+using Core.Party;
 
 using Microsoft.Extensions.Logging;
 
@@ -16,7 +17,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
     private const int MAX_ATTEMPTS = 5;
     private const int MAX_TIME_TO_REACH_MELEE = 10000;
-    private const int MAX_TIME_TO_DETECT_LOOT = 2000; // 2 * CastingHandler.GCD;
+    private const int MAX_TIME_TO_DETECT_LOOT = 2000;
     private const int MAX_TIME_TO_DETECT_CAST = 2 * CastingHandler.GCD;
     private const int MAX_TIME_TO_WAIT_NPC_NAME = 1000;
 
@@ -36,6 +37,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
     private readonly CancellationToken token;
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
+    private readonly AssistStateStore assistStateStore;
 
     private bool canRun;
     private int bagHashNewOrStackGain;
@@ -49,7 +51,8 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         NpcNameTargeting npcNameTargeting, CombatTracker combatTracker,
         GoapAgentState state, ClassConfiguration classConfig,
         CancellationTokenSource cts, RestHandler restHandler,
-        ChatReader chatReader)
+        ChatReader chatReader,
+        AssistStateStore assistStateStore)
         : base(nameof(SkinningGoal))
     {
         this.logger = logger;
@@ -63,12 +66,12 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         this.bagReader = bagReader;
         this.equipmentReader = equipmentReader;
         this.chatReader = chatReader;
-
         this.npcNameTargeting = npcNameTargeting;
         this.combatTracker = combatTracker;
         this.state = state;
-
         this.token = cts.Token;
+        this.restHandler = restHandler;
+        this.assistStateStore = assistStateStore;
 
         canRun = HaveItemRequirement();
         bagReader.DataChanged -= BagReader_DataChanged;
@@ -76,24 +79,16 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         equipmentReader.OnEquipmentChanged -= EquipmentReader_OnEquipmentChanged;
         equipmentReader.OnEquipmentChanged += EquipmentReader_OnEquipmentChanged;
 
-
-        if (classConfig.Mode == Mode.AssistFocus)
-        {  // Disable for now to see if it resolves NO PLAN for assist when looting/skinning
-           // AddPrecondition(GoapKey.partymembercombat, false);
-        }
-        else if (classConfig.Mode == Mode.PartyLeader)
+        if (classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.partyleadercombat, false);
         }
-
-        //AddPrecondition(GoapKey.dangercombat, false);
 
         AddPrecondition(GoapKey.forcedfollow, false);
         AddPrecondition(GoapKey.shouldgather, true);
         AddEffect(GoapKey.shouldgather, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
         AddPrecondition(GoapKey.focuscombat, false);
-        this.restHandler = restHandler;
     }
 
     public void Dispose()
@@ -110,14 +105,16 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         {
             switch (g.Key)
             {
-
                 case GoapKey.assistrequestreturn:
-                    if (classConfig.Mode == Mode.PartyLeader && chatReader.AssistRequestReturn)
+                    // PartyLeader: read from API store — position available via AssistState DTO.
+                    if (classConfig.Mode == Mode.PartyLeader && assistStateStore.AnyAssistCantFollow())
                     {
-                        logger.LogInformation("SkinningGoal: OnGoapEvent - AssistRequestReturn to X: "
-                            + chatReader.AssistXPos
-                            + " Y: "
-                            + chatReader.AssistYPos);
+                        AssistState? cantFollow = assistStateStore.GetCantFollowState();
+                        logger.LogInformation(
+                            $"SkinningGoal: OnGoapEvent - AssistRequestReturn " +
+                            (cantFollow != null
+                                ? $"to X: {cantFollow.MapX:0.00} Y: {cantFollow.MapY:0.00}"
+                                : "(no position available)"));
 
                         AddEffect(GoapKey.producedcorpse, false);
                         AddEffect(GoapKey.consumecorpse, false);
@@ -125,7 +122,6 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
                         AddEffect(GoapKey.shouldgather, false);
                         AddEffect(GoapKey.consumablecorpsenearby, false);
                     }
-
                     break;
 
                 case GoapKey.incombat:
@@ -143,9 +139,8 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
                         AddEffect(GoapKey.consumecorpse, false);
                         AddEffect(GoapKey.shouldloot, false);
                         AddEffect(GoapKey.shouldgather, false);
-                        AddEffect(GoapKey.consumablecorpsenearby, false);         
+                        AddEffect(GoapKey.consumablecorpsenearby, false);
                     }
-
                     break;
 
                 case GoapKey.partyincombat:
@@ -165,7 +160,6 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
                         AddEffect(GoapKey.shouldgather, false);
                         AddEffect(GoapKey.consumablecorpsenearby, false);
                     }
-
                     break;
             }
         }
@@ -208,25 +202,16 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         }
 
         bagHashNewOrStackGain = bagReader.HashNewOrStackGain;
-
         wait.Fixed(playerReader.NetworkLatency);
 
         if (bagReader.BagsFull())
-        {
             LogWarning("Inventory is full!");
-        }
 
-        ReadOnlySpan<CursorType> types = [
-            CursorType.Skin,
-            CursorType.Mine,
-            CursorType.Herb
-        ];
+        ReadOnlySpan<CursorType> types = [CursorType.Skin, CursorType.Mine, CursorType.Herb];
 
         int attempts = 0;
         while (attempts < MAX_ATTEMPTS)
         {
-            // Add check for tagged target in case we are in a party and another party member already tapped
-            // the mob
             bool foundTarget = bits.Target() && bits.Target_Dead() && !bits.Target_Tagged();
 
             if (!foundTarget && state.LastCombatKillCount == 1)
@@ -254,27 +239,19 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
             if (!foundTarget && !input.KeyboardOnly)
             {
                 stopMoving.Stop();
-
                 npcNameTargeting.ChangeNpcType(NpcNames.Corpse);
                 e = wait.Until(MAX_TIME_TO_WAIT_NPC_NAME, npcNameTargeting.FoundAny);
                 LogFoundNpcNameCount(logger, npcNameTargeting.NpcCount, e);
-
-                foundTarget = npcNameTargeting.FindBy(types, token); // todo salvage icon
+                foundTarget = npcNameTargeting.FindBy(types, token);
                 interact = true;
             }
 
-            if (!foundTarget &&
-                bits.SoftInteract() &&
-                bits.SoftInteract_Dead() &&
-                bits.SoftInteract_Hostile())
+            if (!foundTarget && bits.SoftInteract() && bits.SoftInteract_Dead() && bits.SoftInteract_Hostile())
             {
                 Log("Found soft target!");
-
                 input.PressInteract();
                 wait.Update();
-
                 foundTarget = true;
-
                 interact = false;
             }
 
@@ -288,9 +265,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
             if (!playerReader.MinRangeZero())
             {
-                e = wait.Until(MAX_TIME_TO_REACH_MELEE,
-                    NotMovingOrTargetTagged, ApproachOnCooldownWithWait);
-
+                e = wait.Until(MAX_TIME_TO_REACH_MELEE, NotMovingOrTargetTagged, ApproachOnCooldownWithWait);
                 LogReachedCorpse(logger, e);
                 interact = !playerReader.MinRangeZero();
             }
@@ -342,8 +317,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
             else
             {
                 if (combatLog.DamageTakenCount() > 0 ||
-                    playerReader.LastUIError == UI_ERROR.ERR_SPELL_FAILED_INTERRUPTED
-                    )
+                    playerReader.LastUIError == UI_ERROR.ERR_SPELL_FAILED_INTERRUPTED)
                 {
                     Log("Interrupted due combat!");
                     ExitInterruptOrFailed(true);
@@ -352,9 +326,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
                 LogWarnGatherFailed(logger, playerReader.CastState.ToStringF(), attempts);
                 wait.Fixed(Loot.LOOTFRAME_AUTOLOOT_DELAY_MS);
-
                 attempts++;
-
                 ClearTargetIfExists();
             }
         }
@@ -364,7 +336,6 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
     }
 
     private bool NotMovingOrTargetTagged() => bits.Target_Tagged() || bits.NotMoving();
-
 
     public override void OnExit()
     {
@@ -387,7 +358,6 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         {
             SendGoapEvent(ScreenCaptureEvent.Default);
             LogLootFailed(logger, e);
-
             ClearTargetIfExists();
         }
 
@@ -405,10 +375,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
     private void ClearTargetIfExists()
     {
-        if (!bits.Target() || !bits.Target_Dead())
-        {
-            return;
-        }
+        if (!bits.Target() || !bits.Target_Dead()) return;
 
         input.PressClearTarget();
         wait.Update();
@@ -423,42 +390,28 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
     private void ApproachOnCooldownWithWait()
     {
         wait.Fixed(1000);
-        if (bits.Target() && bits.Target_Tagged())
-        {
-            return;
-        }
-
+        if (bits.Target() && bits.Target_Tagged()) return;
         input.PressApproachOnCooldown();
     }
 
     private void WhileNotCastingInteract()
     {
         wait.Fixed(1000);
-        if(bits.Target() && bits.Target_Tagged())
-        {
-            return;
-        }
-
+        if(bits.Target() && bits.Target_Tagged()) return;
         if (!playerReader.IsCasting())
             input.PressApproachOnCooldown();
     }
 
     private static void Empty() { }
 
-    private bool LootReset()
-    {
-        return (LootStatus)playerReader.LootEvent.Value == LootStatus.CORPSE;
-    }
+    private bool LootReset() =>
+        (LootStatus)playerReader.LootEvent.Value == LootStatus.CORPSE;
 
-    private void EquipmentReader_OnEquipmentChanged(object? sender, (int, int) e)
-    {
+    private void EquipmentReader_OnEquipmentChanged(object? sender, (int, int) e) =>
         canRun = HaveItemRequirement();
-    }
 
-    private void BagReader_DataChanged()
-    {
+    private void BagReader_DataChanged() =>
         canRun = HaveItemRequirement();
-    }
 
     private bool HaveItemRequirement()
     {
@@ -470,9 +423,8 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
             bagReader.HasItem(7005) ||
             bagReader.HasItem(12709) ||
             bagReader.HasItem(19901) ||
-            bagReader.HasItem(40772) || // army knife
+            bagReader.HasItem(40772) ||
             bagReader.HasItem(40893) ||
-
             equipmentReader.HasItem(7005) ||
             equipmentReader.HasItem(12709) ||
             equipmentReader.HasItem(19901);
@@ -480,8 +432,7 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
 
         if (classConfig.Mine || classConfig.Salvage)
             return
-            bagReader.HasItem(40772) || // army knife
-                                        // mining / todo salvage
+            bagReader.HasItem(40772) ||
             bagReader.HasItem(40893) ||
             bagReader.HasItem(20723) ||
             bagReader.HasItem(1959) ||
@@ -496,126 +447,79 @@ public sealed partial class SkinningGoal : GoapGoal, IGoapEventListener, IDispos
         return false;
     }
 
-    private bool LootWindowClosedOrBagChanged()
-    {
-        return bagHashNewOrStackGain != bagReader.HashNewOrStackGain ||
-            (LootStatus)playerReader.LootEvent.Value is
-            LootStatus.CLOSED;
-    }
+    private bool LootWindowClosedOrBagChanged() =>
+        bagHashNewOrStackGain != bagReader.HashNewOrStackGain ||
+        (LootStatus)playerReader.LootEvent.Value is LootStatus.CLOSED;
 
-    private bool SkinningCastEnded()
-    {
-        return
-            playerReader.CastState is
-            UI_ERROR.CAST_SUCCESS or
-            UI_ERROR.SPELL_FAILED_TRY_AGAIN or
-            UI_ERROR.ERR_SPELL_FAILED_INTERRUPTED;
-    }
+    private bool SkinningCastEnded() =>
+        playerReader.CastState is
+        UI_ERROR.CAST_SUCCESS or
+        UI_ERROR.SPELL_FAILED_TRY_AGAIN or
+        UI_ERROR.ERR_SPELL_FAILED_INTERRUPTED;
 
-    private bool HerbalismCastEnded()
-    {
-        return
-            playerReader.LastUIError is
-            UI_ERROR.SPELL_FAILED_TRY_AGAIN or
-            UI_ERROR.ERR_SPELL_FAILED_INTERRUPTED;
-    }
+    private bool HerbalismCastEnded() =>
+        playerReader.LastUIError is
+        UI_ERROR.SPELL_FAILED_TRY_AGAIN or
+        UI_ERROR.ERR_SPELL_FAILED_INTERRUPTED;
 
-    private bool CastStartedOrFailed()
-    {
-        return playerReader.IsCasting() || 
-            bits.Target_Tagged() ||
-            playerReader.LastUIError is
-            UI_ERROR.ERR_LOOT_LOCKED or
-            UI_ERROR.ERR_REQUIRES_S;
-    }
+    private bool CastStartedOrFailed() =>
+        playerReader.IsCasting() ||
+        bits.Target_Tagged() ||
+        playerReader.LastUIError is
+        UI_ERROR.ERR_LOOT_LOCKED or
+        UI_ERROR.ERR_REQUIRES_S;
 
-    private bool WaitForLosingTarget()
-    {
-        return
-            bits.Target() &&
-            bits.Target_Dead();
-    }
+    private bool WaitForLosingTarget() =>
+        bits.Target() && bits.Target_Dead();
 
-    private void Log(string text)
-    {
-        logger.LogInformation(text);
-    }
-
-    private void LogWarning(string text)
-    {
-        logger.LogWarning(text);
-    }
+    private void Log(string text) => logger.LogInformation(text);
+    private void LogWarning(string text) => logger.LogWarning(text);
 
     #region Logging
 
-    [LoggerMessage(
-        EventId = 0140,
-        Level = LogLevel.Warning,
+    [LoggerMessage(EventId = 0140, Level = LogLevel.Warning,
         Message = "OnEnter window still open! Available Loot: {count} {elapsedMs}ms")]
     static partial void LogWarnWindowStillOpen(ILogger logger, int count, float elapsedMs);
 
-    [LoggerMessage(
-        EventId = 0141,
-        Level = LogLevel.Information,
+    [LoggerMessage(EventId = 0141, Level = LogLevel.Information,
         Message = "Found NpcName Count: {npcCount} {elapsedMs}ms")]
     static partial void LogFoundNpcNameCount(ILogger logger, int npcCount, float elapsedMs);
 
-
-    [LoggerMessage(
-        EventId = 0142,
-        Level = LogLevel.Warning,
+    [LoggerMessage(EventId = 0142, Level = LogLevel.Warning,
         Message = "Unable to gather Target({targetId})!")]
     static partial void LogWarnUnableToTarget(ILogger logger, int targetId);
 
-    [LoggerMessage(
-        EventId = 0143,
-        Level = LogLevel.Information,
+    [LoggerMessage(EventId = 0143, Level = LogLevel.Information,
         Message = "Reached corpse ? {elapsedMs}ms")]
     static partial void LogReachedCorpse(ILogger logger, float elapsedMs);
 
-    [LoggerMessage(
-        EventId = 0144,
-        Level = LogLevel.Information,
+    [LoggerMessage(EventId = 0144, Level = LogLevel.Information,
         Message = "Started casting or interrupted ? {interrupt} - casting: {casting} {elapsedMs}ms")]
     static partial void LogCastStartedOrInterrupted(ILogger logger, bool interrupt, bool casting, float elapsedMs);
 
-    [LoggerMessage(
-        EventId = 0145,
-        Level = LogLevel.Information,
+    [LoggerMessage(EventId = 0145, Level = LogLevel.Information,
         Message = "Wait {delay}ms and try again: {castState} | {uiError} | casting: {casting}")]
     static partial void LogCastingState(ILogger logger, int delay, string castState, string uiError, bool casting);
 
-    [LoggerMessage(
-        EventId = 0146,
-        Level = LogLevel.Information,
+    [LoggerMessage(EventId = 0146, Level = LogLevel.Information,
         Message = "Waiting for {castName} castbar to end! {waitTime}ms")]
     static partial void LogAwaitCastbarFinish(ILogger logger, string castName, int waitTime);
 
-    [LoggerMessage(
-        EventId = 0147,
-        Level = LogLevel.Warning,
+    [LoggerMessage(EventId = 0147, Level = LogLevel.Warning,
         Message = "Gathering Failed! {castState} attempts: {attempts}")]
     static partial void LogWarnGatherFailed(ILogger logger, string castState, int attempts);
 
-    [LoggerMessage(
-        EventId = 0148,
-        Level = LogLevel.Warning,
+    [LoggerMessage(EventId = 0148, Level = LogLevel.Warning,
         Message = "Ran out of {attempts} maximum attempts...")]
     static partial void LogWarnOutOfAttempts(ILogger logger, int attempts);
 
-    [LoggerMessage(
-        EventId = 0149,
-        Level = LogLevel.Information,
+    [LoggerMessage(EventId = 0149, Level = LogLevel.Information,
         Message = "Loot Successful {elapsedMs}ms")]
     static partial void LogLootSuccess(ILogger logger, float elapsedMs);
 
-    [LoggerMessage(
-        EventId = 0150,
-        Level = LogLevel.Information,
+    [LoggerMessage(EventId = 0150, Level = LogLevel.Information,
         Message = "Loot Failed {elapsedMs}ms")]
     static partial void LogLootFailed(ILogger logger, float elapsedMs);
-
-
 
     #endregion
 }

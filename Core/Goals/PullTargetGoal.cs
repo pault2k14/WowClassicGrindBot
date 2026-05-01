@@ -1,4 +1,5 @@
 using Core.GOAP;
+using Core.Party;
 
 using Microsoft.Extensions.Logging;
 
@@ -17,9 +18,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     private const int AcquireTargetTimeMs = 5000;
     private const int MAX_PULL_DURATION = 15_000;
-    // How long without range reduction before firing TryUnstuck, even if stuckDetector
-    // thinks we're moving. Matches ATG's RangeStuckIntervalMs. Catches the "shuffling
-    // sideways against terrain" case: the bot IS moving but not toward the mob.
     private const double RangeStuckIntervalMs = 3000;
 
     private readonly ILogger<PullTargetGoal> logger;
@@ -38,6 +36,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     private readonly IBlacklist targetBlacklist;
     private readonly ChatReader chatReader;
     private readonly Navigation navigation;
+    private readonly AssistStateStore assistStateStore;
+    private readonly AssistStatusProvider assistStatusProvider;
 
     private readonly KeyAction? approachKey;
     private readonly Action approachAction;
@@ -48,8 +48,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
     private float _rangeStuckLastMinRange;
     private double _rangeStuckCheckAtMs;
 
-    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
-    // Checked at the top of Update() to force an immediate exit.
     private bool _evadeRecoveryActive;
 
     private double PullDurationMs => GetElapsedTime(pullStart).TotalMilliseconds;
@@ -62,7 +60,9 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         IMountHandler mountHandler, NpcNameTargeting npcNameTargeting,
         StuckDetector stuckDetector, CombatTracker combatTracker,
         ClassConfiguration classConfig, ChatReader chatReader,
-        Navigation navigation)
+        Navigation navigation,
+        AssistStateStore assistStateStore,
+        AssistStatusProvider assistStatusProvider)
         : base(nameof(PullTargetGoal))
     {
         this.logger = logger;
@@ -81,6 +81,8 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         this.classConfig = classConfig;
         this.chatReader = chatReader;
         this.navigation = navigation;
+        this.assistStateStore = assistStateStore;
+        this.assistStatusProvider = assistStatusProvider;
 
         Keys = classConfig.Pull.Sequence;
 
@@ -114,17 +116,10 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.withinpullrange, true);
         AddPrecondition(GoapKey.inblacklistarea, false);
         AddPrecondition(GoapKey.assistrequestreturn, false);
-        // Lock out pull during evade recovery so the leader doesn't immediately
-        // pull a new mob while both bots are still navigating away.
         AddPrecondition(GoapKey.evadeRecovery, false);
-        // Prevents PTG from being selected while ATG owns an active pather escape.
-        // Without this the planner thrashes between ATG and PTG every tick during
-        // escape navigation since both goals have their other preconditions met.
-        // ATG has no equivalent precondition so it retains escape ownership cleanly.
         AddPrecondition(GoapKey.approachEscapeActive, false);
 
         AddEffect(GoapKey.pulled, true);
-        this.chatReader = chatReader;
     }
 
     public override void OnEnter()
@@ -132,11 +127,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         wait.Update();
         stuckDetector.Reset();
 
-        // BUG 5 FIX: mirror ATG's wrong-mob escape guard.
-        // Evidence: Run 4 line 721 — PTG entered with "escape ACTIVE" for guid=7299149
-        // while target=7305883. No guard existed to stop the stale escape, so PTG drove
-        // the wrong-mob navigation and the bot engaged a different mob entirely.
-        // ATG has this guard (ApproachTargetGoal.cs lines 145-151); PTG did not.
         if (navigation.IsApproachEscapeActive &&
             playerReader.TargetGuid != 0 &&
             navigation.ApproachEscapeTargetGuid != 0 &&
@@ -149,7 +139,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
         if (!navigation.IsApproachEscapeActive)
         {
-            // [LOG-14a] Pre-RATF state snapshot — mirrors ATG [LOG-11].
             logger.LogDebug($"[PTG] OnEnter: calling RATF for target={playerReader.TargetGuid} — " +
                 $"pre-RATF state: escapeGuid={navigation.ApproachEscapeTargetGuid} " +
                 $"yards={navigation.ApproachEscapeCurrentYards:0} active={navigation.IsApproachEscapeActive} " +
@@ -158,8 +147,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         }
         else
         {
-            // [LOG-14b] BUG D diagnostic: escape is active so RATF is skipped.
-            // If the guid/startUtc here are stale (from a prior escape), this log exposes it.
             logger.LogInformation($"[PTG] OnEnter: escape ACTIVE — skipping RATF. " +
                 $"yards={navigation.ApproachEscapeCurrentYards:0} " +
                 $"startUtc={navigation.ApproachEscapeStartUtc:HH:mm:ss.fff} " +
@@ -179,7 +166,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             Log("Stop auto interact!");
             input.PressStopAttack();
             wait.Update();
-            // Temporarily disable due to navigation supression updates
             stopMoving.StopForward();
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
@@ -198,20 +184,15 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
-        // RATF intentionally omitted — see ATG.OnExit comment.
-
         if (requiresNpcNameFinder)
         {
             npcNameTargeting.ChangeNpcType(NpcNames.None);
         }
 
-        // Added this to stop moving when combat starts
-        // should we be checking for combat?
         if(bits.Target() && bits.Target_Alive() && bits.Combat())
         {
             input.StopForward(false);
         }
-        
     }
 
     public void OnGoapEvent(GoapEventArgs e)
@@ -243,8 +224,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // If an evading mob was detected, abort the pull immediately so the
-        // planner re-evaluates. The evadeRecovery precondition prevents re-selection.
         if (_evadeRecoveryActive)
         {
             logger.LogInformation("[PullTargetGoal] Evade recovery active — aborting pull.");
@@ -256,7 +235,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Assist-side evade handling while mid-pull.
         if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
         {
             int blacklistGuid = chatReader.LeaderBlacklistTargetId;
@@ -275,30 +253,19 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             wait.Update();
             stopMoving.Stop();
 
-            // Fire EvadeBlacklistEvent so the assist's own GoapAgent starts its
-            // evadeRecovery timer, blocking Combat/Approach/Pull on the assist side.
             if (blacklistGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
 
             if (!bits.AutoFollow())
             {
-                // Set AssistRequestReturn=true immediately so FollowFocusGoal is
-                // selectable right now, without waiting ~1.5s for the N5 chat echo.
-                // The N5 press delivers real coordinates to the leader.
-                chatReader.AssistRequestReturn = true;
-                // Press N5 (AssistCantFollow) — sends position to leader, sets
-                // AssistRequestReturn=true on both bots, selects FollowFocusGoal on assist.
+                // assistStatusProvider.CantFollow keeps assistshouldfollow=true so
+                // FollowFocusGoal stays selectable throughout evade recovery.
+                assistStatusProvider.CantFollow = true;
                 input.PressAssistCantFollow();
             }
             return;
         }
 
-        // Skip the blacklist bail-out while an escape is in progress — the mob being
-        // in the blacklist area is exactly WHY the escape was triggered. Bailing here
-        // would abort the escape route before the character has navigated clear of the
-        // obstacle. Once the escape completes (or all levels exhaust), this check fires
-        // and PTG bails. IsApproachEscapeExhausted triggers immediately when all 3 levels
-        // fail so the mob gets blacklisted without needing the player inside the rect.
         if (!navigation.IsApproachEscapeActive &&
             bits.Target() && !bits.Combat() &&
             (navigation.IsApproachEscapeExhausted ||
@@ -309,7 +276,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
                 ? "all escape levels exhausted (10y/20y/30y failed)"
                 : targetBlacklist.Is() ? "target in blacklist" : "player inside blacklist area";
             logger.LogWarning($"[PTG] Bail-out: blacklisting target guid={playerReader.TargetGuid} — reason: {ptgBailReason}.");
-            // Broadcast to assist so they also ignore + clear this mob.
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
             playerReader.IgnoreTarget(playerReader.TargetGuid);
@@ -317,8 +283,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             input.PressClearTarget();
             wait.Update();
             stopMoving.StopForward();
-            // Clear any in-progress escape navigation so FRG doesn't inherit a
-            // stale escape waypoint pointing away from the patrol route.
             navigation.Stop();
             navigation.ResetApproachEscape();
             navigation.ClearStuckRects();
@@ -327,16 +291,16 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (!bits.Combat() && !chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
+        // Block pull on the leader if the assist is genuinely unavailable (not following
+        // and not actively navigating toward us). Using the API store mirrors ATG's check.
+        if (!bits.Combat() && classConfig.Mode == Mode.PartyLeader &&
+            !assistStateStore.AnyAssistIsFollowing() &&
+            !assistStateStore.AnyAssistNavigating())
         {
-            logger.LogInformation("PullTargetGoal: Not pulling due to assist not following");
+            logger.LogInformation("PullTargetGoal: Not pulling — assist is not following or navigating.");
             return;
         }
 
-        // Skip pull-duration timeout entirely while an escape is running or
-        // escalating — the navigation owns movement, pressing StopAttack or
-        // clearing the target mid-escape causes a tight spam loop and breaks
-        // the escape sequence.
         if (PullDurationMs > MAX_PULL_DURATION &&
             !navigation.IsApproachEscapeActive &&
             !navigation.IsApproachEscapeEscalating)
@@ -369,7 +333,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             if (classConfig.RaidIconsToSkipInCombat.IndexOf(playerReader
                 .TargetRaidIcon()) != -1 && !keyAction.CrowdControl)
             {
-                // None of our pull sequence had crowd control.
                 if (i + 1 == keys.Length)
                 {
                     return;
@@ -411,9 +374,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         {
             Log("Evading mob");
 
-            // Broadcast to assist so they also ignore + clear this evading mob.
-            // This is the primary evade detection point — EvadeMobs is explicitly
-            // populated by CombatLog when the server sends the UNIT_EVADED event.
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
             playerReader.IgnoreTarget(playerReader.TargetGuid);
@@ -438,20 +398,11 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (input.Approach.OnCooldown())
             return;
 
-        // If a pather-based escape is in progress, drive Navigation rather than
-        // pressing Approach. TryUnstuck() checks for completion and clears the
-        // escape when the route finishes so normal approach can resume.
         if (navigation.IsApproachEscapeActive)
         {
             navigation.Update(CancellationToken.None);
-            // Re-check after Update — StopAndResetAtDestination may have just
-            // completed the escape. Only call TryUnstuck if still active (to
-            // check the timeout), otherwise let normal approach resume next tick.
             if (navigation.IsApproachEscapeActive)
             {
-                // [LOG-15] Periodic heartbeat while escape is active — emits at Debug level.
-                // Provides escapeSec and displaced so we can see mid-escape progress without
-                // waiting for completion or timeout. Throttled to ~1s to avoid log spam.
                 if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
                 {
                     double escSec = (DateTime.UtcNow - navigation.ApproachEscapeStartUtc).TotalSeconds;
@@ -463,9 +414,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             }
             else
             {
-                // Escape just completed — reset range tracker so the 3s window
-                // starts fresh. Pre-escape range data is stale (player moved during
-                // navigation) and would immediately trigger a false stuck detection.
                 logger.LogInformation(
                     $"[PTG] Escape complete — resetting range-stuck tracker. " +
                     $"range={playerReader.MinRange():0.0}y exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating}");
@@ -488,10 +436,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             logger.LogInformation("EligibleEnemySoftTargetExists(): " + EligibleEnemySoftTargetExists());
         }
 
-        // Range-progress stuck detection: even if stuckDetector.IsMoving() is true
-        // (bot is physically moving — sliding sideways against terrain), if MinRange
-        // hasn't decreased after RangeStuckIntervalMs the character is not making
-        // progress toward the mob. Fire TryUnstuck to route around the obstacle.
         if (PullDurationMs >= _rangeStuckCheckAtMs && !navigation.IsApproachEscapeActive)
         {
             float currentRange = playerReader.MinRange();
@@ -512,15 +456,11 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         }
         else if (_rangeStuckLastMinRange == float.MaxValue)
         {
-            // First approach tick — seed the initial range snapshot.
             _rangeStuckLastMinRange = playerReader.MinRange();
         }
 
         if (!stuckDetector.IsMoving())
         {
-            // [LOG-16] Richer context on stuckDetector path — confirms whether the call is
-            // expected (escalating=true, yards>0) or a spurious fire after escape completion.
-            // lastAttemptAge confirms the 200ms gate state.
             logger.LogInformation(
                 $"[PTG] Not moving — calling TryUnstuck(). " +
                 $"escalating={navigation.IsApproachEscapeEscalating} exhausted={navigation.IsApproachEscapeExhausted} " +
