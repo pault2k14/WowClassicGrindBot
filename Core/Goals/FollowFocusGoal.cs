@@ -38,18 +38,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// Set below <see cref="LeaderPauseYards"/> (20y) so the assist corrects course
     /// before the leader's distance gate fires — the leader almost never needs to pause.
     /// Dead-band entry: dist > NavigatingMinYards (14y) triggers navigation from Idle.
-    /// Dead-band exit:  dist &lt; NavigatingExitYards (10y) returns to Idle.
-    /// The 4y hysteresis gap (10-14y) prevents oscillation when running alongside
-    /// the leader at ~14y — without it the state flips every 100-500ms, causing
-    /// 68+ path re-requests per run and lateral drift as the pather cuts different
-    /// mesh corridors to each slightly-off-route live position.</summary>
+    /// Dead-band exit:  dist &lt; NavigatingExitYards (10y) → report Following, keep navigating.
+    /// The 4y hysteresis band (10-14y) prevents the oscillation that occurred when exit=entry=14y
+    /// (state flipped every 100-500ms, causing 68+ pather restarts per run and lateral drift).
+    /// NavigatingExitYards no longer transitions to Idle — it only updates the Following status
+    /// so the leader knows the assist is close enough to resume patrol. Navigation stays active
+    /// and the assist runs continuously alongside the leader.</summary>
     private const float NavigatingMinYards = 14f;
 
-    /// <summary>Hysteresis exit threshold for NavigatingToLeader dead-band.
-    /// Must be less than <see cref="NavigatingMinYards"/> (14y) to prevent oscillation,
-    /// and greater than <see cref="FollowingMaxYards"/> (7y) to retain the circular-route
-    /// fix (assists chasing a curved route at similar speed would otherwise never exit
-    /// NavigatingToLeader via the FollowingMaxYards path alone).</summary>
+    /// <summary>Distance at which the assist reports Following status while staying in
+    /// NavigatingToLeader. Must be less than <see cref="NavigatingMinYards"/> (14y) to
+    /// provide hysteresis, and greater than <see cref="FollowingMaxYards"/> (7y) so the
+    /// leader can resume patrol before the assist reaches the minimum following distance.</summary>
     private const float NavigatingExitYards = 10f;
 
     /// <summary>Leader must be this close before the assist exits CantFollow.
@@ -433,28 +433,33 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Back within hysteresis zone (dist < NavigatingExitYards = 10y) → Idle.
-        // NavigatingExitYards (10y) is intentionally LOWER than NavigatingMinYards (14y).
-        // Using the same threshold for entry and exit creates a zero-hysteresis bang-bang
-        // controller: the assist reaches 13.9y → exits Idle, then immediately re-enters
-        // NavigatingToLeader at 14.1y, looping every 100-500ms. Each loop calls
-        // StartNavigatingToLeader() → SetSingleWaypoint() → fresh path request, causing
-        // 68+ pather restarts per run. The pather re-routes to the leader's shifted live
-        // position each time, cutting different mesh corridors and accumulating lateral drift.
-        // With NavigatingExitYards = 10y: the 10-14y zone is a stable "keep navigating" band.
-        // The assist stays in NavigatingToLeader until it actually closes to 10y, then Idle's
-        // dead-band (7-14y) holds it there without re-triggering navigation.
+        // Within NavigatingExitYards (10y) — report Following so the leader knows
+        // the assist is close enough and can resume patrol if it was paused.
+        // DO NOT stop navigation or transition to Idle.
+        //
+        // Stopping here causes a stop-start leapfrog:
+        //   1. Assist stops at 10y, sets Following.
+        //   2. Leader (paused by distance gate) resumes — now running at ~7y/s.
+        //   3. Assist is stationary: gap grows 10y → 14y in ~0.57s.
+        //   4. Assist re-engages NavigatingToLeader at 14y, but leader is still running.
+        //   5. Assist path through the mesh is ≥ leader's direct route → gap keeps growing.
+        //   6. Gap hits 20y → leader pauses again → cycle repeats every 2–4 seconds.
+        //
+        // By keeping navigation active, both bots run at the same speed. The gap
+        // holds at ~10y, shouldPause stays false (10y < LeaderPauseYards=20y), and
+        // the leader never needs to pause. The natural exit is via FollowingMaxYards
+        // (7y) when the leader actually stops, giving 13y of clean runway before the
+        // pause threshold.
         if (dist < NavigatingExitYards && !navigation.IsApproachEscapeActive)
         {
-            logger.LogInformation(
-                $"[FFG] Back within hysteresis zone ({dist:0.0}y < {NavigatingExitYards}y) — returning to Idle.");
-            navigation.Stop();
-            input.StopForward(true);
-            ResetNavState();
-            EnterState(NavState.Idle);
-            assistStatusProvider.CurrentStatus = BotStatus.Following;
-            assistStatusProvider.CantFollow = false;
-            return;
+            if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+            {
+                logger.LogInformation(
+                    $"[FFG] Within follow range ({dist:0.0}y < {NavigatingExitYards}y) — reporting Following, keeping navigation active.");
+                assistStatusProvider.CurrentStatus = BotStatus.Following;
+                assistStatusProvider.CantFollow = false;
+            }
+            // Fall through — navigation continues; no stop, no Idle transition.
         }
 
         // Update waypoint if leader has moved significantly from the last target.
