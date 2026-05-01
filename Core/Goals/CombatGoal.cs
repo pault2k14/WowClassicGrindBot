@@ -267,7 +267,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 else
                 {
                     double ghostSec = (DateTime.UtcNow - _ghostCombatSinceUtc).TotalSeconds;
-                    logger.LogInformation($"[CombatGoal] Ghost combat: {ghostSec:0.0}s / {GhostCombatTimeoutSec}s.");
+                    logger.LogDebug($"[CombatGoal] Ghost combat: {ghostSec:0.0}s / {GhostCombatTimeoutSec}s.");
                     if (ghostSec >= GhostCombatTimeoutSec)
                     {
                         logger.LogWarning($"[CombatGoal] Ghost combat detected — escaping via route.");
@@ -531,7 +531,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 && string.IsNullOrEmpty(keyAction.ChangeTargetTo)
                 && playerReader.TargetGuid == playerReader.FocusTargetGuid)
             {
-                logger.LogInformation("Update: AssistFocus Taking damage but not within combat range of focus target.");
+                logger.LogDebug("Update: AssistFocus Taking damage but not within combat range of focus target.");
                 CheckTargetsTargetingMe();
                 return;
             }

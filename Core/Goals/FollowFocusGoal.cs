@@ -307,10 +307,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        while (restHandler.IsResting())
+        if (restHandler.IsResting())
         {
             logger.LogInformation("[FFG] Waiting while resting.");
-            wait.Update(1000);
+            while (restHandler.IsResting())
+                wait.Update(1000);
         }
 
         // ── State machine ──────────────────────────────────────────────────
@@ -338,13 +339,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
-
-        if (logger.IsEnabled(LogLevel.Debug))
-        {
-            logger.LogDebug(
-                $"[FFG] Idle: dist={dist:0.0}y leader=({leader.MapX:0.00},{leader.MapY:0.00}) " +
-                $"status={leader.Status} localAge={leaderConnection.LocalAgeMs:0}ms");
-        }
 
         // Beyond dead-band upper threshold → start navigating.
         if (dist > NavigatingMinYards)
@@ -376,11 +370,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             if (assistStatusProvider.CurrentStatus == BotStatus.Following)
             {
                 // Stay Following — minor fluctuation, no action needed.
-                if (logger.IsEnabled(LogLevel.Debug))
-                {
-                    logger.LogDebug(
-                        $"[FFG] Dead-band ({dist:0.0}y) — maintaining Following.");
-                }
             }
             else
             {
@@ -418,13 +407,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
-
-        if (logger.IsEnabled(LogLevel.Debug))
-        {
-            logger.LogDebug(
-                $"[FFG] NavigatingToLeader: dist={dist:0.0}y " +
-                $"leaderStatus={leader.Status} localAge={leaderConnection.LocalAgeMs:0}ms");
-        }
 
         // Within FollowingMaxYards → transition to Idle, post Following.
         if (dist < FollowingMaxYards && !navigation.IsApproachEscapeActive)
@@ -467,8 +449,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         float waypointDrift = leader.WorldPos.WorldDistanceXYTo(_lastNavigatedToLeaderWorldPos);
         if (waypointDrift > WaypointUpdateThresholdYards)
         {
-            logger.LogDebug(
-                $"[FFG] Leader moved {waypointDrift:0.0}y — refreshing waypoint.");
             _lastNavigatedToLeaderWorldPos = leader.WorldPos;
             navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(leader));
         }
@@ -522,13 +502,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (leader != null && leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs)
         {
             float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
-
-            if (logger.IsEnabled(LogLevel.Debug))
-            {
-                logger.LogDebug(
-                    $"[FFG] CantFollow: leader dist={dist:0.0}y " +
-                    $"(threshold={LeaderArrivedYards}y) waited={cantFollowSec:0.0}s localAge={leaderConnection.LocalAgeMs:0}ms");
-            }
 
             if (dist <= LeaderArrivedYards)
             {
@@ -679,10 +652,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             _navProgressCheckPosW = currentPos;
             _navActiveElapsed = TimeSpan.Zero;
-
-            if (logger.IsEnabled(LogLevel.Debug))
-                logger.LogDebug(
-                    $"[FFG] Nav progress {moved:0.0}y — resetting stuck timer.");
         }
 
         if (_navActiveElapsed.TotalSeconds >= NavigationActiveTimeoutSec)

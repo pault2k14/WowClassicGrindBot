@@ -104,8 +104,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     // Stale logging — avoid spamming every tick
     private bool _assistWasStaleLogged;
-    private DateTime _lastAssistDistanceLogUtc = DateTime.MinValue;
-    private const double AssistDistanceLogIntervalSec = 5.0;
 
     #region IRouteProvider
 
@@ -555,16 +553,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
                 bool shouldResume = assistStateStore.ShouldLeaderResumePatrol(
                     playerReader.WorldPos, LeaderResumeYards);
-
-                // Log distance periodically for debugging
-                double secSinceDistLog = (DateTime.UtcNow - _lastAssistDistanceLogUtc).TotalSeconds;
-                if (secSinceDistLog > AssistDistanceLogIntervalSec)
-                {
-                    _lastAssistDistanceLogUtc = DateTime.UtcNow;
-                    float dist = assistStateStore.GetNearestAssistDistanceYards(playerReader.WorldPos);
-                    if (dist < float.MaxValue)
-                        logger.LogDebug($"[FRG] Nearest assist dist={dist:0.0}y pauseThreshold={LeaderPauseYards}y resumeThreshold={LeaderResumeYards}y");
-                }
 
                 if (shouldPause && !_pausedByAssistDistance)
                 {
