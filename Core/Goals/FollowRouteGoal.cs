@@ -467,7 +467,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public override void Update()
     {
-        // ── Target finder suppression / watchdog (must run before early returns) ──
+        // ── Target finder suppression expiry (must run before early returns) ──
+        // Re-enable the side thread once the evade-blacklist suppression window elapses.
         if (_suppressTargetFinderUntilUtc != DateTime.MinValue &&
             DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
         {
@@ -476,13 +477,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             sideActivityManualReset.Set();
         }
 
-        if (!sideActivityManualReset.IsSet &&
-            _suppressTargetFinderUntilUtc == DateTime.MinValue &&
-            !bits.Target())
-        {
-            logger.LogInformation("[FRG] Thread watchdog: re-enabling side thread.");
-            sideActivityManualReset.Set();
-        }
+        // NOTE: The watchdog that previously re-enabled the side thread here was removed.
+        // It caused a race on bot stop: Active=false fires Abort() (resets the event) on
+        // the setter thread while GoapThread is still in Update() — the watchdog would
+        // immediately re-enable the event, leaving Thread_LookingForTarget running after
+        // the bot was stopped. Resume() is the correct and only place to re-enable the
+        // side thread; Abort() is the correct place to disable it.
 
         // ── Consume pause requests from side thread ──
         if (Interlocked.Exchange(ref _pauseNavRequested, 0) == 1)
@@ -644,6 +644,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             navigation.Resume();
             _pausedByLocalLogic = false;
+            // Re-enable the target finder. This handles the case where a target
+            // disappeared completely (bits.Target()=false) while _pausedByLocalLogic
+            // was true — the "target did not meet requirements" block above only fires
+            // when bits.Target() is true, so without this Set() the side thread would
+            // stay paused indefinitely. This is the specific scenario the broad watchdog
+            // was masking; fixing it here is safe because it only fires when
+            // !wantNavPaused (no live target warrants a pause).
+            sideActivityManualReset.Set();
         }
 
         // ── Assist return state machine ─────────────────────────────────────
