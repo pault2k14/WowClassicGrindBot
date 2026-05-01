@@ -20,23 +20,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     /// <summary>How many yards short of the leader the assist targets when navigating.
     /// Prevents the assist from running through/past the leader since WoW has no
-    /// player-vs-player collision. The bot stops this many yards behind the leader,
-    /// which is well within <see cref="FollowingMaxYards"/>.</summary>
-    private const float FollowStopShortYards = 5f;
+    /// player-vs-player collision. The bot stops this many yards behind the leader.
+    /// Must stay small enough to settle well within <see cref="FollowingMaxYards"/>
+    /// but not so small the assist oscillates back and forth through the leader position.
+    /// 3y is the practical floor given WoW Classic's character radius.</summary>
+    private const float FollowStopShortYards = 3f;
 
     // Distance thresholds (world yards, direction-agnostic XY distance)
     // -----------------------------------------------------------------------
 
-    /// <summary>Assist posts <see cref="BotStatus.Following"/> when closer than this.</summary>
-    public const float FollowingMaxYards = 10f;
+    /// <summary>Assist posts <see cref="BotStatus.Following"/> when closer than this.
+    /// Must comfortably exceed <see cref="FollowStopShortYards"/> (3y) so navigation
+    /// can complete and the Idle transition fires cleanly.</summary>
+    public const float FollowingMaxYards = 7f;
 
     /// <summary>Assist transitions to NavigatingToLeader when farther than this.
-    /// Raised to match <see cref="LeaderPauseYards"/> so both bot and leader react at the
-    /// same distance — the assist only runs when the leader also stops, eliminating
-    /// constant NavigatingToLeader cycles at moderate distances.
-    /// Dead-band is <see cref="FollowingMaxYards"/> (10y) to NavigatingMinYards (20y),
-    /// giving the user's preferred 5–20y comfortable follow range.</summary>
-    private const float NavigatingMinYards = 20f;
+    /// Set below <see cref="LeaderPauseYards"/> (20y) so the assist corrects course
+    /// before the leader's distance gate fires — the leader almost never needs to pause.
+    /// Dead-band is <see cref="FollowingMaxYards"/> (7y) to NavigatingMinYards (14y),
+    /// giving a natural 3–14y follow range.</summary>
+    private const float NavigatingMinYards = 14f;
 
     /// <summary>Leader must be this close before the assist exits CantFollow.
     /// MUST exceed <c>Navigation.POP_DIST</c> (3.6y) — the leader's navigation considers
@@ -44,7 +47,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// that threshold the leader would stop at ~3.5y and the assist would never see
     /// dist &lt;= LeaderArrivedYards, causing a permanent deadlock where neither bot moves.
     /// 6y gives comfortable clearance above POP_DIST while still being well inside the
-    /// dead-band zone (FollowingMaxYards = 10y).</summary>
+    /// dead-band zone (FollowingMaxYards = 7y).</summary>
     public const float LeaderArrivedYards = 6f;
 
     /// <summary>Minimum leader movement before the navigation waypoint is refreshed.</summary>
