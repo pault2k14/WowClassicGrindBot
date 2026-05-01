@@ -22,12 +22,14 @@ public sealed class LeaderConnectionStatus
     private readonly ILogger<LeaderConnectionStatus> logger;
     private readonly int staleThresholdMs;
 
-    // volatile so reads from the GOAP thread always see the latest reference
-    // written by the poll task without needing a lock.
     private volatile LeaderState? _lastLeaderState;
     private volatile bool _everConnected;
     private volatile bool _wasStale;
     private int _consecutiveFailures;
+
+    // Use the assist's own local clock to measure age — immune to clock skew
+    // between the leader and assist machines.
+    private DateTime _lastSuccessfulUpdateUtc = DateTime.MinValue;
 
     public LeaderConnectionStatus(
         ILogger<LeaderConnectionStatus> logger,
@@ -48,24 +50,27 @@ public sealed class LeaderConnectionStatus
     public LeaderState? LastLeaderState => _lastLeaderState;
 
     /// <summary>
-    /// True when at least one successful poll has completed AND the last
-    /// snapshot is not older than <see cref="PartyApiConfig.StaleThresholdMs"/>.
-    /// This is the gate for <see cref="Core.GOAP.GoapKey.assistshouldfollow"/>.
+    /// Milliseconds since the assist last received a successful GET response,
+    /// measured on the assist's own clock. This is immune to clock skew between
+    /// the leader and assist machines. Use this for all staleness checks.
     /// </summary>
-    public bool HasValidLeaderState
-    {
-        get
-        {
-            LeaderState? state = _lastLeaderState;
-            return state != null && state.AgeMs < staleThresholdMs;
-        }
-    }
+    public double LocalAgeMs => _lastSuccessfulUpdateUtc == DateTime.MinValue
+        ? double.MaxValue
+        : (DateTime.UtcNow - _lastSuccessfulUpdateUtc).TotalMilliseconds;
+
+    /// <summary>
+    /// True when at least one successful poll has completed AND the last
+    /// response was received within <see cref="PartyApiConfig.StaleThresholdMs"/>
+    /// on the assist's local clock (immune to cross-machine clock skew).
+    /// </summary>
+    public bool HasValidLeaderState => _everConnected && LocalAgeMs < staleThresholdMs;
 
     /// <summary>Called by <see cref="LeaderStatePoller"/> on a successful GET.</summary>
     public void UpdateLeaderState(LeaderState state)
     {
         bool wasStale = _wasStale;
         _lastLeaderState = state;
+        _lastSuccessfulUpdateUtc = DateTime.UtcNow; // local clock — immune to skew
         _consecutiveFailures = 0;
 
         if (!_everConnected)
@@ -96,10 +101,10 @@ public sealed class LeaderConnectionStatus
         if (nowStale && !_wasStale)
         {
             _wasStale = true;
-            double ageMs = _lastLeaderState?.AgeMs ?? double.MaxValue;
+            double localAge = LocalAgeMs;
             logger.LogWarning(
                 $"[LeaderConnection] Leader state is now STALE " +
-                $"(age={ageMs:0}ms > threshold={staleThresholdMs}ms). " +
+                $"(localAge={localAge:0}ms > threshold={staleThresholdMs}ms). " +
                 $"Consecutive failures={_consecutiveFailures}. " +
                 $"FollowFocusGoal will be blocked until contact is restored. " +
                 (ex != null ? $"Error: {ex.GetType().Name}: {ex.Message}" : "No response."));

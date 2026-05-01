@@ -299,7 +299,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     {
         LeaderState? leader = leaderConnection.LastLeaderState;
 
-        if (leader == null || leader.AgeMs > leaderConnection.StaleThresholdMs)
+        if (leader == null || leaderConnection.LocalAgeMs > leaderConnection.StaleThresholdMs)
         {
             // No fresh data — stay put, don't post Following.
             assistStatusProvider.CurrentStatus = BotStatus.Waiting;
@@ -312,11 +312,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (logger.IsEnabled(LogLevel.Debug))
         {
             logger.LogDebug(
-                $"[FFG] Idle: dist={dist:0.0}y to leader " +
-                $"status={leader.Status} age={leader.AgeMs:0}ms");
+                $"[FFG] Idle: dist={dist:0.0}y leader=({leader.MapX:0.00},{leader.MapY:0.00}) " +
+                $"status={leader.Status} localAge={leaderConnection.LocalAgeMs:0}ms");
         }
 
-        // Leader moved beyond the dead-band upper threshold → start navigating.
+        // Beyond dead-band upper threshold → start navigating.
         if (dist > NavigatingMinYards)
         {
             logger.LogInformation(
@@ -325,13 +325,40 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Within range — post Following.
-        if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+        if (dist < FollowingMaxYards)
         {
-            logger.LogInformation(
-                $"[FFG] Within {dist:0.0}y of leader — posting Following.");
-            assistStatusProvider.CurrentStatus = BotStatus.Following;
-            chatReader.AssistRequestReturn = false;
+            // Clearly within range — post Following.
+            if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+            {
+                logger.LogInformation(
+                    $"[FFG] Within {dist:0.0}y of leader (threshold={FollowingMaxYards}y) — posting Following.");
+                assistStatusProvider.CurrentStatus = BotStatus.Following;
+                chatReader.AssistRequestReturn = false;
+            }
+        }
+        else
+        {
+            // Dead-band: 10y ≤ dist ≤ 15y.
+            // Only maintain Following if we are ALREADY Following — this prevents
+            // small distance fluctuations from oscillating the leader's movement gate.
+            // If we are NOT already Following (e.g. first entry, or recovering from
+            // NavigatingToLeader), navigate to close the gap below FollowingMaxYards.
+            if (assistStatusProvider.CurrentStatus == BotStatus.Following)
+            {
+                // Stay Following — minor fluctuation, no action needed.
+                if (logger.IsEnabled(LogLevel.Debug))
+                {
+                    logger.LogDebug(
+                        $"[FFG] Dead-band ({dist:0.0}y) — maintaining Following.");
+                }
+            }
+            else
+            {
+                logger.LogInformation(
+                    $"[FFG] Dead-band ({dist:0.0}y) but not yet Following — navigating to close gap.");
+                StartNavigatingToLeader(leader);
+                return;
+            }
         }
 
         wait.Update();
@@ -349,11 +376,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         LeaderState? leader = leaderConnection.LastLeaderState;
 
-        if (leader == null || leader.AgeMs > leaderConnection.StaleThresholdMs)
+        if (leader == null || leaderConnection.LocalAgeMs > leaderConnection.StaleThresholdMs)
         {
             logger.LogWarning(
                 $"[FFG] NavigatingToLeader: leader state stale/missing " +
-                $"(age={leader?.AgeMs:0}ms) — holding current waypoint.");
+                $"(localAge={leaderConnection.LocalAgeMs:0}ms) — holding current waypoint.");
             assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
             navigation.Update(CancellationToken.None);
             wait.Update();
@@ -366,7 +393,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             logger.LogDebug(
                 $"[FFG] NavigatingToLeader: dist={dist:0.0}y " +
-                $"leaderStatus={leader.Status} age={leader.AgeMs:0}ms");
+                $"leaderStatus={leader.Status} localAge={leaderConnection.LocalAgeMs:0}ms");
         }
 
         // Within FollowingMaxYards → transition to Idle.
@@ -439,7 +466,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         double cantFollowSec = (DateTime.UtcNow - _cantFollowEnteredUtc).TotalSeconds;
 
-        if (leader != null && leader.AgeMs <= leaderConnection.StaleThresholdMs)
+        if (leader != null && leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs)
         {
             float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
 
@@ -447,7 +474,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             {
                 logger.LogDebug(
                     $"[FFG] CantFollow: leader dist={dist:0.0}y " +
-                    $"(threshold={LeaderArrivedYards}y) waited={cantFollowSec:0.0}s");
+                    $"(threshold={LeaderArrivedYards}y) waited={cantFollowSec:0.0}s localAge={leaderConnection.LocalAgeMs:0}ms");
             }
 
             if (dist <= LeaderArrivedYards)
