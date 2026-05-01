@@ -308,8 +308,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (navigation.HasWaypoint() || navigation.HasNext())
         {
-            logger.LogInformation("[FRG] Resume - preserving existing navigation progress");
-            navigation.Resume();
+            if (_pausedByAssistDistance)
+            {
+                // The distance gate was active when this Resume() was triggered (e.g. by a
+                // transient goal like BlacklistTargetGoal causing an Abort/Resume cycle).
+                // Re-apply the pause — do NOT restart navigation just because another goal
+                // briefly preempted FRG. Without this, the leader keeps moving forward every
+                // ~400ms as each BlacklistTarget cycle undoes the distance gate pause.
+                logger.LogInformation("[FRG] Resume - distance gate still active, re-applying pause.");
+                navigation.PausePathing();
+            }
+            else
+            {
+                logger.LogInformation("[FRG] Resume - preserving existing navigation progress");
+                navigation.Resume();
+            }
         }
         else if (classConfig.Mode == Mode.PartyLeader && assistIsFollowing)
         {

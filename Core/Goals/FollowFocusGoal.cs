@@ -31,9 +31,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     public const float FollowingMaxYards = 10f;
 
     /// <summary>Assist transitions to NavigatingToLeader when farther than this.
-    /// Dead-band between FollowingMaxYards and NavigatingMinYards prevents rapid
-    /// status switching when the leader is just ahead.</summary>
-    private const float NavigatingMinYards = 15f;
+    /// Raised to match <see cref="LeaderPauseYards"/> so both bot and leader react at the
+    /// same distance — the assist only runs when the leader also stops, eliminating
+    /// constant NavigatingToLeader cycles at moderate distances.
+    /// Dead-band is <see cref="FollowingMaxYards"/> (10y) to NavigatingMinYards (20y),
+    /// giving the user's preferred 5–20y comfortable follow range.</summary>
+    private const float NavigatingMinYards = 20f;
 
     /// <summary>Leader must be this close before the assist exits CantFollow.</summary>
     public const float LeaderArrivedYards = 2f;

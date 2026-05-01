@@ -19,6 +19,11 @@ public sealed class LeaderStateService
     private readonly AddonBits bits;
     private readonly IBotController botController;
 
+    // Cache the last valid world position. When the addon briefly returns (0,0,0)
+    // (e.g. during loading screens or bot deactivation), we return the cached position
+    // rather than sending the assist a bogus ~4400y distance (sqrt(700²+4350²) ≈ 4406y).
+    private Vector3 _lastValidWorldPos;
+
     public LeaderStateService(
         PlayerReader playerReader,
         AddonBits bits,
@@ -32,6 +37,18 @@ public sealed class LeaderStateService
     public LeaderState GetCurrentState()
     {
         Vector3 world = playerReader.WorldPos;
+
+        // Validate — (0,0,0) means the addon has not yet provided real data
+        // or has momentarily lost its feed (loading screen, logout transition).
+        if (world.X == 0 && world.Y == 0)
+        {
+            world = _lastValidWorldPos; // fall back to last known good position
+        }
+        else
+        {
+            _lastValidWorldPos = world;
+        }
+
         Vector3 map = playerReader.MapPos;
 
         return new LeaderState
