@@ -18,6 +18,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     public override float Cost => 19f;
 
     // -----------------------------------------------------------------------
+    /// <summary>How many yards short of the leader the assist targets when navigating.
+    /// Prevents the assist from running through/past the leader since WoW has no
+    /// player-vs-player collision. The bot stops this many yards behind the leader,
+    /// which is well within <see cref="FollowingMaxYards"/>.</summary>
+    private const float FollowStopShortYards = 5f;
+
     // Distance thresholds (world yards, direction-agnostic XY distance)
     // -----------------------------------------------------------------------
 
@@ -400,8 +406,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (dist < FollowingMaxYards && !navigation.IsApproachEscapeActive)
         {
             logger.LogInformation(
-                $"[FFG] Reached leader (dist={dist:0.0}y < {FollowingMaxYards}y) — entering Idle.");
+                $"[FFG] Reached follow position (dist={dist:0.0}y < {FollowingMaxYards}y) — entering Idle.");
             navigation.Stop();
+            input.StopForward(true); // explicitly stop — prevents momentum carry-through
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
@@ -414,10 +421,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (waypointDrift > WaypointUpdateThresholdYards)
         {
             logger.LogDebug(
-                $"[FFG] Leader moved {waypointDrift:0.0}y — refreshing waypoint " +
-                $"to ({leader.MapX:0.00},{leader.MapY:0.00}).");
+                $"[FFG] Leader moved {waypointDrift:0.0}y — refreshing waypoint.");
             _lastNavigatedToLeaderWorldPos = leader.WorldPos;
-            navigation.SetSingleWaypoint(leader.MapPosNoZ);
+            navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(leader));
         }
 
         // Record position for TryUnstuck direction.
@@ -516,9 +522,44 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navTimerInit = false;
         _navActiveElapsed = TimeSpan.Zero;
 
-        navigation.SetSingleWaypoint(leader.MapPosNoZ);
+        navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(leader));
         EnterState(NavState.NavigatingToLeader);
         assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
+    }
+
+    /// <summary>
+    /// Returns a map-space position that is <see cref="FollowStopShortYards"/> behind
+    /// the leader (toward the assist), preventing the assist from running through and
+    /// past the leader. WoW has no player-vs-player collision, so without this offset
+    /// the assist would overshoot the leader's position at running speed.
+    /// <para>
+    /// Direction is computed in map space and scaled using the current
+    /// <see cref="WorldMapArea"/> bounds for accuracy across different zones.
+    /// </para>
+    /// </summary>
+    private Vector3 ComputeFollowTargetMapPos(LeaderState leader)
+    {
+        // Direction from leader toward assist in map space.
+        Vector3 dirToAssist = playerReader.MapPosNoZ - leader.MapPosNoZ;
+        float mapLen = MathF.Sqrt(dirToAssist.X * dirToAssist.X + dirToAssist.Y * dirToAssist.Y);
+
+        if (mapLen < 0.001f)
+            return leader.MapPosNoZ; // co-located — navigate to exact position
+
+        // Approximate world-units-per-map-unit from WorldMapArea bounds.
+        // Average of X and Y scales; good enough for small offsets.
+        var wma = playerReader.WorldMapArea;
+        float avgWorldPerMap = wma != null
+            ? (MathF.Abs(wma.LocRight - wma.LocLeft) + MathF.Abs(wma.LocBottom - wma.LocTop)) / 200f
+            : 44f; // sensible fallback for Azeroth zones
+
+        float offsetMapUnits = FollowStopShortYards / avgWorldPerMap;
+
+        // Target = leader's map position shifted toward the assist by offsetMapUnits.
+        return new Vector3(
+            leader.MapPosNoZ.X + (dirToAssist.X / mapLen) * offsetMapUnits,
+            leader.MapPosNoZ.Y + (dirToAssist.Y / mapLen) * offsetMapUnits,
+            0f);
     }
 
     private void EnterCantFollow()
@@ -682,6 +723,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         if (dist < FollowingMaxYards)
         {
+            navigation.Stop();
+            input.StopForward(true);
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
@@ -689,14 +732,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Leader moved while we were navigating — try once more.
+        // Leader moved while we were navigating — try once more to the updated position.
         if (_navAttempt == 0)
         {
             logger.LogWarning(
                 $"[FFG] Arrived but still {dist:0.0}y from leader — refreshing waypoint.");
             _navAttempt = 1;
             _lastNavigatedToLeaderWorldPos = currentLeader.WorldPos;
-            navigation.SetSingleWaypoint(currentLeader.MapPosNoZ);
+            navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(currentLeader));
             return;
         }
 

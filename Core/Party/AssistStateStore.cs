@@ -104,6 +104,20 @@ public sealed class AssistStateStore
         return false;
     }
 
+    /// <summary>
+    /// True if any non-stale assist is actively navigating toward the leader
+    /// (<see cref="BotStatus.NavigatingToLeader"/>).
+    /// The leader should continue patrolling while this is true — the assist is
+    /// catching up and the distance gate already handles pausing if they fall too far.
+    /// </summary>
+    public bool AnyAssistNavigating()
+    {
+        foreach (AssistState s in _states.Values)
+            if (!IsStale(s) && s.Status == BotStatus.NavigatingToLeader)
+                return true;
+        return false;
+    }
+
     public bool AnyAssistStuck()
     {
         foreach (AssistState s in _states.Values)

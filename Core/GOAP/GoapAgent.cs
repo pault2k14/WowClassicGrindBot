@@ -433,8 +433,10 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.forcedfollow: " + chatReader.ForcedFollow);
         logger.LogInformation("GoapKey.assistisfollowing: " + assistIsFollowing);
         logger.LogInformation("GoapKey.assistrequestreturn: " + assistCantFollow);
+        bool assistNavigatingLog = classConfig.Mode == Mode.PartyLeader
+            && assistStateStore.AnyAssistNavigating();
         logger.LogInformation("GoapKey.assistrequestreturnorisfollowing: " +
-            (assistIsFollowing || assistCantFollow || _evadeLeaderWaiting));
+            (assistIsFollowing || assistCantFollow || assistNavigatingLog || _evadeLeaderWaiting));
         logger.LogInformation("GoapKey.assistshouldfollow: " + (
             leaderConnection.HasValidLeaderState &&
             (chatReader.AssistRequestReturn ||
@@ -534,8 +536,20 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.assistisfollowing]  = assistIsFollowing;
         WorldState[GoapKey.assistrequestreturn] = assistCantFollow;
 
+        // assistrequestreturnorisfollowing gates FollowRouteGoal on the leader.
+        // Must be true while the assist is Following, CantFollow, OR NavigatingToLeader.
+        // Without NavigatingToLeader: the leader enters NO PLAN the moment the assist
+        // transitions from Following to NavigatingToLeader (both AnyAssistIsFollowing
+        // and AnyAssistCantFollow are false), causing the stop/start patrol loop.
+        // The distance gate in FollowRouteGoal.Update() already pauses the leader if
+        // the assist falls beyond LeaderPauseYards, so keeping this flag true during
+        // NavigatingToLeader is safe — the leader just continues patrolling at a normal
+        // pace while the assist catches up.
+        bool assistNavigating = classConfig.Mode == Mode.PartyLeader
+            && assistStateStore.AnyAssistNavigating();
+
         WorldState[GoapKey.assistrequestreturnorisfollowing] =
-            assistIsFollowing || assistCantFollow || _evadeLeaderWaiting;
+            assistIsFollowing || assistCantFollow || assistNavigating || _evadeLeaderWaiting;
 
         // ── Assist side: gate on leader API reachability ──────────────────
         // FollowFocusGoal requires assistshouldfollow=true.

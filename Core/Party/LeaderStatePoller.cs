@@ -30,9 +30,11 @@ public sealed class LeaderStatePoller : IReader
     private readonly CancellationToken _shutdownToken;
 
     private DateTime _lastPollUtc = DateTime.MinValue;
+    private int _pollInFlight;
 
-    // Guard against spawning a new poll task before the previous one completes.
-    private int _pollInFlight; // 0 = idle, 1 = task running
+    // Only log when something meaningful changes on the leader side.
+    private BotStatus _lastLoggedStatus = (BotStatus)(-1); // sentinel: never matched
+    private bool _hasLoggedFirstConnection;
 
     public LeaderStatePoller(
         ILogger<LeaderStatePoller> logger,
@@ -84,13 +86,17 @@ public sealed class LeaderStatePoller : IReader
                 {
                     leaderConnection.UpdateLeaderState(state);
 
-                    if (logger.IsEnabled(LogLevel.Debug))
+                    // Only log on first contact or when the leader's status changes —
+                    // polling at 4 Hz would otherwise flood the log with identical lines.
+                    if (!_hasLoggedFirstConnection || state.Status != _lastLoggedStatus)
                     {
-                        logger.LogDebug(
-                            $"[LeaderStatePoller] GET ok: status={state.Status} " +
+                        _hasLoggedFirstConnection = true;
+                        _lastLoggedStatus = state.Status;
+                        logger.LogInformation(
+                            $"[LeaderStatePoller] Leader status changed: {state.Status} " +
                             $"health={state.HealthPercent}% " +
                             $"mapPos=({state.MapX:0.00},{state.MapY:0.00}) " +
-                            $"age={state.AgeMs:0}ms");
+                            $"localAge={leaderConnection.LocalAgeMs:0}ms");
                     }
                 }
                 else
