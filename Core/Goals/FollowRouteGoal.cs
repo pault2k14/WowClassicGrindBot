@@ -578,6 +578,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         $"status={stuckAssist?.Status.ToString() ?? "TooFar"}");
 
                     _pausedByAssistDistance = true;
+                    // StopMovement must be called before PausePathing.
+                    // PausePathing() suspends navigation and stops steering (left/right keys)
+                    // but does NOT release the forward movement key — without StopMovement()
+                    // the character keeps running forward at walking speed into obstacles.
+                    // Abort() calls both; the distance gate must do the same.
+                    navigation.StopMovement();
                     navigation.PausePathing();
 
                     // If assist is CantFollow, navigate to them.
