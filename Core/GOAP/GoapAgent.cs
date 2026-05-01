@@ -224,10 +224,18 @@ public sealed partial class GoapAgent : IDisposable
             // ── Leader side: read assist state from API store ──────────────
             if (classConfig.Mode == Mode.PartyLeader)
             {
-                bool currentAssistIsFollowing = assistStateStore.AnyAssistIsFollowing();
-                if (currentAssistIsFollowing != previousAssistIsFollowing)
+                // Track "assist present" = Following OR NavigatingToLeader.
+                // Previously tracking only AnyAssistIsFollowing() caused AssistIsNotFollowing()
+                // to fire on every Following→NavigatingToLeader transition, which triggered
+                // FRG.Abort() → navigation paused → stop/start loop every ~1 second.
+                // The leader should only stop when the assist is TRULY unavailable
+                // (stale, CantFollow), not just momentarily catching up.
+                bool currentAssistPresent =
+                    assistStateStore.AnyAssistIsFollowing() || assistStateStore.AnyAssistNavigating();
+
+                if (currentAssistPresent != previousAssistIsFollowing)
                 {
-                    if (currentAssistIsFollowing)
+                    if (currentAssistPresent)
                     {
                         AssistIsFollowing();
                         previousAssistIsFollowing = true;
@@ -235,15 +243,16 @@ public sealed partial class GoapAgent : IDisposable
                         if (_evadeLeaderWaiting && DateTime.UtcNow >= _evadeRecoveryUntilUtc)
                         {
                             _evadeLeaderWaiting = false;
-                            logger.LogInformation("[GoapAgent] Assist Following after evade recovery — clearing evadeLeaderWaiting.");
+                            logger.LogInformation("[GoapAgent] Assist available after evade recovery — clearing evadeLeaderWaiting.");
                         }
                         else if (_evadeLeaderWaiting)
                         {
-                            logger.LogInformation("[GoapAgent] Assist Following during evade window — keeping evadeLeaderWaiting.");
+                            logger.LogInformation("[GoapAgent] Assist available during evade window — keeping evadeLeaderWaiting.");
                         }
                     }
                     else
                     {
+                        // Assist is genuinely unavailable (stale or no fresh status) — abort.
                         AssistIsNotFollowing();
                         previousAssistIsFollowing = false;
                     }

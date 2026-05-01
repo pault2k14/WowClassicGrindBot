@@ -361,14 +361,22 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             switch (g.Key)
             {
                 case GoapKey.assistisfollowing:
-                    if (!assistStateStore.AnyAssistIsFollowing())
+                    if (!assistStateStore.AnyAssistIsFollowing() && !assistStateStore.AnyAssistNavigating())
                     {
-                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist stopped following");
+                        // Assist is genuinely unavailable — not following and not navigating toward us.
+                        // This fires only when the assist goes stale or enters CantFollow with no
+                        // navigation activity. It does NOT fire during normal Following→NavigatingToLeader
+                        // transitions (those are suppressed in GoapAgent.GoapThread by Fix A).
+                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist truly unavailable (not following, not navigating) — aborting.");
                         Abort();
                     }
                     else
                     {
-                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist is following again");
+                        // Assist is following or actively catching up — resume patrol.
+                        logger.LogInformation(
+                            $"FollowRouteGoal: OnGoapEvent - assist available " +
+                            $"(following={assistStateStore.AnyAssistIsFollowing()} " +
+                            $"navigating={assistStateStore.AnyAssistNavigating()}) — resuming.");
 
                         bool wasWaiting = _assistWaitingForFollowing;
                         ClearAssistReturnState();
