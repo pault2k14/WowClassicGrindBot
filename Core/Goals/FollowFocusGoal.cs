@@ -426,13 +426,36 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 $"leaderStatus={leader.Status} localAge={leaderConnection.LocalAgeMs:0}ms");
         }
 
-        // Within FollowingMaxYards → transition to Idle.
+        // Within FollowingMaxYards → transition to Idle, post Following.
         if (dist < FollowingMaxYards && !navigation.IsApproachEscapeActive)
         {
             logger.LogInformation(
                 $"[FFG] Reached follow position (dist={dist:0.0}y < {FollowingMaxYards}y) — entering Idle.");
             navigation.Stop();
             input.StopForward(true); // explicitly stop — prevents momentum carry-through
+            ResetNavState();
+            EnterState(NavState.Idle);
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            assistStatusProvider.CantFollow = false;
+            return;
+        }
+
+        // Back within dead-band (FollowingMaxYards ≤ dist < NavigatingMinYards) → Idle.
+        // Without this, the assist can be trapped in NavigatingToLeader indefinitely when
+        // the leader is on a circular/curved route moving at a similar speed:
+        //   - The assist makes position progress (3y/step) → stuck timer never fires
+        //   - dist oscillates just above FollowingMaxYards (7y) → never exits NavigatingToLeader
+        //   - Leader's gap eventually grows to 80y while assist keeps chasing
+        // By exiting NavigatingToLeader as soon as dist falls below NavigatingMinYards (the
+        // same threshold that triggered navigation), we return to Idle symmetrically.
+        // Posting Following tells the leader "I'm close enough — keep moving". The dead-band
+        // logic in Idle then maintains Following until dist grows beyond NavigatingMinYards again.
+        if (dist < NavigatingMinYards && !navigation.IsApproachEscapeActive)
+        {
+            logger.LogInformation(
+                $"[FFG] Back within dead-band ({dist:0.0}y < {NavigatingMinYards}y) — returning to Idle.");
+            navigation.Stop();
+            input.StopForward(true);
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
@@ -778,7 +801,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Leader moved while we were navigating — try once more to the updated position.
+        // Arrived at destination and dist is in the dead-band — accept as close enough.
+        // This handles routes that terminate in the dead-band zone (7-14y): without this,
+        // OnDestinationReached would unconditionally retry or escalate to CantFollow even
+        // though the assist is at a perfectly acceptable following distance.
+        if (dist < NavigatingMinYards)
+        {
+            logger.LogInformation(
+                $"[FFG] Destination reached within dead-band (dist={dist:0.0}y < {NavigatingMinYards}y) — returning to Idle.");
+            navigation.Stop();
+            input.StopForward(true);
+            ResetNavState();
+            EnterState(NavState.Idle);
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            assistStatusProvider.CantFollow = false;
+            return;
+        }
         if (_navAttempt == 0)
         {
             logger.LogWarning(
@@ -802,7 +840,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (leader == null) return;
 
         float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
-        if (dist < FollowingMaxYards)
+        if (dist < NavigatingMinYards)
         {
             navigation.Stop();
             ResetNavState();
