@@ -474,6 +474,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         navigation.RecordApproachPosition(playerReader.WorldPos);
         navigation.Update(CancellationToken.None);
 
+        // A navigation event (OnDestinationReached / OnWayPointReached) may have
+        // fired during Update() and transitioned the state to Idle. Return
+        // immediately to avoid overwriting the status set by the callback and to
+        // avoid running stale NavigatingToLeader logic on an already-Idle state.
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
         // ── Escape handling ─────────────────────────────────────────────────
         if (navigation.IsApproachEscapeActive)
         {
@@ -497,9 +504,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             navigation.SetSingleWaypoint(leader.MapPosNoZ);
         }
 
-        assistStatusProvider.CurrentStatus = navigation.IsApproachEscapeActive
-            ? BotStatus.Stuck
-            : BotStatus.NavigatingToLeader;
+        // Guard against overwriting Following — set by the NavigatingExitYards block
+        // above (when dist < 10y) or by nav callbacks before the _navState guard above.
+        // Without this guard, the assignment runs every tick and resets Following →
+        // NavigatingToLeader, causing the NavigatingExitYards block to re-log and
+        // re-set Following on every single tick (log spam + HTTP noise).
+        if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+        {
+            assistStatusProvider.CurrentStatus = navigation.IsApproachEscapeActive
+                ? BotStatus.Stuck
+                : BotStatus.NavigatingToLeader;
+        }
 
         wait.Update();
     }
