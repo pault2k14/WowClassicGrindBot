@@ -1,4 +1,5 @@
 using Core.GOAP;
+using Core.Party;
 
 using Microsoft.Extensions.Logging;
 
@@ -33,6 +34,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly ClassConfiguration classConfig;
     private readonly ChatReader chatReader;
     private readonly Navigation navigation;
+    private readonly AssistStateStore assistStateStore;
     
     private long approachStart;
 
@@ -64,7 +66,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         CombatLog combatLog,
         ClassConfiguration classConfig,
         ChatReader chatReader,
-        Navigation navigation)
+        Navigation navigation,
+        AssistStateStore assistStateStore)
         : base(nameof(ApproachTargetGoal))
     {
         this.logger = logger;
@@ -82,6 +85,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.classConfig = classConfig;
         this.chatReader = chatReader;
         this.navigation = navigation;
+        this.assistStateStore = assistStateStore;
 
         if(classConfig.Mode == Mode.PartyLeader)
         {
@@ -317,9 +321,17 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if(!chatReader.AssistIsFollowing && classConfig.Mode == Mode.PartyLeader)
+        if (classConfig.Mode == Mode.PartyLeader &&
+            !assistStateStore.AnyAssistIsFollowing() &&
+            !assistStateStore.AnyAssistNavigating())
         {
-            logger.LogInformation("ApproachTargetGoal: Not approaching due to assist target not following");
+            // In API mode the assist reports its status via PartyStatePublisher POSTs.
+            // chatReader.AssistIsFollowing is never set in the new system — only the
+            // AssistStateStore reflects whether the assist is Following or NavigatingToLeader.
+            // Block approach while the assist is genuinely unavailable (not following and
+            // not actively catching up). Allow approach when assist is Following (within 10y)
+            // OR NavigatingToLeader (actively closing the gap).
+            logger.LogInformation("ApproachTargetGoal: Not approaching — assist is not following or navigating.");
             return;
         }
 
