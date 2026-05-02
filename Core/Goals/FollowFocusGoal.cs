@@ -402,18 +402,30 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
 
             // Dead-band: NavigatingExitYards ≤ dist ≤ NavigatingMinYards.
-            // Only maintain Following if we are ALREADY Following — this prevents
-            // small distance fluctuations from oscillating the leader's movement gate.
-            // If we are NOT already Following (e.g. first entry, or recovering from
-            // NavigatingToLeader), navigate to close the gap below FollowingMaxYards.
-            if (assistStatusProvider.CurrentStatus == BotStatus.Following)
+            // Only stay silent here if we are ALREADY Following AND rendezvous is confirmed.
+            // If rendezvous is not confirmed, we must navigate to close the gap to < 7y —
+            // otherwise the leader will patrol away during the silent wait, making rendezvous
+            // impossible for the entire next patrol leg (causing position-chasing instead of
+            // waypoint-sharing, which then leads to the assist falling further and further behind).
+            //
+            // This commonly occurs when FFG re-enters after combat/loot with the assist in the
+            // dead-band and status still set to Following from the previous session. Without this
+            // fix, UpdateIdle silently waits 3-4s while the leader runs to 14y+, then the assist
+            // starts chasing but can never close to < 7y before the next combat stop.
+            if (assistStatusProvider.CurrentStatus == BotStatus.Following && _rendezvousConfirmed)
             {
-                // Stay Following — minor fluctuation, no action needed.
+                // Already Following with confirmed rendezvous — minor distance fluctuation, stay put.
             }
             else
             {
+                // Navigate to close the gap: either status is not yet Following, or rendezvous
+                // has not been confirmed since the last OnEnter. Both cases require reaching
+                // < FollowingMaxYards (7y) before the leader pulls too far ahead.
+                string reason = !_rendezvousConfirmed
+                    ? "closing gap to confirm rendezvous"
+                    : "not yet Following";
                 logger.LogInformation(
-                    $"[FFG] Dead-band ({dist:0.0}y) but not yet Following — navigating to close gap.");
+                    $"[FFG] Dead-band ({dist:0.0}y) — {reason}.");
                 StartNavigatingToLeader(leader);
                 return;
             }
@@ -884,10 +896,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Arrived at destination and dist is in the dead-band — accept as close enough.
-        // This handles routes that terminate in the dead-band zone (7-14y): without this,
-        // OnDestinationReached would unconditionally retry or escalate to CantFollow even
-        // though the assist is at a perfectly acceptable following distance.
+        // Arrived within the dead-band (7-14y) — close enough; return to Idle.
+        // Without this, the assist would immediately start navigating again from Idle,
+        // causing rapid oscillation when the leader is just slightly ahead.
         if (dist < NavigatingMinYards)
         {
             logger.LogInformation(
@@ -900,19 +911,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             assistStatusProvider.CantFollow = false;
             return;
         }
-        if (_navAttempt == 0)
-        {
-            logger.LogWarning(
-                $"[FFG] Arrived but still {dist:0.0}y from leader — refreshing waypoint.");
-            _navAttempt = 1;
-            Vector3 retryTarget = GetNavigationTarget(currentLeader);
-            _lastNavigatedToLeaderWorldPos = retryTarget;
-            navigation.SetSingleWaypoint(retryTarget);
-            return;
-        }
 
-        logger.LogWarning("[FFG] Arrived at destination but still out of range after retry — escalating to CantFollow.");
-        EnterCantFollow();
+        // The leader has moved beyond NavigatingMinYards since we set the waypoint.
+        // This is NOT a navigation failure — the pather successfully reached the target.
+        // The leader is simply patrolling. Keep chasing; let TickNavActiveTimeout (30s)
+        // be the sole CantFollow escalation path for a genuinely unreachable leader.
+        logger.LogWarning(
+            $"[FFG] Arrived but leader moved on ({dist:0.0}y) — refreshing waypoint to current position.");
+        Vector3 retryTarget = GetNavigationTarget(currentLeader);
+        _lastNavigatedToLeaderWorldPos = retryTarget;
+        navigation.SetSingleWaypoint(retryTarget);
     }
 
     private void Navigation_OnWayPointReached()
