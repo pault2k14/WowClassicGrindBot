@@ -90,8 +90,15 @@ public sealed class AssistStateStore
 
     public bool AnyAssistIsFollowing()
     {
+        // NavigatingToLeader is treated as Following for goal-selection purposes:
+        // the assist is actively closing the gap and will be in position shortly.
+        // This prevents the FRG ↔ ATG oscillation that occurred because ATG's
+        // precondition (assistisfollowing=true) was violated the moment the leader
+        // moved toward a mob and the assist transitioned Following → NavigatingToLeader,
+        // causing the GOAP planner to kill ATG after ~1.5s and reselect FRG — never
+        // giving ATG enough time to reach the target.
         foreach (AssistState s in _states.Values)
-            if (!IsStale(s) && s.Status == BotStatus.Following)
+            if (!IsStale(s) && (s.Status == BotStatus.Following || s.Status == BotStatus.NavigatingToLeader))
                 return true;
         return false;
     }

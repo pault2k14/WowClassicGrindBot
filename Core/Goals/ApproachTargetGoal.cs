@@ -80,7 +80,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.assistStateStore = assistStateStore;
         this.assistStatusProvider = assistStatusProvider;
 
-        if(classConfig.Mode == Mode.PartyLeader)
+        if (classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.assistisfollowing, true);
             AddPrecondition(GoapKey.assistrequestreturn, false);
