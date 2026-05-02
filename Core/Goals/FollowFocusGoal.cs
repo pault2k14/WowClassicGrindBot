@@ -532,7 +532,15 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         // Record position for TryUnstuck direction.
-        navigation.RecordApproachPosition(playerReader.WorldPos);
+        // NOTE: RecordApproachPosition is intentionally NOT called here.
+        // That call is for mob-approach scenarios (ATG/PTG) where TryUnstuck()
+        // needs a direction vector toward the mob. Calling it during leader
+        // navigation records the direction of travel toward the leader, so when
+        // TryUnstuck() fires it projects a 10y escape *further away from the
+        // leader*, overshooting by 47+ yards and then adding a stuck rect that
+        // causes blacklist detours for the rest of the run.
+        // Navigation.Update() already handles route stuck recovery internally
+        // via the chase watchdog and TryRouteUnstuck().
         navigation.Update(CancellationToken.None);
 
         // A navigation event (OnDestinationReached / OnWayPointReached) may have
@@ -541,19 +549,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // avoid running stale NavigatingToLeader logic on an already-Idle state.
         if (_navState != NavState.NavigatingToLeader)
             return;
-
-        // ── Escape handling ─────────────────────────────────────────────────
-        if (navigation.IsApproachEscapeActive)
-        {
-            assistStatusProvider.CurrentStatus = BotStatus.Stuck;
-            if (!navigation.TryUnstuck())
-                InjectPhysStuckEscape();
-            return;
-        }
-
-        // ── Idle stuck detection ────────────────────────────────────────────
-        if (navigation.HasWaypoint() || navigation.HasNext())
-            TickIdleStuckDetection();
 
         // ── Co-located terrain fallback ─────────────────────────────────────
         if (!navigation.HasWaypoint() && !navigation.HasNext() && !navigation.IsApproachEscapeActive
@@ -573,9 +568,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // re-set Following on every single tick (log spam + HTTP noise).
         if (assistStatusProvider.CurrentStatus != BotStatus.Following)
         {
-            assistStatusProvider.CurrentStatus = navigation.IsApproachEscapeActive
-                ? BotStatus.Stuck
-                : BotStatus.NavigatingToLeader;
+            assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
         }
 
         wait.Update();
