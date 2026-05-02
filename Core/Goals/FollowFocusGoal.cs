@@ -585,6 +585,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             logger.LogWarning(
                 "[FFG] No active waypoint but still far from leader — refreshing waypoint.");
             Vector3 fallbackTarget = GetNavigationTarget(leader);
+
+            // Same co-located guard as Navigation_OnDestinationReached: if the target is
+            // within POP_DIST, setting it would produce an immediate pop with no movement.
+            float fallbackDist = playerReader.WorldPos.WorldDistanceXYTo(fallbackTarget);
+            if (fallbackDist < Navigation.POP_DIST)
+            {
+                logger.LogWarning(
+                    $"[FFG] Fallback target co-located ({fallbackDist:0.0}y < {Navigation.POP_DIST}y) — " +
+                    "stale shared waypoint; reverting to position-chasing.");
+                _rendezvousConfirmed = false;
+                _lastSharedWaypointW = default;
+                fallbackTarget = ComputeFollowTargetMapPos(leader);
+            }
+
             _lastNavigatedToLeaderWorldPos = fallbackTarget;
             navigation.SetSingleWaypoint(fallbackTarget);
         }
@@ -958,6 +972,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         logger.LogWarning(
             $"[FFG] Arrived but leader moved on ({dist:0.0}y) — refreshing waypoint to current position.");
         Vector3 retryTarget = GetNavigationTarget(currentLeader);
+
+        // Guard: waypoint-sharing can return the patrol waypoint we just arrived at if the
+        // leader hasn't published a new one yet. Navigation.RefillRouteToNextWaypoint calls
+        // IsAtFinalWaypoint (reach ≈ 3.35y) — a co-located target is immediately popped
+        // without producing movement. With destinationReachedLatched=true the
+        // CompleteDestinationReached inside that pop path is a no-op, so navigation exits
+        // with HasWaypoint()=false, triggering the fallback loop below every tick indefinitely.
+        // Fix: if the target is within POP_DIST the shared waypoint is stale — drop
+        // waypoint-sharing and navigate to the leader's live position instead.
+        float retryDist = playerReader.WorldPos.WorldDistanceXYTo(retryTarget);
+        if (retryDist < Navigation.POP_DIST)
+        {
+            logger.LogWarning(
+                $"[FFG] Retry target co-located ({retryDist:0.0}y < {Navigation.POP_DIST}y) — " +
+                "stale shared waypoint; reverting to position-chasing.");
+            _rendezvousConfirmed = false;
+            _lastSharedWaypointW = default;
+            retryTarget = ComputeFollowTargetMapPos(currentLeader);
+        }
+
         _lastNavigatedToLeaderWorldPos = retryTarget;
         navigation.SetSingleWaypoint(retryTarget);
     }
