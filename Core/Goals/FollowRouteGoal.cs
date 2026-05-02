@@ -123,7 +123,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     /// </summary>
     private bool _syncPauseActive;
     private DateTime _syncPauseStartUtc;
-    private const double SyncPauseTimeoutSec = 4.0;
+    private const double SyncPauseTimeoutSec = 1.0;
 
     // Stale logging — avoid spamming every tick
     private bool _assistWasStaleLogged;
@@ -357,16 +357,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 // two halves ensure rendezvous is confirmed before the leader pulls away.
                 if (classConfig.Mode == Mode.PartyLeader && assistIsFollowing)
                 {
-                    // Sync-pause: hold at the current position until the assist begins
-                    // navigating toward the leader before we start patrol. Without this,
-                    // both bots are co-located but the leader immediately starts moving at
-                    // 7y/s while the assist stays in FFG's Idle dead-band for up to 2 seconds
-                    // (14y / 7y/s) — giving the leader a 14y head start every time FRG
-                    // resumes. The FFG Patrolling-transition detection reacts within one
-                    // API poll cycle (~250ms), putting AnyAssistNavigating=True on the wire
-                    // and resolving this pause so both bots start moving together.
+                    // Publish the current top patrol waypoint BEFORE pausing. Abort()
+                    // called ClearTargetWaypoint(), so HasTargetWaypoint=false during the
+                    // pause unless we explicitly re-publish. FFG's leaderJustPublishedWaypoint
+                    // detection (false→true transition) fires within one API poll (~250ms)
+                    // and sets NavigatingToLeader → AnyAssistNavigating()=true → fast resolve.
+                    PublishPatrolWaypoint();
                     logger.LogInformation(
-                        "[FRG] Resume - sync-pause: waiting for assist to begin navigating before starting patrol.");
+                        "[FRG] Resume - sync-pause (existing waypoints): published top patrol waypoint, " +
+                        "waiting for assist to begin navigating before resuming patrol.");
                     _syncPauseActive = true;
                     _syncPauseStartUtc = DateTime.UtcNow;
                     navigation.PausePathing();
@@ -379,10 +378,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else if (classConfig.Mode == Mode.PartyLeader && assistIsFollowing)
         {
-            logger.LogInformation("[FRG] Resume - AssistIsFollowing branch -> RefillWaypoints");
+            // Load the closest patrol waypoint and publish it BEFORE sync-pausing.
+            // This gives FFG a HasTargetWaypoint false→true transition within one API
+            // poll (~250ms), triggering leaderJustPublishedWaypoint → NavigatingToLeader
+            // → AnyAssistNavigating()=true → sync-pause resolves fast.
+            // Without the sync-pause the leader would sprint away immediately; without
+            // the pre-publish the assist can't react until after the 1s timeout expires.
+            logger.LogInformation(
+                "[FRG] Resume - AssistIsFollowing branch (no existing waypoints): loading waypoint, " +
+                "publishing, then sync-pausing until assist begins navigating.");
             ClearAssistReturnState();
             navigation.ClearAllRoutes();
-            RefillWaypoints(true);
+            RefillWaypoints(true);   // sets waypoints AND calls PublishPatrolWaypoint()
+            _syncPauseActive = true;
+            _syncPauseStartUtc = DateTime.UtcNow;
+            navigation.PausePathing(); // hold — don't start moving yet
         }
         else if (classConfig.Mode == Mode.PartyLeader && assistCantFollow)
         {

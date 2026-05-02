@@ -142,6 +142,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private BotStatus? _lastLeaderStatus;
 
+    /// <summary>
+    /// Tracks whether the leader had a published patrol waypoint on the previous
+    /// UpdateIdle tick. A false→true transition (<c>leaderJustPublishedWaypoint</c>)
+    /// means the leader just armed its patrol (FRG sync-pause resolved + RefillWaypoints
+    /// published the first waypoint). We immediately break the dead-band and start
+    /// navigating so both bots begin moving within one API poll cycle (~250ms) of
+    /// each other instead of the assist waiting for the 14y dead-band exit.
+    /// Initialised to <c>false</c> in <see cref="OnEnter"/> so the very first tick
+    /// where the leader has a waypoint always fires the detection.
+    /// </summary>
+    private bool _lastLeaderHadTargetWaypoint;
+
     /// <summary>Last shared waypoint world position the assist navigated toward.
     /// Used to detect when the leader advances to a new waypoint so navigation
     /// can be refreshed without spamming SetSingleWaypoint every tick.</summary>
@@ -256,6 +268,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _rendezvousConfirmed = false;
         _lastSharedWaypointW = default;
         _lastLeaderStatus = null; // force Patrolling-transition check on first UpdateIdle tick
+        _lastLeaderHadTargetWaypoint = false; // force waypoint-published detection on first UpdateIdle tick
 
         if (input.IsKeyDown(input.ForwardKey))
             input.StopForward(true);
@@ -402,6 +415,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // Keep the transition tracker up to date so that crossing from < 7y into
             // the dead-band doesn't produce a false leaderJustResumedPatrol trigger.
             _lastLeaderStatus = leader.Status;
+
+            // Break the dead-band when the leader just published a patrol waypoint.
+            // This means FRG's sync-pause resolved and RefillWaypoints ran: the leader
+            // is about to start moving. React immediately so both bots begin patrol
+            // together instead of the assist waiting silently until the leader reaches
+            // NavigatingMinYards (14y / 7y/s ≈ 2s delay at full patrol speed).
+            bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint;
+            _lastLeaderHadTargetWaypoint = leader.HasTargetWaypoint;
+            if (leaderJustPublishedWaypoint && leader.Status == BotStatus.Patrolling)
+            {
+                logger.LogInformation(
+                    $"[FFG] Leader published patrol waypoint while co-located (dist={dist:0.0}y) — " +
+                    "breaking dead-band: starting navigation immediately.");
+                StartNavigatingToLeader(leader);
+                return;
+            }
         }
         else
         {
@@ -428,13 +457,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 _lastLeaderStatus.HasValue &&              // not the initialisation sentinel (null)
                 _lastLeaderStatus != BotStatus.Patrolling; // genuine non→Patrol transition
 
+            // leaderJustPublishedWaypoint fires when HasTargetWaypoint transitions false→true.
+            // This is the reliable signal that FRG's sync-pause resolved and RefillWaypoints
+            // (or PublishPatrolWaypoint) ran. Works even when the leader was already
+            // Patrolling and the status doesn't change — which is the common post-combat case.
+            bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint;
+
             BotStatus? previousLeaderStatus = _lastLeaderStatus; // capture before updating; may be null on first tick
             _lastLeaderStatus = leader.Status; // update for next tick
+            _lastLeaderHadTargetWaypoint = leader.HasTargetWaypoint;
 
-            if (leaderJustResumedPatrol)
+            if (leaderJustResumedPatrol || (leaderJustPublishedWaypoint && leader.Status == BotStatus.Patrolling))
             {
                 logger.LogInformation(
-                    $"[FFG] Leader resumed patrol (was {previousLeaderStatus}) — " +
+                    $"[FFG] Leader resumed patrol (was {previousLeaderStatus}, waypointPublished={leaderJustPublishedWaypoint}) — " +
                     $"starting navigation immediately to match (dist={dist:0.0}y).");
                 StartNavigatingToLeader(leader);
                 return;
