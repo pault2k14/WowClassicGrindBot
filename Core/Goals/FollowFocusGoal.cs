@@ -134,6 +134,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private bool _rendezvousConfirmed;
 
+    /// <summary>
+    /// Tracks the leader's status from the previous UpdateIdle tick so we can detect
+    /// the non-Patrolling → Patrolling transition that signals FRG has just resumed.
+    /// Initialised to <c>null</c> in <see cref="OnEnter"/> so the very first tick
+    /// always evaluates the transition correctly.
+    /// </summary>
+    private BotStatus? _lastLeaderStatus;
+
     /// <summary>Last shared waypoint world position the assist navigated toward.
     /// Used to detect when the leader advances to a new waypoint so navigation
     /// can be refreshed without spamming SetSingleWaypoint every tick.</summary>
@@ -247,6 +255,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // proximity to the leader before waypoint-sharing mode activates.
         _rendezvousConfirmed = false;
         _lastSharedWaypointW = default;
+        _lastLeaderStatus = null; // force Patrolling-transition check on first UpdateIdle tick
 
         if (input.IsKeyDown(input.ForwardKey))
             input.StopForward(true);
@@ -389,6 +398,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 _lastSharedWaypointW = default; // force waypoint refresh on first use
                 logger.LogInformation("[FFG] Rendezvous confirmed — waypoint-sharing mode active.");
             }
+
+            // Keep the transition tracker up to date so that crossing from < 7y into
+            // the dead-band doesn't produce a false leaderJustResumedPatrol trigger.
+            _lastLeaderStatus = leader.Status;
         }
         else
         {
@@ -399,6 +412,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 _rendezvousConfirmed = false;
                 _lastSharedWaypointW = default;
                 logger.LogInformation($"[FFG] Leader status {leader.Status} — clearing rendezvous, reverting to position-chase.");
+            }
+
+            // ── Patrolling-transition detection ─────────────────────────────────
+            // When the leader's FRG resumes after combat/loot, its status flips from
+            // non-Patrolling → Patrolling. If we are in the dead-band (7–14y) AND
+            // the rendezvous is already confirmed, the normal dead-band logic would
+            // silently wait up to 2 seconds before the leader exceeds NavigatingMinYards
+            // (14y / 7y/s = 2s), giving the leader a 14y head start. Detecting this
+            // transition here breaks the silent wait and starts navigation immediately,
+            // which in combination with the FRG sync-pause (see FollowRouteGoal) results
+            // in both bots starting to move together within one API poll cycle (~250ms).
+            bool leaderJustResumedPatrol =
+                leader.Status == BotStatus.Patrolling &&
+                _lastLeaderStatus.HasValue &&              // not the initialisation sentinel (null)
+                _lastLeaderStatus != BotStatus.Patrolling; // genuine non→Patrol transition
+
+            BotStatus previousLeaderStatus = _lastLeaderStatus!.Value; // HasValue asserted by leaderJustResumedPatrol check
+            _lastLeaderStatus = leader.Status; // update for next tick
+
+            if (leaderJustResumedPatrol)
+            {
+                logger.LogInformation(
+                    $"[FFG] Leader resumed patrol (was {previousLeaderStatus}) — " +
+                    $"starting navigation immediately to match (dist={dist:0.0}y).");
+                StartNavigatingToLeader(leader);
+                return;
             }
 
             // Dead-band: NavigatingExitYards ≤ dist ≤ NavigatingMinYards.

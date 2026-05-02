@@ -95,6 +95,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private int _pathTraversalDirection;
 
+    /// <summary>
+    /// Set by both AssistReturn completion paths before calling Resume().
+    /// Consumed (cleared) inside the ThereAndBack block of RefillWaypoints(false).
+    /// Prevents the endpoint-forcing logic from reversing direction when the leader
+    /// was placed at a route endpoint by AssistReturn rather than by completing a
+    /// natural patrol leg — the leader should continue in the original direction,
+    /// not treat the assist's CantFollow position as a ThereAndBack reversal point.
+    /// </summary>
+    private bool _suppressDirectionEndpointForcing;
+
     private int _suppressedBlacklistedGuid;
     private DateTime _suppressedBlacklistedUntilUtc;
     private DateTime _suppressTargetFinderUntilUtc = DateTime.MinValue;
@@ -102,6 +112,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // Distance thresholds matching FollowFocusGoal constants.
     private const float LeaderPauseYards   = FollowFocusGoal.LeaderPauseYards;   // 20y
     private const float LeaderResumeYards  = FollowFocusGoal.LeaderResumeYards;  // 15y
+
+    /// <summary>
+    /// When FRG resumes with existing patrol waypoints and the assist is further than
+    /// <see cref="FollowFocusGoal.FollowingMaxYards"/> (7y), the leader briefly pauses
+    /// here before starting to move. This gives the assist — which our FFG dead-band fix
+    /// ensures actively navigates toward the leader whenever rendezvous is unconfirmed —
+    /// enough time to close to &lt;7y and confirm rendezvous before the leader pulls away.
+    /// Without this pause, both bots move at the same speed and the gap never closes.
+    /// </summary>
+    private bool _syncPauseActive;
+    private DateTime _syncPauseStartUtc;
+    private const double SyncPauseTimeoutSec = 4.0;
 
     // Stale logging — avoid spamming every tick
     private bool _assistWasStaleLogged;
@@ -256,6 +278,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // the patrol route (combat, evade, paused for assist, etc.).
         leaderNavProvider.ClearTargetWaypoint();
 
+        _syncPauseActive = false;
+
         sideActivityManualReset.Reset();
         targetFinder.Reset();
         ResetRefillWaypointsGuard();
@@ -325,6 +349,30 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
             else
             {
+                // In PartyLeader mode, wait for the assist to be within FollowingMaxYards
+                // before resuming patrol. If we start moving immediately and the assist is
+                // in the dead-band (7–14y), both bots run at the same speed and the assist
+                // can never close the gap to confirm rendezvous. The FFG dead-band fix
+                // guarantees the assist actively navigates during this pause — together the
+                // two halves ensure rendezvous is confirmed before the leader pulls away.
+                if (classConfig.Mode == Mode.PartyLeader && assistIsFollowing)
+                {
+                    // Sync-pause: hold at the current position until the assist begins
+                    // navigating toward the leader before we start patrol. Without this,
+                    // both bots are co-located but the leader immediately starts moving at
+                    // 7y/s while the assist stays in FFG's Idle dead-band for up to 2 seconds
+                    // (14y / 7y/s) — giving the leader a 14y head start every time FRG
+                    // resumes. The FFG Patrolling-transition detection reacts within one
+                    // API poll cycle (~250ms), putting AnyAssistNavigating=True on the wire
+                    // and resolving this pause so both bots start moving together.
+                    logger.LogInformation(
+                        "[FRG] Resume - sync-pause: waiting for assist to begin navigating before starting patrol.");
+                    _syncPauseActive = true;
+                    _syncPauseStartUtc = DateTime.UtcNow;
+                    navigation.PausePathing();
+                    return;
+                }
+
                 logger.LogInformation("[FRG] Resume - preserving existing navigation progress");
                 navigation.Resume();
             }
@@ -396,6 +444,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                             // waiting for "i'm following" confirmation. Now the assist has
                             // confirmed — clear the old return route and refill from here.
                             logger.LogInformation("[FRG] Assist confirmed following after leader navigated to them — resuming patrol.");
+                            // Suppress the endpoint direction-forcing for the same reason as
+                            // Navigation_OnDestinationReached Path A: the leader is resuming
+                            // from the assist's CantFollow position, not from a natural
+                            // ThereAndBack reversal point.
+                            _suppressDirectionEndpointForcing = pathSettings.PathThereAndBack;
                             navigation.ClearAllRoutes();
                             Resume();
                         }
@@ -480,6 +533,32 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             _suppressTargetFinderUntilUtc = DateTime.MinValue;
             logger.LogInformation("[FRG] Target finder suppression elapsed — resuming.");
             sideActivityManualReset.Set();
+        }
+
+        // ── Sync-pause: hold position until the assist starts navigating toward us ──
+        // Set in Resume() when the leader has existing patrol waypoints.
+        // Resolves when AnyAssistNavigating()=True — i.e. the FFG Patrolling-transition
+        // detection (FollowFocusGoal) reacted and put NavigatingToLeader on the API.
+        // This happens within one poll cycle (~250ms), so both bots start moving together
+        // instead of the assist sitting in Idle for up to 2s while the leader sprints away.
+        if (_syncPauseActive)
+        {
+            double elapsed = (DateTime.UtcNow - _syncPauseStartUtc).TotalSeconds;
+            bool assistNavigating = assistStateStore.AnyAssistNavigating();
+
+            if (assistNavigating || elapsed >= SyncPauseTimeoutSec)
+            {
+                _syncPauseActive = false;
+                logger.LogInformation(
+                    $"[FRG] Sync-pause complete: assistNavigating={assistNavigating} elapsed={elapsed:0.1}s " +
+                    $"— resuming patrol navigation.");
+                navigation.Resume();
+            }
+            else
+            {
+                wait.Update();
+                return;
+            }
         }
 
         // NOTE: The watchdog that previously re-enabled the side thread here was removed.
@@ -946,6 +1025,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             if (assistStateStore.AnyAssistIsFollowing())
             {
                 logger.LogInformation("[FRG] AssistReturn reached — assist already following, resuming patrol.");
+                // Suppress the endpoint direction-forcing in the next RefillWaypoints(false)
+                // call. The leader was brought here by AssistReturn, not by completing a
+                // natural patrol leg, so reaching a route endpoint here must NOT reverse
+                // _pathTraversalDirection.
+                _suppressDirectionEndpointForcing = pathSettings.PathThereAndBack;
                 navigation.ClearAllRoutes();
                 Resume();
                 return;
@@ -1075,10 +1159,26 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             if (_pathTraversalDirection == 0)
                 _pathTraversalDirection = mapDistanceToFirst <= mapDistanceToLast ? 1 : -1;
 
-            if (closestIndex == 0)
-                _pathTraversalDirection = 1;
-            else if (closestIndex == pathMap.Length - 1)
-                _pathTraversalDirection = -1;
+            // Only force direction at endpoints when the leader arrived there via normal
+            // patrol completion. When AssistReturn placed the leader at the assist's
+            // CantFollow position (which may happen to be a route endpoint), the original
+            // direction must be preserved — the leader was not actually completing a
+            // ThereAndBack leg. _suppressDirectionEndpointForcing is set by both AssistReturn
+            // completion paths and consumed exactly once here.
+            if (_suppressDirectionEndpointForcing)
+            {
+                _suppressDirectionEndpointForcing = false;
+                logger.LogInformation(
+                    $"[FRG] RefillWaypoints: suppressing endpoint direction forcing " +
+                    $"(closestIndex={closestIndex}, direction preserved as {_pathTraversalDirection}).");
+            }
+            else
+            {
+                if (closestIndex == 0)
+                    _pathTraversalDirection = 1;
+                else if (closestIndex == pathMap.Length - 1)
+                    _pathTraversalDirection = -1;
+            }
 
             if (_pathTraversalDirection > 0)
             {
