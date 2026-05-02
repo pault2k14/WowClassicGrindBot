@@ -331,7 +331,8 @@ public static class GoalFactory
                 x.GetRequiredService<IBlacklist>(),
                 x.GetRequiredService<RestHandler>(),
                 x.GetRequiredService<ChatReader>(),
-                x.GetRequiredService<AssistStateStore>()  // API-based assist tracking
+                x.GetRequiredService<AssistStateStore>(),
+                x.GetRequiredService<LeaderNavigationProvider>()  // waypoint + blacklist sharing
                 ));
         }
     }

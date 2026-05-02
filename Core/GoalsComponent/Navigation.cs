@@ -476,10 +476,6 @@ public sealed partial class Navigation : IDisposable
             float displaced = _approachEscapeStartPos != default
                 ? completionPos.WorldDistanceXYTo(_approachEscapeStartPos)
                 : 0f;
-            // [LOG-05] Log lastAttemptUtc so we can verify the 200ms gate state at completion.
-            // BUG D diagnostic: if a subsequent TryUnstuck lower-block call fires immediately
-            // after this completion, lastAttemptUtc here tells us whether the gate was preserved
-            // (prevents escalation) or cleared to MinValue (allows immediate yard increment).
             logger.LogInformation(
                 $"[NAV] ApproachEscape: escape navigation complete — resuming normal approach. " +
                 $"pos={completionPos} displaced={displaced:0.0}y over {_approachEscapeCurrentYards:0}y attempt. " +
@@ -795,12 +791,6 @@ public sealed partial class Navigation : IDisposable
             }
         }
 
-        // If we are inside a blacklist and the current next-step is blacklisted, clear and try refill next tick.
-        // EXCEPTION: while approach escape owns navigation (active or between escalation attempts), the stuck
-        // rect IS a blacklist area and the route top is typically inside it — suppressing the clear here is
-        // essential. Without this guard, every Update() tick clears the just-set escape route, Refill()
-        // immediately re-enqueues an identical path, and the result is a 100+ request path storm with the
-        // player completely frozen. (Bug confirmed in log: reqId 2–98 and 100–196, ~194 wasted requests.)
         bool approachEscapeOwns = _approachEscapeActive ||
             (_approachEscapeCurrentYards > 0 && _approachEscapeTargetGuid != 0);
 
@@ -1007,12 +997,6 @@ public sealed partial class Navigation : IDisposable
                     $"player={playerPos} chase={targetW} dChase={dChase:0.00} best={_chaseProgBestDist:0.00} " +
                     $"sinceBest={sinceBestSec:0.00}s sinceMove={sinceMoveSec:0.00}s");
 
-                // Suppress stuckDetector during route escape — TryRouteUnstuck is already
-                // managing recovery. Calling stuckDetector here competes with it:
-                // evidence from 23:09 log — stuckDetector pressed DownArrow (backward) for
-                // 1610ms DURING the 10y escape, moving the bot AWAY from the escape target,
-                // giving a 1.53y displacement that masked physTrapped=True, and ultimately
-                // causing the escape to time out without making real forward progress.
                 if (!_routeEscapeActive && now >= _chaseUnstuckCooldownUntilUtc)
                 {
                     stopMoving.Stop();
@@ -1170,6 +1154,15 @@ public sealed partial class Navigation : IDisposable
     public int WaypointCount => wayPoints.Count;
     public int RouteCount => routeToNextWaypoint.Count;
 
+    /// <summary>
+    /// World-space coordinates of the current top waypoint — the leader's immediate
+    /// navigation target. Returns <see langword="default"/> when no waypoints are queued.
+    /// Used by <see cref="FollowRouteGoal"/> to publish the leader's current destination
+    /// to <see cref="Core.Party.LeaderNavigationProvider"/> so assist bots can navigate
+    /// to the same target (waypoint-sharing mode).
+    /// </summary>
+    public Vector3 TopWaypointW => wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
+
     public Vector3 NextMapPoint()
     {
         return WorldMapAreaDB.ToMap_FlipXY(Nav2D(routeToNextWaypoint.Peek()), playerReader.WorldMapArea);
@@ -1232,9 +1225,6 @@ public sealed partial class Navigation : IDisposable
         if (_approachRecordedW == default)
         {
             _approachRecordedW = worldPos;
-            // BUG 1 FIX: store the very first recorded position as the anchor.
-            // anchor→curr spans the FULL approach distance from arrival → when stuck fires,
-            // giving TryUnstuck a reliable direction vector regardless of sliding step size.
             _approachEscapeAnchorW = worldPos;
             return;
         }
@@ -1249,11 +1239,6 @@ public sealed partial class Navigation : IDisposable
         }
         else
         {
-            // [LOG-01] Rejection explains why _approachPrevRecordedW stays at <0,0,0> when sliding
-            // against terrain — called every Approach press, but if the bot isn't making
-            // ApproachEscapeProgressMinW of net displacement the pair never advances.
-            // TryUnstuck's locking block then locks prev=<0,0,0> and falls back to facing
-            // direction for stuck rect placement (root cause of BUG C).
             if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
                 logger.LogDebug($"[NAV] RecordApproach: REJECTED moved={moved:0.00}y < threshold={ApproachEscapeProgressMinW:0.00}y — pair unchanged: prev={_approachPrevRecordedW} curr={_approachRecordedW}");
         }
@@ -1261,9 +1246,7 @@ public sealed partial class Navigation : IDisposable
 
     /// <summary>
     /// Boxes a region around the stuck position as a blacklisted area so the pather
-    /// routes around it on future requests. The center is offset forward in the
-    /// direction of travel so the rect captures more of the actual blocking geometry
-    /// ahead of the player rather than the already-navigated clear ground behind.
+    /// routes around it on future requests.
     /// </summary>
     private void AddStuckRect(Vector3 posW, Vector3 forwardDir = default)
     {
@@ -1274,13 +1257,7 @@ public sealed partial class Navigation : IDisposable
             float len = MathF.Sqrt(forwardDir.X * forwardDir.X + forwardDir.Y * forwardDir.Y);
             if (len > 0.01f)
             {
-                // Rect is 4y×4y (half-size=2y). Center is placed offsetY=5y ahead.
-                // Near edge: 3y ahead.  Center: 5y ahead.  Far edge: 7y ahead.
-                // Width: 4y (±2y perpendicular to approach axis).
-                // Head-on clearance: player is 3y from the near edge.
-                // AABB worst case (45° approach): nearest corner is 5-2√2 ≈ 2.17y away —
-                // well clear of the player, so the player never starts inside their own rect.
-                float offsetY = 5f; // was 3y — at 3y the near edge was 1y ahead, and at 45° the nearest corner was only 0.17y from the player (inside the ContainsWorld threshold)
+                float offsetY = 5f;
                 center = new Vector3(
                     posW.X + (forwardDir.X / len) * offsetY,
                     posW.Y + (forwardDir.Y / len) * offsetY,
@@ -1311,14 +1288,6 @@ public sealed partial class Navigation : IDisposable
             $"(total={_stuckWorldRects.Count})");
     }
 
-    /// <summary>
-    /// Called by goals when their own stuck detection fires (e.g. !stuckDetector.IsMoving()).
-    /// Attempts to find a pather path by projecting a waypoint along the approach vector,
-    /// starting at 10 yards and incrementing by 10 up to 30 yards (3 attempts).
-    /// Each call advances one step — returns true while an escape attempt is in progress
-    /// so the goal knows to skip its own unstuck handling.
-    /// Falls back to stuckDetector.Update() once all attempts are exhausted.
-    /// </summary>
     public bool TryUnstuck(CancellationToken token = default)
     {
         if (_approachEscapeActive)
@@ -1334,10 +1303,6 @@ public sealed partial class Navigation : IDisposable
             Vector3 currentPos = Nav2D(playerReader.WorldPos);
             double escapeSec = (now2 - _approachEscapeStartUtc).TotalSeconds;
 
-            // [LOG-03] Heartbeat — throttled to exactly once per integer second via a
-            // last-fired-second field. The original (int)escapeSec != (int)(escapeSec-0.016)
-            // condition could double-fire when two consecutive calls both straddled a second
-            // boundary (observed in Run 11: :56:714 and :56:729 both showed escapeSec=8.0s).
             int heartbeatSec = (int)escapeSec;
             if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug) &&
                 heartbeatSec != _approachEscapeHeartbeatLastSec)
@@ -1366,22 +1331,6 @@ public sealed partial class Navigation : IDisposable
             bool noProgress = sinceProgressSec >= ApproachEscapeNoMovementSec;
             double timeoutSec = _approachEscapeCurrentYards * ApproachEscapeTimeoutSecPerYard;
 
-            // BUG D FIX: detect and self-heal a stale _approachEscapeStartUtc.
-            //
-            // Evidence (Run 7): PTG entered at 17:47:17 with "escape ACTIVE yards=10
-            // startUtc=17:46:59.726". The 10y escape that had startUtc=:59.726 had already
-            // completed ~8 minutes earlier; the 20y escape (startUtc=17:47:12.608) had also
-            // completed. The stale startUtc survived via the wasActive=true RATF branch which
-            // intentionally preserves all timing fields. When a goal re-enters while an escape
-            // is active, RATF preserves startUtc — but if that startUtc belongs to a PRIOR
-            // escalation level, escapeSec computes as much larger than the current budget,
-            // firing a premature escape-stuck. In the log: 18.3s elapsed against an 8.0s
-            // budget for 10y; the real 10y escape was long gone.
-            //
-            // Stale detection: if escapeSec > 2x the budget, the startUtc cannot be valid
-            // for the current escape — any real escape running that long would have already
-            // been caught by the 1x budget check. Self-heal by resetting startUtc to now,
-            // giving the current escape a fresh full budget from this point.
             if (escapeSec > 2.0 * timeoutSec && _approachEscapeStartUtc != DateTime.MinValue)
             {
                 logger.LogWarning($"[NAV] ApproachEscape: startUtc is stale (escapeSec={escapeSec:0.1}s > 2x budget={timeoutSec:0.1}s for {_approachEscapeCurrentYards:0}y) — resetting to now. " +
@@ -1389,8 +1338,6 @@ public sealed partial class Navigation : IDisposable
                 _approachEscapeStartUtc = now2;
                 _approachEscapeLastProgressPos = currentPos;
                 _approachEscapeLastProgressUtc = now2;
-                // Recompute with fresh startUtc so the timeout/progress checks below
-                // evaluate against the corrected baseline rather than the stale one.
                 escapeSec = 0.0;
                 sinceProgressSec = 0.0;
             }
@@ -1402,10 +1349,6 @@ public sealed partial class Navigation : IDisposable
                 string reason = noProgress
                     ? $"no progress for {sinceProgressSec:0.0}s (stuck at {currentPos})"
                     : $"total time {escapeSec:0.0}s exceeded {timeoutSec:0.0}s budget for {_approachEscapeCurrentYards:0}y";
-                // [BUG D DIAGNOSTIC] include start time and guid so we can verify whether this
-                // escape-stuck is for the current escape or a stale one carried over from a
-                // prior goal session. In the log we observed escapes stuck with startUtc from
-                // a *previous* 10y escape despite a 20y having run in between — unexplained.
                 logger.LogWarning($"[NAV] ApproachEscape: escape stuck ({reason}) — clearing to retry at larger distance. " +
                     $"[diag: startUtc={_approachEscapeStartUtc:HH:mm:ss.fff} yards={_approachEscapeCurrentYards:0} guid={_approachEscapeTargetGuid}]");
 
@@ -1418,31 +1361,14 @@ public sealed partial class Navigation : IDisposable
 
                 _approachEscapeActive = false;
                 _approachEscapeStartUtc = DateTime.MinValue;
-                _approachEscapeHeartbeatLastSec = -1; // reset so next escape's heartbeat fires on second 0
+                _approachEscapeHeartbeatLastSec = -1;
                 Stop();
-                // Physically halt the character — Stop() clears the route but does
-                // not release the movement keys, so the bot would keep drifting
-                // along the old escape heading and corrupt the next attempt's
-                // starting position and direction.
                 stopMoving.Stop();
 
-                // BUG 3 FIX: if this was the final escalation level, mark exhausted
-                // immediately so the bail-out checks in ATG/PTG fire on the very next
-                // Update() tick — without waiting for a subsequent TryUnstuck call.
-                //
-                // Without this, escape-stuck at 30y leaves IsApproachEscapeExhausted=false.
-                // On the next goal tick PTG's range-stuck check fires (its check-at time is
-                // already elapsed), calls TryUnstuck, which increments yards to 40 > 30 and
-                // triggers the exhausted path inside TryUnstuck. That path calls
-                // ResetApproachEscape() which zeros both yards AND guid. ATG then re-enters
-                // via RATF, sees guid=0 as a different-target and does a full reset, ending
-                // up with yards=0. The bot restarts from the 10y level instead of bailing out.
                 if (_approachEscapeCurrentYards >= ApproachEscapeEndYards)
                 {
                     logger.LogWarning("[NAV] ApproachEscape: max escalation level stuck — marking exhausted immediately.");
                     IsApproachEscapeExhausted = true;
-                    // Suppress TryUnstuck for the bail-out window (PostExhaustionCooldownSec)
-                    // so the goal's bail-out check runs before a new 10y cycle begins.
                     _approachEscapeLastAttemptUtc = DateTime.UtcNow.AddSeconds(PostExhaustionCooldownSec);
                 }
 
@@ -1454,8 +1380,6 @@ public sealed partial class Navigation : IDisposable
 
         var now = DateTime.UtcNow;
 
-        // [LOG-02] Log gate rejections so we can spot rapid-fire calls and BUG-4 regressions
-        // (LastAttemptUtc reset to MinValue allows immediate bypass of the 200ms cooldown).
         double gateElapsedMs = (now - _approachEscapeLastAttemptUtc).TotalMilliseconds;
         if (gateElapsedMs < 200)
         {
@@ -1464,9 +1388,6 @@ public sealed partial class Navigation : IDisposable
             return false;
         }
 
-        // [LOG-04] State snapshot before yards increment — captures locked direction state
-        // and stuckRects count so we can verify BUG-4 (rapid escalation) regression and
-        // confirm direction lock is in place before the new escape launches.
         if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
             logger.LogDebug($"[NAV] TryUnstuck: lower-block entry — yards={_approachEscapeCurrentYards:0} (will become {_approachEscapeCurrentYards + 10:0}) " +
                 $"gateElapsed={gateElapsedMs:0}ms lastAttempt={_approachEscapeLastAttemptUtc:HH:mm:ss.fff} " +
@@ -1476,25 +1397,12 @@ public sealed partial class Navigation : IDisposable
         _approachEscapeLastAttemptUtc = now;
         _approachEscapeCurrentYards += 10f;
 
-        // Stamp the target guid at escape start so the ATG/PTG OnEnter guard
-        // ("if EscapeActive && EscapeGuid != TargetGuid -> Stop()") correctly
-        // identifies this escape as belonging to the current mob. Without this,
-        // EscapeGuid remains 0 (only RATF sets it, and RATF can be lost across
-        // rapid goal transitions), causing the guard to misfire on every ATG.OnEnter
-        // and eventually kill the escape via TryUnstuck's !active -> ResetApproachEscape path.
         if (_approachEscapeTargetGuid == 0)
             _approachEscapeTargetGuid = playerReader.TargetGuid;
 
         if (_approachEscapeLockedRecordedW == default)
         {
             _approachEscapeLockedRecordedW = _approachRecordedW;
-            // BUG 1 FIX: use anchor (first-ever recorded position) as lockedPrev when available.
-            // Evidence: In all 5 runs, consecutive RecordApproach steps are only 0.75-1.1y apart,
-            // always below MinLockDisplacementY and triggering the "too noisy" fallback every time.
-            // anchor→curr spans the full approach distance from when the bot first moved toward
-            // the mob to when it got stuck — typically 1.5-3y, which passes the threshold.
-            // When no anchor exists (e.g. anchor == curr from first seed with no subsequent moves),
-            // fall back to _approachPrevRecordedW as before.
             bool anchorUsable = _approachEscapeAnchorW != default &&
                                  _approachEscapeAnchorW != _approachRecordedW;
             _approachEscapeLockedPrevRecordedW = anchorUsable
@@ -1507,18 +1415,9 @@ public sealed partial class Navigation : IDisposable
                 $"prev={_approachEscapeLockedPrevRecordedW} curr={_approachEscapeLockedRecordedW} " +
                 $"disp={lockDisp:0.00}y (anchorUsed={anchorUsable})");
 
-            // Compute approach direction for stuck rect placement.
-            // Priority: recorded prev→curr vector > chase target > facing direction.
-            // Never leave approachDir as default — that places the rect center on the
-            // player, putting the player immediately inside their own blacklist area
-            // and triggering an escape-first route away from the mob.
             Vector3 approachDir;
             if (_approachRecordedW != default && _approachPrevRecordedW != default)
             {
-                // BUG 1 FIX: prefer anchor→curr for the stuck rect approach direction too.
-                // The stuck rect is placed 5y ahead in the approach direction — using the
-                // anchor (first-ever position) instead of just the last prev step gives a
-                // more reliable direction spanning the full approach rather than just one step.
                 Vector3 dirFrom = (_approachEscapeAnchorW != default && _approachEscapeAnchorW != _approachRecordedW)
                     ? _approachEscapeAnchorW
                     : _approachPrevRecordedW;
@@ -1538,23 +1437,6 @@ public sealed partial class Navigation : IDisposable
             }
             else if (_stuckWorldRects.Count > 0)
             {
-                // BUG C FIX: use the most recent stuck rect center as a proxy for the
-                // approach direction rather than the facing direction. The previous stuck
-                // rect was placed during an escape with valid movement data (prev→curr
-                // vector or chase target), so the direction from the current player
-                // position to that rect center reliably points toward the mob/obstacle.
-                //
-                // The facing direction fallback is unreliable because when the bot is
-                // sliding against terrain (ApproachEscapeProgressMinW not met, so
-                // _approachPrevRecordedW stays at <0,0,0>), the character faces the wall.
-                // Using facing then places the NEW stuck rect toward the wall, and
-                // ProjectApproachEscapeTarget projects the escape target deeper into
-                // the terrain (exactly opposite of where we want to go).
-                //
-                // In the log: PTG placed a valid NW rect at :45:380. ATG entered later
-                // with prev=<0,0,0> (sliding, no progress recorded). Without this fix,
-                // ATG uses facing=SW → rect placed SW → escape goes SW → deeper into wall.
-                // With this fix: ATG uses NW direction from previous rect → escape goes NW ✓
                 var prevRect = _stuckWorldRects[_stuckWorldRects.Count - 1];
                 float rcx = (prevRect.MinX + prevRect.MaxX) * 0.5f;
                 float rcy = (prevRect.MinY + prevRect.MaxY) * 0.5f;
@@ -1564,21 +1446,11 @@ public sealed partial class Navigation : IDisposable
             }
             else
             {
-                // BUG B RECOVERY: No direction data available (prev=<0,0,0>, no stuck rects,
-                // no chase target). This happens when BUG B wiped the approach escape state and
-                // the bot called TryUnstuck before enough approach presses to build a direction
-                // vector. DO NOT call AddStuckRect — with default forwardDir the rect would be
-                // centered on the player, putting the player inside their own blacklist rect and
-                // immediately triggering an escape-first route AWAY from the mob. Instead, run
-                // the pather escape without a rect hint and let it route around terrain geometry.
                 logger.LogWarning("[NAV] ApproachEscape: no direction data (prev=<0,0,0>, no stuck rects, " +
                     "no chase target) — SKIPPING stuck rect to avoid player-inside-own-rect. " +
                     "Pather escape runs without rect hint. (Typically caused by BUG B state wipe.)");
                 goto AFTER_STUCK_RECT;
             }
-            // [LOG-09] Log the direction vector used to place this stuck rect — if it is
-            // wrong (e.g. facing direction instead of approach direction) this tells us
-            // immediately, since we'll see dir pointing toward terrain rather than toward mob.
             if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
             {
                 float dirLen = Sqrt(approachDir.X * approachDir.X + approachDir.Y * approachDir.Y);
@@ -1595,12 +1467,7 @@ public sealed partial class Navigation : IDisposable
                 "[NAV] ApproachEscape: all pather attempts exhausted — bail-out window open for " +
                 $"{PostExhaustionCooldownSec:0}s.");
             ResetApproachEscape();
-            // Flag used by ATG/PTG to trigger immediate bail-out (mob is genuinely unreachable).
             IsApproachEscapeExhausted = true;
-            // Suppress TryUnstuck for PostExhaustionCooldownSec so the bail-out check runs
-            // before the next 10y cycle restarts. Without this the stuck detection fires first
-            // (its interval is already overdue) and TryUnstuck immediately begins a new cycle,
-            // giving the bail-out no opportunity to clear the target.
             _approachEscapeLastAttemptUtc = DateTime.UtcNow.AddSeconds(PostExhaustionCooldownSec);
             stuckDetector.SetTargetLocation(StuckOwnerId, _approachRecordedW == default
                 ? Nav2D(playerReader.WorldPos)
@@ -1623,12 +1490,8 @@ public sealed partial class Navigation : IDisposable
         logger.LogInformation(
             $"[NAV] ApproachEscape: attempt {_approachEscapeCurrentYards:0}y -> {projection}");
 
-        // Clear the exhausted flag — a new escape cycle is starting which may succeed.
-        // Without this, if the 5s post-exhaustion bail-out window passes without
-        // the bail firing (e.g., bits.Target()=false at that tick), this new escape
-        // would be immediately bail-outed upon completion even if the mob was reached.
         IsApproachEscapeExhausted = false;
-        _approachEscapeHeartbeatLastSec = -1; // reset so heartbeat fires immediately on new escape
+        _approachEscapeHeartbeatLastSec = -1;
         SetSingleWaypoint(projection);
         _approachEscapeActive = true;
         _approachEscapeStartUtc = DateTime.UtcNow;
@@ -1638,12 +1501,6 @@ public sealed partial class Navigation : IDisposable
         return true;
     }
 
-    /// <summary>
-    /// Pather-based unstuck for route following. Projects escape targets at 10y -> 20y -> 30y
-    /// ahead in the player's current facing direction and requests a pather path to each.
-    /// Called before stuckDetector.Update() so we try to route around the obstacle first.
-    /// Returns true while an escape route is in progress, false when exhausted or timed out.
-    /// </summary>
     public bool TryRouteUnstuck(CancellationToken token = default)
     {
         if (_routeEscapeActive)
@@ -1681,11 +1538,6 @@ public sealed partial class Navigation : IDisposable
                     ? $"no progress for {sinceProgressSec:0.0}s"
                     : $"timed out after {escapeSec:0.0}s at {_routeEscapeCurrentYards:0}y";
 
-                // Check whether the bot made ANY displacement from where the escape started.
-                // Near-zero displacement means it is physically wedged — the facing direction
-                // is blocked by terrain the bot entered from behind. Confirmed in log
-                // leader_stuck_in_terrain.txt: pather returned pathLen=0 (no forward path),
-                // StuckDetector UpArrow 1506ms had zero effect. The only escape is backward.
                 float totalDisplacement = currentPos.WorldDistanceXYTo(Nav2D(_routeEscapeStartPos));
                 bool physicallyTrapped = totalDisplacement < 0.5f;
 
@@ -1693,21 +1545,9 @@ public sealed partial class Navigation : IDisposable
                     $"displacement={totalDisplacement:0.00}y physTrapped={physicallyTrapped}. Escalating.");
 
                 _routeEscapeActive = false;
-                // Do NOT call Stop() here. Stop() sets active=false, causing navigation.Update()
-                // to return immediately on every subsequent tick — TryRouteUnstuck never fires
-                // again and the 20y/30y escalation is silently lost.
-                // Evidence: 23:09 log — after escape-stuck at 23:09:25, bot made zero further
-                // recovery attempts for 30+ seconds. Navigation was dead because Stop() killed it.
-                // Keeping navigation active allows the next Update() tick to call TryRouteUnstuck
-                // lower-block, which increments yards and launches the 20y escape via SetSingleWaypoint
-                // (atomically replacing the stale 10y waypoint with the new 20y target).
 
                 if (physicallyTrapped)
                 {
-                    // The bot cannot move forward at all. Inject jump + backward movement to
-                    // back out of the terrain trap — the same technique as ATG's physStuck injection.
-                    // Thread.Sleep gives true wall-clock delays (confirmed: wait.Update(N) returns
-                    // in <30ms regardless of N). This runs on goapThread which can block safely.
                     logger.LogWarning("[NAV] RouteEscape: physically trapped — injecting jump + reverse to escape.");
                     input.StopForward(false);
                     input.PressJump();
@@ -1741,7 +1581,6 @@ public sealed partial class Navigation : IDisposable
             return false;
         }
 
-        // Project escape target in the player's current facing direction.
         float facing = playerReader.Direction;
         Vector3 playerW = Nav2D(playerReader.WorldPos);
         Vector3 escapeW = new Vector3(
@@ -1771,23 +1610,8 @@ public sealed partial class Navigation : IDisposable
         _routeEscapeLastProgressUtc = DateTime.MinValue;
     }
 
-    /// <summary>
-    /// Resets approach escape state. Call when the goal exits or target changes.
-    /// </summary>
     public void ResetApproachEscape([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
-        // [LOG-06] BUG B DIAGNOSTIC: [CallerMemberName] identifies the exact method that called
-        // ResetApproachEscape() without needing a stack trace — this surfaces the hidden caller
-        // causing BUG B (guid/yards zeroed between escape completion and PTG goal entry).
-        //
-        // Log at Warning when there is meaningful state being wiped (yards>0, guid set,
-        // lastAttempt recorded, or stuckRects present) — these are the cases where an unexpected
-        // reset would damage escalation state and must remain visible in production logs.
-        //
-        // Log at Debug when all state is already at its default/zero values (e.g. CombatGoal
-        // cleanup on every kill, bot startup). That call is a harmless no-op and produced a
-        // spurious Warning on every single run, confirmed in Runs 26-30 where 'was: yards=0
-        // guid=0 lastAttempt=00:00:00.000' appeared at the end of each successful approach.
         bool hasState = _approachEscapeCurrentYards != 0
             || _approachEscapeTargetGuid != 0
             || _approachEscapeLastAttemptUtc != DateTime.MinValue
@@ -1809,13 +1633,6 @@ public sealed partial class Navigation : IDisposable
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
         _approachEscapeAnchorW = default;
-        // BUG A FIX: lockedCurr and lockedPrev were NOT cleared by ResetApproachEscape.
-        // Evidence: leader_stuck_in_terrain.txt — FFG.OnEnter called ResetApproachEscape
-        // at 22:34:08:110 (logged 'was: lockedCurr=<-785.93,-4751.11>'), but the [LOG-04]
-        // debug entry at 22:34:11:173 showed lockedCurr=<-785.93,-4751.11> STILL set.
-        // The locking block in TryUnstuck lower-block checks 'if (lockedCurr == default)'
-        // before overwriting it — since lockedCurr was non-zero, the stale value was kept
-        // and used to project the escape target 10y in the wrong direction (away from leader).
         _approachEscapeLockedRecordedW = default;
         _approachEscapeLockedPrevRecordedW = default;
         _approachEscapeLastAttemptUtc = DateTime.MinValue;
@@ -1828,14 +1645,8 @@ public sealed partial class Navigation : IDisposable
         IsApproachEscapeExhausted = false;
     }
 
-    /// <summary>
-    /// Conditionally resets approach escape state on goal re-entry.
-    /// </summary>
     public void ResetApproachEscapeForTarget(int targetGuid)
     {
-        // A guid of 0 means the goal re-entered while the target was momentarily
-        // cleared (common during goal transitions). We cannot make a valid decision —
-        // preserve all existing escape state unchanged rather than wiping escalation.
         if (targetGuid == 0)
             return;
 
@@ -1845,42 +1656,14 @@ public sealed partial class Navigation : IDisposable
 
             if (wasActive)
             {
-                // Escape is actively in progress — only reset recorded approach positions
-                // (stale pre-escape positions would corrupt direction on the next attempt).
-                // CRITICAL: preserve all timing fields (_approachEscapeStartUtc,
-                // _approachEscapeStartPos, _approachEscapeLastProgressPos/Utc).
-                // Clearing them while wasActive=true causes TryUnstuck to compute
-                // escapeSec = now - DateTime.MinValue = HUGE → immediate timeout →
-                // Stop() → _chaseProgTarget cleared → wrong escape direction on retry.
-                _approachEscapeActive = false; // briefly clear so checks pass
+                _approachEscapeActive = false;
                 _approachRecordedW = default;
                 _approachPrevRecordedW = default;
-                // BUG 4 FIX: do NOT reset _approachEscapeLastAttemptUtc to DateTime.MinValue.
-                //
-                // The original code reset it here with the comment "TryUnstuck must be able
-                // to re-check the in-progress timeout on the next tick". That reasoning is
-                // incorrect: TryUnstuck's active-escape block (first if) uses _approachEscapeStartUtc
-                // and _approachEscapeLastProgressUtc for timeout detection — _approachEscapeLastAttemptUtc
-                // is only used in the lower block (yards increment gate). Setting it to MinValue
-                // removes the 200ms yard-increment cooldown, allowing a rapid 10y→20y→30y race
-                // on consecutive TryUnstuck calls after a goal transition. In the log this
-                // appears as PTG seeing "preserving 30y" when ATG had only just started a 10y escape.
-                //
-                // DO NOT clear: _approachEscapeLastAttemptUtc (preserve the 200ms gate)
-                // DO NOT clear: _approachEscapeStartUtc, _approachEscapeStartPos,
-                //               _approachEscapeLastProgressPos, _approachEscapeLastProgressUtc
-                _approachEscapeActive = true; // restore — escape stays live with valid timing
+                _approachEscapeActive = true;
                 logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — preserving {_approachEscapeCurrentYards:0}y escalation and locked direction (escape ACTIVE — timing preserved).");
             }
             else
             {
-                // Escape not active — full reset of per-attempt timing, preserve escalation
-                // and locked direction vectors for the next attempt.
-                // NOTE: _approachEscapeLastAttemptUtc is intentionally NOT reset to MinValue
-                // here. Resetting it allowed TryUnstuck to fire immediately on the very first
-                // Update() tick after a goal transition, racing ahead of the bail-out checks
-                // and causing rapid 10y→20y escalation within milliseconds of re-entry.
-                // The natural 200ms cooldown expiry is sufficient.
                 _approachEscapeActive = false;
                 _approachRecordedW = default;
                 _approachPrevRecordedW = default;
@@ -1888,10 +1671,6 @@ public sealed partial class Navigation : IDisposable
                 _approachEscapeStartPos = default;
                 _approachEscapeLastProgressPos = default;
                 _approachEscapeLastProgressUtc = DateTime.MinValue;
-                // [LOG-07] Log all preserved and cleared timing fields so we can trace
-                // what state survives the goal re-entry. lastAttemptUtc age determines
-                // whether the 200ms yard-increment gate is effectively open (age>>200ms)
-                // or still cooling down. startUtc is cleared here — confirm it becomes MinValue.
                 double lastAttemptAgeMs = (DateTime.UtcNow - _approachEscapeLastAttemptUtc).TotalMilliseconds;
                 string lockedDirStatus = _approachEscapeLockedRecordedW != default
                     ? $"locked direction preserved (curr={_approachEscapeLockedRecordedW})"
@@ -1905,24 +1684,8 @@ public sealed partial class Navigation : IDisposable
         }
         else if (_approachEscapeTargetGuid == 0)
         {
-            // BUG B FIX: The stored guid is transiently 0 (wiped by an unknown code path
-            // between escape completion and goal re-entry). We cannot distinguish this from
-            // a genuine different-target scenario, but the caller's targetGuid is valid.
-            // Treating guid=0 as "different target" wipes yards, lockedDir, lastAttemptUtc
-            // and stuckRects, restarting escalation from 0y — exactly the BUG B damage.
-            //
-            // SAFE CHOICE: treat guid=0 as "same target — restore guid, preserve all state".
-            // If the target genuinely DID change while guid was 0, the caller's targetGuid
-            // is still fresh and the next RATF call (with a non-zero stored guid) would
-            // correctly detect the change and reset. The cost of one missed reset is minimal;
-            // the cost of a spurious reset is restarting a 20y+ escalation from 0y.
             _approachEscapeTargetGuid = targetGuid;
 
-            // When yards=0 the locked direction is either the default (never set) or stale
-            // from a PREVIOUS mob's escape (observed in Run 16: after mob 7323647 was exhausted,
-            // the bot switched to mob 7327199 — BUG B fired for 7327199 but "preserved"
-            // lockedCurr/Prev from 7323647, causing the next escape to go in the wrong direction).
-            // Clear the stale direction so the next escape recomputes from fresh approach data.
             if (_approachEscapeCurrentYards == 0)
             {
                 _approachEscapeLockedRecordedW = default;
@@ -1930,11 +1693,6 @@ public sealed partial class Navigation : IDisposable
             }
 
             double lastAttemptAgeMs = (DateTime.UtcNow - _approachEscapeLastAttemptUtc).TotalMilliseconds;
-
-            // Distinguish a genuine BUG B event (meaningful state was preserved or wiped) from
-            // a fresh-start false positive (bot just started, all state is default/zero).
-            // Fresh start: yards=0, lockedCurr=default, stuckRects=0, lastAttemptAge≈MaxValue.
-            // Genuine BUG B: yards>0 OR stuckRects>0 (non-trivial state that BUG B damaged).
             bool genuineBugB = _approachEscapeCurrentYards > 0 || _stuckWorldRects.Count > 0;
 
             string bugBescalation = _approachEscapeCurrentYards > 0
@@ -1954,8 +1712,6 @@ public sealed partial class Navigation : IDisposable
             }
             else
             {
-                // Fresh start — guid was 0 because the bot just started (no prior escape state).
-                // Log at Debug to avoid noise; this fires on every bot launch.
                 logger.LogDebug($"[NAV] ApproachEscape: first approach, guid restored to {targetGuid} (no prior escape state).");
             }
         }
@@ -1971,10 +1727,6 @@ public sealed partial class Navigation : IDisposable
         }
     }
 
-    /// <summary>
-    /// Projects a world-space waypoint along the approach direction by the given
-    /// number of world units beyond the current player position.
-    /// </summary>
     private Vector3 ProjectApproachEscapeTarget(float yards)
     {
         Vector3 currentW = Nav2D(playerReader.WorldPos);
@@ -1982,13 +1734,6 @@ public sealed partial class Navigation : IDisposable
         float dx = 0f, dy = 0f;
         bool directionFound = false;
 
-        // BUG 1 FIX: lowered from 3.0f to 1.5f.
-        // With the anchor fix, lockedPrev is now the first-ever recorded position, giving
-        // anchor→curr displacement of ~1.5-2y in typical sliding-terrain scenarios.
-        // The original 3.0y threshold required 4+ consecutive 0.75y steps and was never
-        // reachable in practice (confirmed across all 5 runs — always hit "too noisy").
-        // 1.5y passes anchor→curr (~1.5-3y) while still rejecting consecutive single steps
-        // (~0.75-1.1y), preserving the stuck-rect fallback for genuinely noisy cases.
         const float MinLockDisplacementY = 1.5f;
 
         if (_approachEscapeLockedPrevRecordedW != default && _approachEscapeLockedRecordedW != default)
@@ -2001,7 +1746,6 @@ public sealed partial class Navigation : IDisposable
                 dx = ldx2;
                 dy = ldy2;
                 directionFound = true;
-                // [LOG-08] Confirm the locked pair produced a valid direction vector
                 if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
                     logger.LogDebug($"[NAV] ProjectEscapeTarget: using locked pair direction — disp={disp:0.0}y prev={_approachEscapeLockedPrevRecordedW} curr={_approachEscapeLockedRecordedW} dir=({dx:0.00},{dy:0.00})");
             }
@@ -2021,9 +1765,6 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation("[NAV] ApproachEscape: using chase target for direction.");
         }
 
-        // Stuck rect center is placed 3y ahead of the player in the approach direction —
-        // it is the most reliable proxy for the mob/obstacle direction when recorded
-        // positions are noisy and the chase target has been cleared (e.g. after Stop()).
         if (!directionFound && _stuckWorldRects.Count > 0)
         {
             var lastRect = _stuckWorldRects[_stuckWorldRects.Count - 1];
@@ -2174,27 +1915,16 @@ public sealed partial class Navigation : IDisposable
 
             Vector3 startW = Nav2D(playerReader.WorldPos);
 
-            // Approach escape "owns" navigation for its entire lifetime:
-            //   - while actively navigating (_approachEscapeActive=true)
-            //   - between escalation attempts (_approachEscapeCurrentYards>0 and guid set)
-            // During that window we must NOT let the static blacklist escape-first route
-            // fire. The stuck rect IS a blacklist area — if we allowed the static escape to
-            // run, every time the bot re-enters the rect (approaching the mob from the far
-            // side after a completed escape) the escape-first route would send it north,
-            // which is exactly the "ran off toward a different mob" failure mode.
             bool approachEscapeOwns = _approachEscapeActive ||
                 (_approachEscapeCurrentYards > 0 && _approachEscapeTargetGuid != 0);
 
             if (approachEscapeOwns)
             {
-                // Clear any lingering static blacklist escape state so it cannot
-                // interfere with approach escape on the next refill call.
                 escapeActive = false;
                 escapeRouteInProgress = false;
             }
             else if (escapeActive)
             {
-                // Escape-mode guard for static blacklist escape only.
                 if (AreaBlacklist?.ContainsWorld(startW) != true)
                 {
                     float edgeBuffer = DetourMargin + 6f;
@@ -2224,10 +1954,6 @@ public sealed partial class Navigation : IDisposable
                 }
             }
 
-            // Static blacklist escape-first route — only when approach escape is NOT
-            // owning navigation. The !approachEscapeOwns check covers both the active
-            // navigation case and the between-escalation-attempts case where the bot
-            // is committed to a specific mob and has a stuck rect in place.
             if (!approachEscapeOwns && TryComputeEscapeOutOfBlacklist(startW, out var escapeW))
             {
                 escapeActive = true;
@@ -2328,11 +2054,6 @@ public sealed partial class Navigation : IDisposable
 
             if (directBlocked)
             {
-                // During approach escape, skip the detour shortcut and go straight to
-                // the pather. The detour margin (12y) is designed for large static
-                // blacklists on patrol routes — for small 4y dynamic stuck rects it
-                // produces waypoints far in the wrong direction relative to the mob.
-                // The pather handles the obstacle correctly with actual map geometry.
                 if (_approachEscapeActive)
                 {
                     logger.LogInformation($"[NAV] Refill: approach escape active — skipping detour, forcing pather for start={startW} end={targetW}");
@@ -3027,9 +2748,6 @@ public sealed partial class Navigation : IDisposable
     /// <summary>
     /// Clears all dynamically-added stuck rects accumulated during approach attempts.
     /// Restores the effective blacklist to the static route blacklist only.
-    /// Call when the bot is fleeing and the mob has been ignored — the rects served
-    /// their purpose (preventing re-approach) but would block the retreat path.
-    /// Static blacklist areas configured in the route YAML are unaffected.
     /// </summary>
     public void ClearStuckRects()
     {

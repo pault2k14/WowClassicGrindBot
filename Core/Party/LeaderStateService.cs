@@ -18,6 +18,7 @@ public sealed class LeaderStateService
     private readonly PlayerReader playerReader;
     private readonly AddonBits bits;
     private readonly IBotController botController;
+    private readonly LeaderNavigationProvider leaderNavProvider;
 
     // Cache the last valid world position. When the addon briefly returns (0,0,0)
     // (e.g. during loading screens or bot deactivation), we return the cached position
@@ -27,11 +28,13 @@ public sealed class LeaderStateService
     public LeaderStateService(
         PlayerReader playerReader,
         AddonBits bits,
-        IBotController botController)
+        IBotController botController,
+        LeaderNavigationProvider leaderNavProvider)
     {
         this.playerReader = playerReader;
         this.bits = bits;
         this.botController = botController;
+        this.leaderNavProvider = leaderNavProvider;
     }
 
     public LeaderState GetCurrentState()
@@ -63,7 +66,15 @@ public sealed class LeaderStateService
             HealthPercent = playerReader.HealthPercent(),
             InCombat = bits.Combat(),
             TargetGuid = playerReader.TargetGuid,
-            Timestamp = DateTime.UtcNow
+            Timestamp = DateTime.UtcNow,
+
+            // Waypoint sharing — only meaningful when leader is Patrolling.
+            HasTargetWaypoint = leaderNavProvider.HasTargetWaypoint,
+            TargetWaypointWorldX = leaderNavProvider.TargetWaypointWorldX,
+            TargetWaypointWorldY = leaderNavProvider.TargetWaypointWorldY,
+
+            // Mob blacklist — cumulative for the session.
+            BlacklistedMobGuids = leaderNavProvider.BlacklistedMobGuidsSnapshot,
         };
     }
 

@@ -35,6 +35,30 @@ public sealed class LeaderState
     public DateTime Timestamp { get; set; }
 
     // ------------------------------------------------------------------
+    // Waypoint sharing — leader's current patrol navigation target.
+    // Only valid when HasTargetWaypoint = true AND Status = Patrolling.
+    // Coordinates are world-space (large negative values for Azeroth).
+    // ------------------------------------------------------------------
+
+    /// <summary>True when the leader has an active waypoint to share.</summary>
+    public bool HasTargetWaypoint { get; set; }
+
+    /// <summary>World X of the leader's current navigation waypoint.</summary>
+    public float TargetWaypointWorldX { get; set; }
+
+    /// <summary>World Y of the leader's current navigation waypoint.</summary>
+    public float TargetWaypointWorldY { get; set; }
+
+    // ------------------------------------------------------------------
+    // Mob blacklist — GUIDs evaded or permanently blacklisted by the
+    // leader. Assist bots diff this list each poll and call
+    // playerReader.IgnoreTarget for any new entries.
+    // ------------------------------------------------------------------
+
+    /// <summary>Snapshot of all mob GUIDs the leader has blacklisted this session.</summary>
+    public int[] BlacklistedMobGuids { get; set; } = System.Array.Empty<int>();
+
+    // ------------------------------------------------------------------
     // Convenience — not serialised, reconstructed on the consumer side.
     // ------------------------------------------------------------------
 

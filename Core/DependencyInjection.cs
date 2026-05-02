@@ -204,6 +204,7 @@ public static class DependencyInjection
         s.ForwardSingleton<AssistStatusProvider>(sp);
         s.ForwardSingleton<LeaderConnectionStatus>(sp);
         s.ForwardSingleton<LeaderStatePoller>(sp);
+        s.ForwardSingleton<LeaderNavigationProvider>(sp);
 
         return s;
     }
@@ -281,6 +282,7 @@ public static class DependencyInjection
         s.AddSingleton<AssistStatusProvider>();
         s.AddSingleton<LeaderConnectionStatus>();
         s.AddSingleton<LeaderStatePoller>();
+        s.AddSingleton<LeaderNavigationProvider>();
 
         return s;
     }

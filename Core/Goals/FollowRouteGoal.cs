@@ -54,6 +54,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private readonly RestHandler restHandler;
     private readonly ChatReader chatReader;
     private readonly AssistStateStore assistStateStore;
+    private readonly LeaderNavigationProvider leaderNavProvider;
     private volatile bool _disposing;
 
     private int _pauseNavRequested;
@@ -126,7 +127,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         IMountHandler mountHandler, TargetFinder targetFinder,
         IBlacklist targetBlacklist, RestHandler restHandler,
         ChatReader chatReader,
-        AssistStateStore assistStateStore)
+        AssistStateStore assistStateStore,
+        LeaderNavigationProvider leaderNavProvider)
     : base("Follow " + System.IO.Path.GetFileNameWithoutExtension(pathSettings.FileName))
     {
         this.cost = cost;
@@ -143,6 +145,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         this.targetBlacklist = targetBlacklist;
         this.chatReader = chatReader;
         this.assistStateStore = assistStateStore;
+        this.leaderNavProvider = leaderNavProvider;
 
         if (pathSettings.Requirements.Count > 0)
         {
@@ -248,6 +251,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             navigation.StopMovement();
 
         navigation.PausePathing();
+
+        // Clear the published waypoint — leader is no longer actively navigating
+        // the patrol route (combat, evade, paused for assist, etc.).
+        leaderNavProvider.ClearTargetWaypoint();
 
         sideActivityManualReset.Reset();
         targetFinder.Reset();
@@ -956,6 +963,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Navigation_OnWayPointReached()
     {
+        // Publish the NEW top waypoint so assist bots know the leader's next target.
+        // Only during normal patrol — not during AssistReturn (GoToOneWaypoint), which
+        // navigates to the assist's position and should not override the patrol waypoint.
+        if (classConfig.Mode == Mode.PartyLeader && !_assistReturnActive)
+        {
+            Vector3 nextWp = navigation.TopWaypointW;
+            if (nextWp != default)
+                leaderNavProvider.SetTargetWaypoint(nextWp);
+            else
+                leaderNavProvider.ClearTargetWaypoint(); // all waypoints exhausted — route will wrap
+        }
+
         MountIfPossible();
     }
 
@@ -1021,6 +1040,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
             RecordRefillWaypoints(mapClosestPoint, 1);
             navigation.SetWayPoints(stackalloc Vector3[1] { mapClosestPoint });
+            PublishPatrolWaypoint();
             return;
         }
 
@@ -1072,6 +1092,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 RecordRefillWaypoints(forwardPoints[0], forwardPoints.Length);
                 Log($"{nameof(RefillWaypoints)} - Set destination from forward resume point - with {forwardPoints.Length} waypoints");
                 navigation.SetWayPoints(forwardPoints);
+                PublishPatrolWaypoint();
             }
             else
             {
@@ -1097,6 +1118,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 RecordRefillWaypoints(backwardPoints[0], backwardPoints.Length);
                 Log($"{nameof(RefillWaypoints)} - Set destination from backward resume point - with {backwardPoints.Length} waypoints");
                 navigation.SetWayPoints(backwardPoints);
+                PublishPatrolWaypoint();
             }
             return;
         }
@@ -1120,6 +1142,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 RecordRefillWaypoints(wrapPoints[0], wrapPoints.Length);
                 Log($"{nameof(RefillWaypoints)} - Set destination from wrap-around index={wrapResumeIndex} - with {wrapPoints.Length} waypoints");
                 navigation.SetWayPoints(wrapPoints);
+                PublishPatrolWaypoint();
                 return;
             }
         }
@@ -1133,6 +1156,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         RecordRefillWaypoints(points[0], points.Length);
         Log($"{nameof(RefillWaypoints)} - Set destination from forward resume point - with {points.Length} waypoints");
         navigation.SetWayPoints(points);
+        PublishPatrolWaypoint();
     }
 
     #endregion
@@ -1160,4 +1184,28 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private void LogDebug(string text) => logger.LogDebug(text);
     private void LogWarning(string text) => logger.LogWarning(text);
     private void Log(string text) => logger.LogInformation(text);
+
+    /// <summary>
+    /// Publishes the leader's current top patrol waypoint to
+    /// <see cref="LeaderNavigationProvider"/> so assist bots can navigate to
+    /// the same destination (waypoint-sharing mode).
+    /// Only called during normal patrol refill — GoToOneWaypoint (AssistReturn)
+    /// must NOT publish, as that navigates to the assist's CantFollow position.
+    /// </summary>
+    private void PublishPatrolWaypoint()
+    {
+        if (classConfig.Mode != Mode.PartyLeader)
+            return;
+
+        Vector3 wp = navigation.TopWaypointW;
+        if (wp != default)
+        {
+            leaderNavProvider.SetTargetWaypoint(wp);
+            logger.LogDebug($"[FRG] Published patrol waypoint -> {wp}");
+        }
+        else
+        {
+            leaderNavProvider.ClearTargetWaypoint();
+        }
+    }
 }

@@ -52,6 +52,7 @@ public sealed partial class GoapAgent : IDisposable
     // Party API services
     private readonly AssistStateStore assistStateStore;
     private readonly LeaderConnectionStatus leaderConnection;
+    private readonly LeaderNavigationProvider leaderNavProvider;
     private readonly AssistStatusProvider assistStatusProvider;
 
     private DateTime _evadeRecoveryUntilUtc = DateTime.MinValue;
@@ -139,7 +140,8 @@ public sealed partial class GoapAgent : IDisposable
         Navigation navigation,
         AssistStateStore assistStateStore,
         LeaderConnectionStatus leaderConnection,
-        AssistStatusProvider assistStatusProvider)
+        AssistStatusProvider assistStatusProvider,
+        LeaderNavigationProvider leaderNavProvider)
     {
         this.routeInfo = routeInfo;
         this.cts = cts;
@@ -166,6 +168,7 @@ public sealed partial class GoapAgent : IDisposable
         this.assistStateStore = assistStateStore;
         this.leaderConnection = leaderConnection;
         this.assistStatusProvider = assistStatusProvider;
+        this.leaderNavProvider = leaderNavProvider;
 
         combatLog.KillCredit += OnKillCredit;
         combatLog.PlayerDeath += PlayerDied;
@@ -690,7 +693,10 @@ public sealed partial class GoapAgent : IDisposable
                     _evadeLeaderWaiting = true;
                     stopMoving.Stop();
                     input.StopForward(true);
-                    input.PressLeaderBlacklistTarget();
+
+                    // Publish the blacklisted GUID via API so the assist can call
+                    // playerReader.IgnoreTarget without relying on the chat message.
+                    leaderNavProvider.AddBlacklistedMobGuid(evade.TargetGuid);
 
                     foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
                         goal.SuppressTargetFinderBriefly((int)(EvadeRecoveryDurationSec * 1000));
@@ -708,7 +714,8 @@ public sealed partial class GoapAgent : IDisposable
                     _evadeLeaderWaiting = true;
                     stopMoving.Stop();
                     input.StopForward(true);
-                    input.PressLeaderBlacklistTarget();
+                    // guid=0 means ghost combat — no specific mob to blacklist via API,
+                    // the assist handles evade recovery via the status signal alone.
 
                     foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
                         goal.SuppressTargetFinderBriefly((int)(GhostCombatEscapeDurationSec * 1000));

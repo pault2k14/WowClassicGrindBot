@@ -103,6 +103,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private readonly Navigation navigation;
     private readonly AssistStatusProvider assistStatusProvider;
     private readonly LeaderConnectionStatus leaderConnection;
+    private readonly LeaderNavigationProvider leaderNavProvider;
 
     // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
     private bool _evadeRecoveryActive;
@@ -122,6 +123,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     /// <summary>Last leader world position we navigated toward (for waypoint update threshold).</summary>
     private Vector3 _lastNavigatedToLeaderWorldPos;
+
+    // -----------------------------------------------------------------------
+    // Waypoint-sharing mode
+    // -----------------------------------------------------------------------
+    /// <summary>
+    /// True once the assist has confirmed Following (≤ FollowingMaxYards) while
+    /// the leader is Patrolling. Gates the switch from position-chasing to
+    /// waypoint-sharing mode — ensures both bots start each patrol leg from
+    /// roughly the same position so their pather paths converge.
+    /// Cleared when the leader leaves Patrolling (combat, looting, etc.)
+    /// or on FFG.OnEnter().
+    /// </summary>
+    private bool _rendezvousConfirmed;
+
+    /// <summary>Last shared waypoint world position the assist navigated toward.
+    /// Used to detect when the leader advances to a new waypoint so navigation
+    /// can be refreshed without spamming SetSingleWaypoint every tick.</summary>
+    private Vector3 _lastSharedWaypointW;
+
+    // -----------------------------------------------------------------------
+    // Mob blacklist — API-based replacement for chatReader.LeaderBlacklistTarget.
+    // The assist diffs leader.BlacklistedMobGuids each tick. Any GUID present
+    // in the new snapshot but not in _knownBlacklistedGuids triggers an
+    // IgnoreTarget call and EvadeBlacklistEvent, mirroring the old chat flow.
+    // -----------------------------------------------------------------------
+    private readonly System.Collections.Generic.HashSet<int> _knownBlacklistedGuids = new();
 
     // -----------------------------------------------------------------------
     // Navigation active-time timeout
@@ -161,6 +188,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         Navigation navigation,
         AssistStatusProvider assistStatusProvider,
         LeaderConnectionStatus leaderConnection,
+        LeaderNavigationProvider leaderNavProvider,
         IOptions<PartyApiConfig> configOptions)
         : base(nameof(FollowFocusGoal))
     {
@@ -174,6 +202,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         this.navigation = navigation;
         this.assistStatusProvider = assistStatusProvider;
         this.leaderConnection = leaderConnection;
+        this.leaderNavProvider = leaderNavProvider;
 
         if (classConfig.UnitToFollow == "focus")
             AddPrecondition(GoapKey.hasfocus, true);
@@ -225,6 +254,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _stuckCheckLastUtc = DateTime.MinValue;
         navigation.ResetApproachEscape();
 
+        // Always reset rendezvous on goal entry — the assist must re-confirm
+        // proximity to the leader before waypoint-sharing mode activates.
+        _rendezvousConfirmed = false;
+        _lastSharedWaypointW = default;
+
         if (input.IsKeyDown(input.ForwardKey))
             input.StopForward(true);
 
@@ -269,34 +303,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (bits.Drowning())
             input.PressJump();
 
-        // ── Evade blacklist (still chat-based) ─────────────────────────────
-        if (chatReader.LeaderBlacklistTarget)
+        // ── API-based mob blacklist ─────────────────────────────────────────
+        // The leader publishes BlacklistedMobGuids in every LeaderState response.
+        // We diff against _knownBlacklistedGuids; any new GUID triggers the same
+        // flow the old chat message did: stop attack, IgnoreTarget, EvadeBlacklistEvent.
+        LeaderState? leaderForBlacklist = leaderConnection.LastLeaderState;
+        if (leaderForBlacklist != null &&
+            leaderForBlacklist.BlacklistedMobGuids is { Length: > 0 })
         {
-            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
-            chatReader.LeaderBlacklistTarget = false;
-            chatReader.LeaderBlacklistTargetId = 0;
-
-            logger.LogInformation($"[FFG] LeaderBlacklistTarget received guid={blacklistGuid}");
-
-            if (blacklistGuid != 0)
+            foreach (int guid in leaderForBlacklist.BlacklistedMobGuids)
             {
-                input.PressStopAttack();
-                wait.Update();
-                playerReader.IgnoreTarget(blacklistGuid);
-                input.PressClearTarget();
-                wait.Update();
+                if (guid != 0 && _knownBlacklistedGuids.Add(guid))
+                {
+                    logger.LogInformation($"[FFG] New blacklisted mob guid={guid} from API — ignoring target.");
+                    input.PressStopAttack();
+                    wait.Update();
+                    playerReader.IgnoreTarget(guid);
+                    input.PressClearTarget();
+                    wait.Update();
 
-                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
-                // assistStatusProvider.CantFollow keeps assistshouldfollow=true so FFG
-                // remains selectable throughout evade recovery, even when dmgTaken/dmgDone
-                // would otherwise block it. Cleared when the assist re-enters Following range.
-                assistStatusProvider.CantFollow = true;
-            }
-            else
-            {
-                logger.LogInformation("[FFG] Ghost combat escape (guid=0) — starting evade recovery.");
-                SendGoapEvent(new EvadeBlacklistEvent(0));
-                assistStatusProvider.CantFollow = true;
+                    SendGoapEvent(new EvadeBlacklistEvent(guid));
+                    // assistStatusProvider.CantFollow keeps assistshouldfollow=true so FFG
+                    // remains selectable throughout evade recovery, even when dmgTaken/dmgDone
+                    // would otherwise block it. Cleared when the assist re-enters Following range.
+                    assistStatusProvider.CantFollow = true;
+                }
             }
         }
 
@@ -370,10 +401,30 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 assistStatusProvider.CurrentStatus = BotStatus.Following;
                 assistStatusProvider.CantFollow = false;
             }
+
+            // Confirm rendezvous when both bots are co-located during patrol.
+            // This gates the switch to waypoint-sharing mode — the assist must be
+            // within FollowingMaxYards (7y) of the leader before it starts navigating
+            // to shared waypoints, ensuring both paths start from roughly the same point.
+            if (!_rendezvousConfirmed && leader.Status == BotStatus.Patrolling)
+            {
+                _rendezvousConfirmed = true;
+                _lastSharedWaypointW = default; // force waypoint refresh on first use
+                logger.LogInformation("[FFG] Rendezvous confirmed — waypoint-sharing mode active.");
+            }
         }
         else
         {
-            // Dead-band: 10y ≤ dist ≤ 15y.
+            // When leader leaves Patrolling (combat, looting, resting), clear the
+            // rendezvous so we revert to position-chasing until next co-location.
+            if (_rendezvousConfirmed && leader.Status != BotStatus.Patrolling)
+            {
+                _rendezvousConfirmed = false;
+                _lastSharedWaypointW = default;
+                logger.LogInformation($"[FFG] Leader status {leader.Status} — clearing rendezvous, reverting to position-chase.");
+            }
+
+            // Dead-band: NavigatingExitYards ≤ dist ≤ NavigatingMinYards.
             // Only maintain Following if we are ALREADY Following — this prevents
             // small distance fluctuations from oscillating the leader's movement gate.
             // If we are NOT already Following (e.g. first entry, or recovering from
@@ -462,12 +513,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // Fall through — navigation continues; no stop, no Idle transition.
         }
 
-        // Update waypoint if leader has moved significantly from the last target.
-        float waypointDrift = leader.WorldPos.WorldDistanceXYTo(_lastNavigatedToLeaderWorldPos);
-        if (waypointDrift > WaypointUpdateThresholdYards)
+        // Update navigation target.
+        // Waypoint-sharing mode: when the rendezvous has been confirmed and the leader
+        // is patrolling with a published waypoint, navigate to the SAME waypoint rather
+        // than chasing the leader's live position. This eliminates the systematic gap
+        // growth caused by the assist's pather finding a slightly-longer path to a
+        // moving target — both bots navigate to the same endpoint so their paths converge.
+        //
+        // Position-chasing mode (fallback): when leader is in combat, looting, resting,
+        // or rendezvous has not yet been confirmed, chase the leader's body directly so
+        // the assist automatically follows any unplanned detour.
+        Vector3 currentNavigationTarget = GetNavigationTarget(leader);
+        float navTargetDrift = currentNavigationTarget.WorldDistanceXYTo(_lastNavigatedToLeaderWorldPos);
+        if (navTargetDrift > WaypointUpdateThresholdYards)
         {
-            _lastNavigatedToLeaderWorldPos = leader.WorldPos;
-            navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(leader));
+            _lastNavigatedToLeaderWorldPos = currentNavigationTarget;
+            navigation.SetSingleWaypoint(currentNavigationTarget); // world coords — SetWayPoints detects non-map range
         }
 
         // Record position for TryUnstuck direction.
@@ -500,8 +561,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             logger.LogWarning(
                 "[FFG] No active waypoint but still far from leader — refreshing waypoint.");
-            _lastNavigatedToLeaderWorldPos = leader.WorldPos;
-            navigation.SetSingleWaypoint(leader.MapPosNoZ);
+            Vector3 fallbackTarget = GetNavigationTarget(leader);
+            _lastNavigatedToLeaderWorldPos = fallbackTarget;
+            navigation.SetSingleWaypoint(fallbackTarget);
         }
 
         // Guard against overwriting Following — set by the NavigatingExitYards block
@@ -567,7 +629,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
     private void StartNavigatingToLeader(LeaderState leader)
     {
-        _lastNavigatedToLeaderWorldPos = leader.WorldPos;
+        Vector3 target = GetNavigationTarget(leader);
+        _lastNavigatedToLeaderWorldPos = target;
         _navAttempt = 0;
         _navRewindActive = false;
         _navRewindAnchorW = default;
@@ -575,9 +638,57 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navActiveElapsed = TimeSpan.Zero;
         _navProgressCheckPosW = playerReader.WorldPos;
 
-        navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(leader));
+        navigation.SetSingleWaypoint(target);
         EnterState(NavState.NavigatingToLeader);
         assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
+    }
+
+    /// <summary>
+    /// Selects the navigation target in world-space coordinates.
+    ///
+    /// <para><b>Waypoint-sharing mode</b> (when all conditions met):<br/>
+    /// Returns the leader's current patrol waypoint rather than the leader's body.
+    /// Both bots navigate to the same endpoint so their pather paths converge,
+    /// eliminating the systematic gap growth caused by the assist following a
+    /// slightly-longer path to a moving target.</para>
+    ///
+    /// <para><b>Position-chasing mode</b> (fallback):<br/>
+    /// Returns the map-space position from <see cref="ComputeFollowTargetMapPos"/>
+    /// — the leader's body offset by <see cref="FollowStopShortYards"/> toward
+    /// the assist. This is used when the leader is in combat, looting, resting,
+    /// evading, or the rendezvous has not yet been confirmed after the last
+    /// non-Patrolling state.</para>
+    /// </summary>
+    private Vector3 GetNavigationTarget(LeaderState leader)
+    {
+        if (_rendezvousConfirmed &&
+            leader.Status == BotStatus.Patrolling &&
+            leader.HasTargetWaypoint)
+        {
+            Vector3 sharedWp = new(leader.TargetWaypointWorldX, leader.TargetWaypointWorldY, 0f);
+
+            // Log only when the shared waypoint changes meaningfully — avoids per-tick spam.
+            if (sharedWp.WorldDistanceXYTo(_lastSharedWaypointW) > WaypointUpdateThresholdYards)
+            {
+                _lastSharedWaypointW = sharedWp;
+                logger.LogInformation(
+                    $"[FFG] Waypoint-sharing: navigating to leader waypoint {sharedWp}");
+            }
+
+            return sharedWp;
+        }
+
+        // Fallback — position-chasing: navigate to the leader's body with stop-short offset.
+        // Uses map-space coords which SetSingleWaypoint's IsMapPoint() check handles correctly.
+        if (_rendezvousConfirmed)
+        {
+            // Rendezvous was confirmed but leader is not Patrolling — clear it so we
+            // don't try waypoint mode again until the next co-location during patrol.
+            _rendezvousConfirmed = false;
+            _lastSharedWaypointW = default;
+        }
+
+        return ComputeFollowTargetMapPos(leader);
     }
 
     /// <summary>
@@ -777,8 +888,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             if (leader != null)
             {
                 logger.LogInformation("[FFG] Rewind reached — retrying leader target.");
-                _lastNavigatedToLeaderWorldPos = leader.WorldPos;
-                navigation.SetSingleWaypoint(leader.MapPosNoZ);
+                Vector3 rewindTarget = GetNavigationTarget(leader);
+                _lastNavigatedToLeaderWorldPos = rewindTarget;
+                navigation.SetSingleWaypoint(rewindTarget);
             }
             return;
         }
@@ -823,8 +935,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             logger.LogWarning(
                 $"[FFG] Arrived but still {dist:0.0}y from leader — refreshing waypoint.");
             _navAttempt = 1;
-            _lastNavigatedToLeaderWorldPos = currentLeader.WorldPos;
-            navigation.SetSingleWaypoint(ComputeFollowTargetMapPos(currentLeader));
+            Vector3 retryTarget = GetNavigationTarget(currentLeader);
+            _lastNavigatedToLeaderWorldPos = retryTarget;
+            navigation.SetSingleWaypoint(retryTarget);
             return;
         }
 
