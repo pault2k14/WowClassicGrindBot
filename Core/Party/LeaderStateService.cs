@@ -73,6 +73,11 @@ public sealed class LeaderStateService
             TargetWaypointWorldX = leaderNavProvider.TargetWaypointWorldX,
             TargetWaypointWorldY = leaderNavProvider.TargetWaypointWorldY,
 
+            // Approach-start anchor — only meaningful when leader is Approaching.
+            HasApproachStart = leaderNavProvider.HasApproachStart,
+            ApproachStartWorldX = leaderNavProvider.ApproachStartWorldX,
+            ApproachStartWorldY = leaderNavProvider.ApproachStartWorldY,
+
             // Mob blacklist — cumulative for the session.
             BlacklistedMobGuids = leaderNavProvider.BlacklistedMobGuidsSnapshot,
         };
@@ -100,6 +105,8 @@ public sealed class LeaderStateService
                 or "RestGoal"       => BotStatus.Resting,
             "EvadeGoal"             => BotStatus.Evading,
             "FollowRouteGoal"       => BotStatus.Patrolling,
+            "ApproachTargetGoal"
+                or "PullTargetGoal" => BotStatus.Approaching,
             _                       => BotStatus.Patrolling
         };
     }

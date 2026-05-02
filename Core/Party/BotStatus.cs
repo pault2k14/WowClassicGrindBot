@@ -13,6 +13,13 @@ public enum BotStatus
     NavigatingToLeader,
     Following,
     /// <summary>
+    /// Leader is actively pressing the interact/approach key to close on a mob
+    /// (<see cref="Goals.ApproachTargetGoal"/> or <see cref="Goals.PullTargetGoal"/>
+    /// is the current goal). The assist uses this to switch from waypoint-sharing
+    /// to the approach-start anchor rather than chasing the leader's moving body.
+    /// </summary>
+    Approaching,
+    /// <summary>
     /// Assist is actively running an escape or unstuck attempt.
     /// Leader holds position while this is set — the assist cannot
     /// guarantee forward progress until the escape completes.

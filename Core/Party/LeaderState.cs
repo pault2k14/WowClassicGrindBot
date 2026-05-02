@@ -50,6 +50,23 @@ public sealed class LeaderState
     public float TargetWaypointWorldY { get; set; }
 
     // ------------------------------------------------------------------
+    // Approach-start anchor — leader's world position at the moment it
+    // entered ApproachTargetGoal or PullTargetGoal. The assist navigates
+    // to this fixed point instead of chasing the leader's moving body
+    // during the approach, so both bots start the interact-key close on
+    // the mob from the same geographic location. Cleared on ATG/PTG exit.
+    // ------------------------------------------------------------------
+
+    /// <summary>True when the leader is in ATG/PTG and has published an anchor.</summary>
+    public bool HasApproachStart { get; set; }
+
+    /// <summary>World X of the leader's position when approach began.</summary>
+    public float ApproachStartWorldX { get; set; }
+
+    /// <summary>World Y of the leader's position when approach began.</summary>
+    public float ApproachStartWorldY { get; set; }
+
+    // ------------------------------------------------------------------
     // Mob blacklist — GUIDs evaded or permanently blacklisted by the
     // leader. Assist bots diff this list each poll and call
     // playerReader.IgnoreTarget for any new entries.

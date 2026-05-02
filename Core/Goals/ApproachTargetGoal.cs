@@ -36,6 +36,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly Navigation navigation;
     private readonly AssistStateStore assistStateStore;
     private readonly AssistStatusProvider assistStatusProvider;
+    private readonly LeaderNavigationProvider leaderNavProvider;
 
     private long approachStart;
     private double nextStuckCheckTime;
@@ -61,7 +62,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         ChatReader chatReader,
         Navigation navigation,
         AssistStateStore assistStateStore,
-        AssistStatusProvider assistStatusProvider)
+        AssistStatusProvider assistStatusProvider,
+        LeaderNavigationProvider leaderNavProvider)
         : base(nameof(ApproachTargetGoal))
     {
         this.logger = logger;
@@ -79,6 +81,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.navigation = navigation;
         this.assistStateStore = assistStateStore;
         this.assistStatusProvider = assistStatusProvider;
+        this.leaderNavProvider = leaderNavProvider;
 
         if (classConfig.Mode == Mode.PartyLeader)
         {
@@ -88,7 +91,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (classConfig.Mode == Mode.AssistFocus)
         {
-            AddPrecondition(GoapKey.incombat, true);
+            AddPrecondition(GoapKey.partyincombat, true);
         }
 
         AddPrecondition(GoapKey.forcedfollow, false);
@@ -154,11 +157,29 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         input.PressDisableSoftInteract();
         wait.Update();
+
+        // Publish the approach-start anchor so the assist knows the leader's
+        // geographic starting point for this approach. The assist navigates to
+        // this fixed position rather than chasing the leader's moving body,
+        // ensuring both bots begin their final interact-key close on the mob
+        // from the same location and through the same terrain.
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            leaderNavProvider.SetApproachStart(playerReader.WorldPos);
+            logger.LogInformation($"[ATG] Published approach-start anchor: {playerReader.WorldPos}");
+        }
     }
 
     public override void OnExit()
     {
         input.StopForward(false);
+
+        // Clear the approach-start anchor — the assist should revert to normal
+        // patrol-follow behaviour once the leader leaves ATG.
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            leaderNavProvider.ClearApproachStart();
+        }
     }
 
     public override void Update()

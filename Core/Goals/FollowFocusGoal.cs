@@ -154,6 +154,15 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private bool _lastLeaderHadTargetWaypoint;
 
+    /// <summary>
+    /// Tracks whether the leader had a published approach-start anchor on the
+    /// previous UpdateIdle tick. A false→true transition fires immediately when
+    /// the leader enters ATG/PTG and breaks the dead-band so the assist navigates
+    /// to the anchor before the leader has moved far from its starting position.
+    /// Initialised to <c>false</c> in <see cref="OnEnter"/>.
+    /// </summary>
+    private bool _lastLeaderHadApproachStart;
+
     /// <summary>Last shared waypoint world position the assist navigated toward.
     /// Used to detect when the leader advances to a new waypoint so navigation
     /// can be refreshed without spamming SetSingleWaypoint every tick.</summary>
@@ -269,6 +278,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _lastSharedWaypointW = default;
         _lastLeaderStatus = null; // force Patrolling-transition check on first UpdateIdle tick
         _lastLeaderHadTargetWaypoint = false; // force waypoint-published detection on first UpdateIdle tick
+        _lastLeaderHadApproachStart = false;  // force approach-start detection on first UpdateIdle tick
 
         if (input.IsKeyDown(input.ForwardKey))
             input.StopForward(true);
@@ -431,6 +441,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 StartNavigatingToLeader(leader);
                 return;
             }
+
+            // Break the dead-band when the leader just entered ATG/PTG.
+            // The approach-start anchor is the leader's world position at ATG entry —
+            // navigating there immediately ensures the assist reaches the leader's
+            // starting point before the leader has pressed interact far toward the mob.
+            bool leaderStartedApproaching = leader.HasApproachStart && !_lastLeaderHadApproachStart;
+            _lastLeaderHadApproachStart = leader.HasApproachStart;
+            if (leaderStartedApproaching)
+            {
+                logger.LogInformation(
+                    $"[FFG] Leader started approaching mob while co-located (dist={dist:0.0}y) — " +
+                    "breaking dead-band: navigating to approach-start anchor.");
+                StartNavigatingToLeader(leader);
+                return;
+            }
         }
         else
         {
@@ -463,14 +488,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // Patrolling and the status doesn't change — which is the common post-combat case.
             bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint;
 
+            // leaderStartedApproaching fires when HasApproachStart transitions false→true,
+            // meaning the leader just entered ATG/PTG. Break the dead-band immediately so
+            // the assist is at the anchor before the leader has pressed interact far toward the mob.
+            bool leaderStartedApproaching = leader.HasApproachStart && !_lastLeaderHadApproachStart;
+
             BotStatus? previousLeaderStatus = _lastLeaderStatus; // capture before updating; may be null on first tick
             _lastLeaderStatus = leader.Status; // update for next tick
             _lastLeaderHadTargetWaypoint = leader.HasTargetWaypoint;
+            _lastLeaderHadApproachStart = leader.HasApproachStart;
 
-            if (leaderJustResumedPatrol || (leaderJustPublishedWaypoint && leader.Status == BotStatus.Patrolling))
+            if (leaderJustResumedPatrol ||
+                (leaderJustPublishedWaypoint && leader.Status == BotStatus.Patrolling) ||
+                leaderStartedApproaching)
             {
                 logger.LogInformation(
-                    $"[FFG] Leader resumed patrol (was {previousLeaderStatus}, waypointPublished={leaderJustPublishedWaypoint}) — " +
+                    $"[FFG] Leader resumed patrol/started approaching " +
+                    $"(was {previousLeaderStatus}, waypointPublished={leaderJustPublishedWaypoint}, approachStarted={leaderStartedApproaching}) — " +
                     $"starting navigation immediately to match (dist={dist:0.0}y).");
                 StartNavigatingToLeader(leader);
                 return;
@@ -732,6 +766,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private Vector3 GetNavigationTarget(LeaderState leader)
     {
+        // Priority 0: Leader is approaching a mob — navigate to the fixed approach-start anchor.
+        // The anchor is the leader's world position at the moment ATG/PTG began, published via
+        // LeaderNavigationProvider. Using a fixed target eliminates the moving-target problem:
+        // chasing the leader's live body during approach means the pather continuously recomputes
+        // a route to a retreating point, arriving in different terrain. Both bots navigating to
+        // the same anchor start the final interact-key approach from the same geographic location.
+        if (leader.HasApproachStart)
+        {
+            if (_rendezvousConfirmed)
+            {
+                _rendezvousConfirmed = false;
+                _lastSharedWaypointW = default;
+                logger.LogInformation("[FFG] Leader approaching mob — clearing rendezvous, locking to approach-start anchor.");
+            }
+            // Return world-space anchor directly — SetSingleWaypoint's IsMapPoint check
+            // will not match (values are large negative for Azeroth) and uses it as-is.
+            return new Vector3(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
+        }
+
+        // Priority 1: Waypoint-sharing during patrol.
         if (_rendezvousConfirmed &&
             leader.Status == BotStatus.Patrolling &&
             leader.HasTargetWaypoint)

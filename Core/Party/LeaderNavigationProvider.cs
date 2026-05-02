@@ -72,6 +72,47 @@ public sealed class LeaderNavigationProvider
     }
 
     // -----------------------------------------------------------------------
+    // Approach-start anchor
+    // -----------------------------------------------------------------------
+
+    private volatile bool _hasApproachStart;
+    private float _approachStartWorldX;
+    private float _approachStartWorldY;
+
+    /// <summary>True when the leader is in ATG/PTG and has published an approach anchor.</summary>
+    public bool HasApproachStart => _hasApproachStart;
+
+    /// <summary>World X of the leader's position when ATG/PTG began.</summary>
+    public float ApproachStartWorldX => _approachStartWorldX;
+
+    /// <summary>World Y of the leader's position when ATG/PTG began.</summary>
+    public float ApproachStartWorldY => _approachStartWorldY;
+
+    /// <summary>
+    /// Called by <see cref="Goals.ApproachTargetGoal"/> on the leader side when it
+    /// begins approaching a mob. Records the leader's current world position as a
+    /// stable anchor the assist navigates to instead of chasing the leader's moving
+    /// body during the approach phase.
+    /// </summary>
+    public void SetApproachStart(Vector3 worldPos)
+    {
+        _approachStartWorldX = worldPos.X;
+        _approachStartWorldY = worldPos.Y;
+        _hasApproachStart = true; // volatile write last — acts as memory fence
+    }
+
+    /// <summary>
+    /// Called by <see cref="Goals.ApproachTargetGoal"/> on leader exit.
+    /// Clears the anchor so the assist reverts to normal patrol-follow behaviour.
+    /// </summary>
+    public void ClearApproachStart()
+    {
+        _hasApproachStart = false; // volatile write first — readers see cleared flag immediately
+        _approachStartWorldX = 0f;
+        _approachStartWorldY = 0f;
+    }
+
+    // -----------------------------------------------------------------------
     // Mob blacklist sharing
     // -----------------------------------------------------------------------
 
