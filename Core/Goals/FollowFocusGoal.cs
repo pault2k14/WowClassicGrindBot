@@ -108,9 +108,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
     private bool _evadeRecoveryActive;
 
-    // For combat-assist targeting (unchanged from original).
-    private readonly Action<CancellationToken> FocusTargetInput;
-
     // -----------------------------------------------------------------------
     // Nav state machine
     // -----------------------------------------------------------------------
@@ -211,14 +208,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         AddPrecondition(GoapKey.shouldloot, false);
         AddPrecondition(GoapKey.shouldgather, false);
         AddPrecondition(GoapKey.consumecorpse, false);
-
-        FocusTargetInput = classConfig.UnitToFollow switch
-        {
-            "party2" => input.PressTargetFocusPartyMemberTwo,
-            "party3" => input.PressTargetFocusPartyMemberThree,
-            "party4" => input.PressTargetFocusPartyMemberFour,
-            _        => input.PressTargetFocus
-        };
 
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
         navigation.OnWayPointReached    += Navigation_OnWayPointReached;
@@ -329,18 +318,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     assistStatusProvider.CantFollow = true;
                 }
             }
-        }
-
-        // ── Combat assist ─────────────────────────────────────────────────
-        if (!_evadeRecoveryActive && bits.Focus_Combat() && bits.FocusTarget())
-        {
-            wait.Update();
-            FocusTargetInput(default);
-            input.PressTargetOfTarget();
-            wait.Update();
-            input.PressInteract();
-            wait.Update();
-            return;
         }
 
         if (chatReader.ForcedFollow)
