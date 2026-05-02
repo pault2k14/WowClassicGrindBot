@@ -428,7 +428,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 _lastLeaderStatus.HasValue &&              // not the initialisation sentinel (null)
                 _lastLeaderStatus != BotStatus.Patrolling; // genuine non→Patrol transition
 
-            BotStatus previousLeaderStatus = _lastLeaderStatus!.Value; // HasValue asserted by leaderJustResumedPatrol check
+            BotStatus? previousLeaderStatus = _lastLeaderStatus; // capture before updating; may be null on first tick
             _lastLeaderStatus = leader.Status; // update for next tick
 
             if (leaderJustResumedPatrol)
