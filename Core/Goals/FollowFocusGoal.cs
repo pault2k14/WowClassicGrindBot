@@ -729,7 +729,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     "stale shared waypoint; reverting to position-chasing.");
                 _rendezvousConfirmed = false;
                 _lastSharedWaypointW = default;
-                fallbackTarget = ComputeFollowTargetMapPos(leader);
+                fallbackTarget = ComputeFollowTargetWorldPos(leader);
             }
 
             _lastNavigatedToLeaderWorldPos = fallbackTarget;
@@ -821,7 +821,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// slightly-longer path to a moving target.</para>
     ///
     /// <para><b>Position-chasing mode</b> (fallback):<br/>
-    /// Returns the map-space position from <see cref="ComputeFollowTargetMapPos"/>
+    /// Returns the world-space position from <see cref="ComputeFollowTargetWorldPos"/>
     /// — the leader's body offset by <see cref="FollowStopShortYards"/> toward
     /// the assist. This is used when the leader is in combat, looting, resting,
     /// evading, or the rendezvous has not yet been confirmed after the last
@@ -862,7 +862,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             if (_approachAnchorColocated)
             {
                 _currentNavTargetMode = NavTargetMode.PositionChase;
-                return ComputeFollowTargetMapPos(leader);
+                return ComputeFollowTargetWorldPos(leader);
             }
 
             Vector3 anchor = new(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
@@ -885,7 +885,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
                     "anchor would be immediately popped; reverting to position-chasing for the remainder of this approach phase.");
                 _currentNavTargetMode = NavTargetMode.PositionChase;
-                return ComputeFollowTargetMapPos(leader);
+                return ComputeFollowTargetWorldPos(leader);
             }
 
             // Anchor is not co-located — return world-space anchor directly.
@@ -935,41 +935,50 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         _currentNavTargetMode = NavTargetMode.PositionChase;
-        return ComputeFollowTargetMapPos(leader);
+        return ComputeFollowTargetWorldPos(leader);
     }
 
     /// <summary>
-    /// Returns a map-space position that is <see cref="FollowStopShortYards"/> behind
-    /// the leader (toward the assist), preventing the assist from running through and
-    /// past the leader. WoW has no player-vs-player collision, so without this offset
-    /// the assist would overshoot the leader's position at running speed.
+    /// Returns a world-space position that is <see cref="FollowStopShortYards"/>
+    /// behind the leader (toward the assist), preventing the assist from running
+    /// through and past the leader. WoW has no player-vs-player collision, so
+    /// without this offset the assist would overshoot the leader's position at
+    /// running speed.
     /// <para>
-    /// Direction is computed in map space and scaled using the current
-    /// <see cref="WorldMapArea"/> bounds for accuracy across different zones.
+    /// Operates entirely in world coordinates (yards). The previous map-space
+    /// implementation produced cross-coordinate-system drift values when the
+    /// caller compared its result against world-space targets returned by the
+    /// anchor and waypoint-sharing branches of <see cref="GetNavigationTarget"/>:
+    /// <c>WorldDistanceXYTo</c> between a map coord (e.g. <c>&lt;46, 60&gt;</c>) and
+    /// a world coord (e.g. <c>&lt;-317, -4417&gt;</c>) is ~4500y, which silently
+    /// disabled the per-tick drift gate in <see cref="UpdateNavigatingToLeader"/>
+    /// and forced a path recomputation on every mode change. Visible in log 18 as
+    /// a 50° body rotation when a brief (388ms) leader ATG re-entry triggered an
+    /// Anchor↔PositionChase flip with a real target difference of only 1.85y.
+    /// World-space throughout makes the drift gate work as designed and removes
+    /// the cross-zone scale factor that the map-space version needed.
     /// </para>
     /// </summary>
-    private Vector3 ComputeFollowTargetMapPos(LeaderState leader)
+    private Vector3 ComputeFollowTargetWorldPos(LeaderState leader)
     {
-        // Direction from leader toward assist in map space.
-        Vector3 dirToAssist = playerReader.MapPosNoZ - leader.MapPosNoZ;
-        float mapLen = MathF.Sqrt(dirToAssist.X * dirToAssist.X + dirToAssist.Y * dirToAssist.Y);
+        // Direction from leader toward assist, in world coordinates (yards).
+        Vector3 leaderW = leader.WorldPos;
+        Vector3 assistW = playerReader.WorldPos;
 
-        if (mapLen < 0.001f)
-            return leader.MapPosNoZ; // co-located — navigate to exact position
+        float dx = assistW.X - leaderW.X;
+        float dy = assistW.Y - leaderW.Y;
+        float lenXY = MathF.Sqrt(dx * dx + dy * dy);
 
-        // Approximate world-units-per-map-unit from WorldMapArea bounds.
-        // Average of X and Y scales; good enough for small offsets.
-        var wma = playerReader.WorldMapArea;
-        float avgWorldPerMap = wma != null
-            ? (MathF.Abs(wma.LocRight - wma.LocLeft) + MathF.Abs(wma.LocBottom - wma.LocTop)) / 200f
-            : 44f; // sensible fallback for Azeroth zones
+        if (lenXY < 0.001f)
+            return new Vector3(leaderW.X, leaderW.Y, 0f); // co-located — navigate to exact position
 
-        float offsetMapUnits = FollowStopShortYards / avgWorldPerMap;
-
-        // Target = leader's map position shifted toward the assist by offsetMapUnits.
+        // Target = leader's world position shifted FollowStopShortYards toward the
+        // assist. Z is zeroed to match the format of every other path returned by
+        // GetNavigationTarget (anchor, shared waypoint) — Navigation only uses XY.
+        float invLen = 1f / lenXY;
         return new Vector3(
-            leader.MapPosNoZ.X + (dirToAssist.X / mapLen) * offsetMapUnits,
-            leader.MapPosNoZ.Y + (dirToAssist.Y / mapLen) * offsetMapUnits,
+            leaderW.X + dx * invLen * FollowStopShortYards,
+            leaderW.Y + dy * invLen * FollowStopShortYards,
             0f);
     }
 
@@ -1168,7 +1177,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         //   1. OnDestinationReached → Idle, Following=True
         //   2. UpdateIdle: Following=True but _rendezvousConfirmed=False
         //      → dead-band fires → StartNavigatingToLeader
-        //   3. ComputeFollowTargetMapPos precision loss → waypoint within POP_DIST
+        //   3. ComputeFollowTargetWorldPos returns a target within POP_DIST of the
+        //      assist (originally via map↔world conversion precision loss when the
+        //      function returned map coords; now possible only when leader and
+        //      assist are genuinely co-located near each other)
         //   4. Waypoint immediately popped → OnDestinationReached again → back to 1
         //
         // Fix: stay in NavigatingToLeader and refresh the waypoint to the leader's
@@ -1231,7 +1243,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 "stale shared waypoint; reverting to position-chasing.");
             _rendezvousConfirmed = false;
             _lastSharedWaypointW = default;
-            retryTarget = ComputeFollowTargetMapPos(currentLeader);
+            retryTarget = ComputeFollowTargetWorldPos(currentLeader);
         }
 
         _lastNavigatedToLeaderWorldPos = retryTarget;
