@@ -322,7 +322,19 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         if (_navState != NavState.CantFollow)
+        {
+            // Clear the API status so the leader's FRG does not see a stale
+            // Following/NavigatingToLeader from the previous FFG run. If FFG is
+            // interrupted mid-navigation (e.g. the assist enters its own Combat or
+            // Loot goal), the navigation is stopped above but CurrentStatus would
+            // otherwise remain NavigatingToLeader. The leader's sync-pause resolves
+            // on AnyAssistNavigating()=true, causing FRG to resume patrol while the
+            // assist is actually looting — which is the "leader moving on while assist
+            // is still looting" bug. Setting Waiting here ensures the leader sees the
+            // correct Waiting status until FFG re-enters and posts Following again.
+            assistStatusProvider.CurrentStatus = BotStatus.Waiting;
             _navState = NavState.Idle;
+        }
         // CantFollow persists across plan cycles so the assist holds position.
     }
 
@@ -1085,13 +1097,43 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // Arrived within the dead-band (7-14y) — close enough; return to Idle.
-        // Without this, the assist would immediately start navigating again from Idle,
-        // causing rapid oscillation when the leader is just slightly ahead.
+        // Still in dead-band (FollowingMaxYards < dist < NavigatingMinYards).
+        //
+        // Previously this branch transitioned immediately to Idle and set Following.
+        // That caused rapid oscillation every 250ms:
+        //   1. OnDestinationReached → Idle, Following=True
+        //   2. UpdateIdle: Following=True but _rendezvousConfirmed=False
+        //      → dead-band fires → StartNavigatingToLeader
+        //   3. ComputeFollowTargetMapPos precision loss → waypoint within POP_DIST
+        //   4. Waypoint immediately popped → OnDestinationReached again → back to 1
+        //
+        // Fix: stay in NavigatingToLeader and refresh the waypoint to the leader's
+        // current live position. If the refresh target is also within POP_DIST (leader
+        // genuinely co-located), only then accept Idle — that case is already handled
+        // by the dist < FollowingMaxYards branch above, so reaching here means the
+        // leader has drifted and we should keep chasing.
         if (dist < NavigatingMinYards)
         {
+            Vector3 refreshTarget = GetNavigationTarget(currentLeader);
+            float refreshDist = playerReader.WorldPos.WorldDistanceXYTo(refreshTarget);
+
+            if (refreshDist > Navigation.POP_DIST)
+            {
+                // Leader has moved since the waypoint was set — chase the new position
+                // without cycling through Idle/dead-band.
+                logger.LogInformation(
+                    $"[FFG] Destination reached in dead-band (leader={dist:0.0}y) — refreshing waypoint (target={refreshDist:0.0}y away), staying NavigatingToLeader.");
+                _lastNavigatedToLeaderWorldPos = refreshTarget;
+                navigation.SetSingleWaypoint(refreshTarget);
+                // Do NOT transition to Idle — remain in NavigatingToLeader.
+                return;
+            }
+
+            // Refresh target is also co-located (refreshDist ≤ POP_DIST) — cannot
+            // navigate any closer with the current map resolution. Accept Idle so the
+            // assist does not spin indefinitely trying to reach an unreachable position.
             logger.LogInformation(
-                $"[FFG] Destination reached within dead-band (dist={dist:0.0}y < {NavigatingMinYards}y) — returning to Idle.");
+                $"[FFG] Destination reached in dead-band (leader={dist:0.0}y, target co-located {refreshDist:0.0}y) — entering Idle.");
             navigation.Stop();
             input.StopForward(true);
             ResetNavState();
@@ -1141,8 +1183,37 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (leader == null) return;
 
         float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
-        if (dist < NavigatingMinYards)
+
+        if (dist >= NavigatingMinYards)
+            return; // still far out — keep navigating, no action needed here
+
+        if (dist < FollowingMaxYards)
         {
+            // Truly arrived within following range.
+            navigation.Stop();
+            ResetNavState();
+            EnterState(NavState.Idle);
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            assistStatusProvider.CantFollow = false;
+            return;
+        }
+
+        // Dead-band zone (FollowingMaxYards < dist < NavigatingMinYards).
+        // An intermediate waypoint was reached but the leader is still ahead.
+        // Refresh the waypoint instead of stopping — avoids the same Idle/dead-band
+        // oscillation described in Navigation_OnDestinationReached.
+        Vector3 refreshTarget = GetNavigationTarget(leader);
+        float refreshDist = playerReader.WorldPos.WorldDistanceXYTo(refreshTarget);
+
+        if (refreshDist > Navigation.POP_DIST)
+        {
+            _lastNavigatedToLeaderWorldPos = refreshTarget;
+            navigation.SetSingleWaypoint(refreshTarget);
+            // Stay in NavigatingToLeader.
+        }
+        else
+        {
+            // Target co-located — can't get closer; stop.
             navigation.Stop();
             ResetNavState();
             EnterState(NavState.Idle);
