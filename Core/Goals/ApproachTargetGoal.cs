@@ -39,6 +39,18 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly LeaderNavigationProvider leaderNavProvider;
 
     private long approachStart;
+
+    /// <summary>
+    /// Holds the leader's first Update() tick after publishing the approach-start anchor,
+    /// giving the assist one or two API poll cycles (~250ms each) to detect the anchor,
+    /// call StartNavigatingToLeader, and appear as NavigatingToLeader in AssistStateStore
+    /// before the leader begins pressing the interact key.
+    /// Without this, the leader immediately presses interact and moves away from the anchor
+    /// position before the assist has had a chance to start navigating there.
+    /// </summary>
+    private bool _anchorSyncPauseActive;
+    private DateTime _anchorSyncPauseStartUtc;
+    private const double AnchorSyncPauseTimeoutSec = 1.0;
     private double nextStuckCheckTime;
     private int initialTargetGuid;
     private float initialMinRange;
@@ -167,6 +179,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         {
             leaderNavProvider.SetApproachStart(playerReader.WorldPos);
             logger.LogInformation($"[ATG] Published approach-start anchor: {playerReader.WorldPos}");
+
+            // Arm sync-pause: hold interact presses until the assist has begun
+            // navigating toward the anchor (AnyAssistNavigating=true) or the timeout
+            // expires. Without this, the leader immediately starts pressing interact
+            // and moves away from the anchor point before the assist has had time to
+            // detect the anchor via the API poll (~250ms) and start navigating there.
+            _anchorSyncPauseActive = true;
+            _anchorSyncPauseStartUtc = DateTime.UtcNow;
         }
     }
 
@@ -286,6 +306,28 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
+        }
+
+        if (classConfig.Mode == Mode.PartyLeader && _anchorSyncPauseActive)
+        {
+            double elapsed = (DateTime.UtcNow - _anchorSyncPauseStartUtc).TotalSeconds;
+            bool assistNavigating = assistStateStore.AnyAssistNavigating();
+
+            if (assistNavigating || elapsed >= AnchorSyncPauseTimeoutSec)
+            {
+                _anchorSyncPauseActive = false;
+                logger.LogInformation(
+                    $"[ATG] Anchor sync-pause complete: assistNavigating={assistNavigating} " +
+                    $"elapsed={elapsed:0.2}s — beginning interact approach.");
+            }
+            else
+            {
+                // Hold — don't press interact yet. Give the assist time to detect the
+                // anchor via the API poll and begin navigating toward it so both bots
+                // start the final interact-key close from the same geographic position.
+                wait.Update();
+                return;
+            }
         }
 
         if (classConfig.Mode == Mode.PartyLeader &&

@@ -163,6 +163,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private bool _lastLeaderHadApproachStart;
 
+    /// <summary>
+    /// Tracks whether the approach-start anchor was co-located on the previous
+    /// <see cref="GetNavigationTarget"/> call. Used to suppress the repeated WARNING
+    /// that would otherwise fire every GOAP tick (~15ms) for the entire duration of
+    /// the leader's ATG approach — typically 60+ consecutive messages over 2+ seconds.
+    /// Only the first detection (false→true) logs a WARNING; subsequent co-located
+    /// ticks are silent. Resets when the anchor is no longer co-located or is cleared.
+    /// </summary>
+    private bool _approachAnchorColocated;
+
     /// <summary>Last shared waypoint world position the assist navigated toward.
     /// Used to detect when the leader advances to a new waypoint so navigation
     /// can be refreshed without spamming SetSingleWaypoint every tick.</summary>
@@ -279,6 +289,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _lastLeaderStatus = null; // force Patrolling-transition check on first UpdateIdle tick
         _lastLeaderHadTargetWaypoint = false; // force waypoint-published detection on first UpdateIdle tick
         _lastLeaderHadApproachStart = false;  // force approach-start detection on first UpdateIdle tick
+        _approachAnchorColocated = false;     // reset co-located suppression on each FFG entry
 
         if (input.IsKeyDown(input.ForwardKey))
             input.StopForward(true);
@@ -426,24 +437,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // the dead-band doesn't produce a false leaderJustResumedPatrol trigger.
             _lastLeaderStatus = leader.Status;
 
-            // Break the dead-band when the leader just published a patrol waypoint.
-            // This means FRG's sync-pause resolved and RefillWaypoints ran: the leader
-            // is about to start moving. React immediately so both bots begin patrol
-            // together instead of the assist waiting silently until the leader reaches
-            // NavigatingMinYards (14y / 7y/s ≈ 2s delay at full patrol speed).
-            // Suppressed when HasApproachStart=true: the anchor detection below takes
-            // priority, and the patrol waypoint is irrelevant once ATG has started.
+            // Track the waypoint transition for the 7-14y block below.
+            // Do NOT call StartNavigatingToLeader here even if leaderJustPublishedWaypoint
+            // is true: the assist is already within FollowingMaxYards (7y) of the leader,
+            // so NavigatingToLeader would immediately exit back to Idle on the very next
+            // GOAP tick (dist < 7y → "Reached follow position"). That 15ms flash produces
+            // no movement and no benefit — the FRG sync-pause already resolves via
+            // AnyAssistIsFollowing()=true which covers both Following and NavigatingToLeader.
             bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint
                 && !leader.HasApproachStart;
             _lastLeaderHadTargetWaypoint = leader.HasTargetWaypoint;
-            if (leaderJustPublishedWaypoint && leader.Status == BotStatus.Patrolling)
-            {
-                logger.LogInformation(
-                    $"[FFG] Leader published patrol waypoint while co-located (dist={dist:0.0}y) — " +
-                    "breaking dead-band: starting navigation immediately.");
-                StartNavigatingToLeader(leader);
-                return;
-            }
+            // (leaderJustPublishedWaypoint is used in the 7-14y block below)
 
             // Break the dead-band when the leader just entered ATG/PTG.
             // The approach-start anchor is the leader's world position at ATG entry —
@@ -805,11 +809,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             float anchorDist = playerReader.WorldPos.WorldDistanceXYTo(anchor);
             if (anchorDist < Navigation.POP_DIST)
             {
-                logger.LogWarning(
-                    $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
-                    "anchor would be immediately popped; reverting to position-chasing.");
+                // Only log on the first detection (false→true transition).
+                // Without this guard the WARNING fires every GOAP tick (~15ms) for the
+                // entire ATG duration — typically 50+ consecutive messages over 2+ seconds
+                // that drown out all other diagnostic output during approach phases.
+                if (!_approachAnchorColocated)
+                {
+                    _approachAnchorColocated = true;
+                    logger.LogWarning(
+                        $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
+                        "anchor would be immediately popped; reverting to position-chasing.");
+                }
                 return ComputeFollowTargetMapPos(leader);
             }
+
+            // Anchor is not co-located — reset flag so the next co-located episode logs once.
+            _approachAnchorColocated = false;
 
             // Return world-space anchor directly — SetSingleWaypoint's IsMapPoint check
             // will not match (values are large negative for Azeroth) and uses it as-is.
