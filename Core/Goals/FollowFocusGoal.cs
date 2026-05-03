@@ -431,7 +431,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // is about to start moving. React immediately so both bots begin patrol
             // together instead of the assist waiting silently until the leader reaches
             // NavigatingMinYards (14y / 7y/s ≈ 2s delay at full patrol speed).
-            bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint;
+            // Suppressed when HasApproachStart=true: the anchor detection below takes
+            // priority, and the patrol waypoint is irrelevant once ATG has started.
+            bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint
+                && !leader.HasApproachStart;
             _lastLeaderHadTargetWaypoint = leader.HasTargetWaypoint;
             if (leaderJustPublishedWaypoint && leader.Status == BotStatus.Patrolling)
             {
@@ -486,7 +489,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // This is the reliable signal that FRG's sync-pause resolved and RefillWaypoints
             // (or PublishPatrolWaypoint) ran. Works even when the leader was already
             // Patrolling and the status doesn't change — which is the common post-combat case.
-            bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint;
+            // Suppressed when HasApproachStart=true: the anchor detection below takes
+            // priority, and the patrol waypoint is irrelevant once ATG has started.
+            // Without this suppression, both transitions fire in sequence (~800ms apart),
+            // producing a wasted NavigatingToLeader→Idle cycle from the waypoint detection
+            // before the anchor detection correctly navigates to the right target.
+            bool leaderJustPublishedWaypoint = leader.HasTargetWaypoint && !_lastLeaderHadTargetWaypoint
+                && !leader.HasApproachStart;
 
             // leaderStartedApproaching fires when HasApproachStart transitions false→true,
             // meaning the leader just entered ATG/PTG. Break the dead-band immediately so
@@ -504,7 +513,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             {
                 logger.LogInformation(
                     $"[FFG] Leader resumed patrol/started approaching " +
-                    $"(was {previousLeaderStatus}, waypointPublished={leaderJustPublishedWaypoint}, approachStarted={leaderStartedApproaching}) — " +
+                    $"(was {previousLeaderStatus?.ToString() ?? "Initial"}, waypointPublished={leaderJustPublishedWaypoint}, approachStarted={leaderStartedApproaching}) — " +
                     $"starting navigation immediately to match (dist={dist:0.0}y).");
                 StartNavigatingToLeader(leader);
                 return;
@@ -780,9 +789,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 _lastSharedWaypointW = default;
                 logger.LogInformation("[FFG] Leader approaching mob — clearing rendezvous, locking to approach-start anchor.");
             }
+
+            Vector3 anchor = new(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
+
+            // Guard: the approach-start anchor is the leader's world position at ATG entry.
+            // If the assist had been navigating toward the same location as the FRG patrol
+            // waypoint (common — the leader was just there), it may have arrived within
+            // Navigation.POP_DIST of the anchor. Setting a waypoint at a co-located point
+            // causes the navigation system's "already reached" check to fire immediately,
+            // popping the waypoint without any movement and triggering OnDestinationReached
+            // on the very next navigation.Update() call. This produces a 15ms spin-loop:
+            // Idle→NavigatingToLeader→Idle→Idle, every GOAP tick, for hundreds of milliseconds.
+            // Solution: if the anchor is within POP_DIST, fall through to position-chasing
+            // toward the leader's live body — guaranteed to be > POP_DIST away.
+            float anchorDist = playerReader.WorldPos.WorldDistanceXYTo(anchor);
+            if (anchorDist < Navigation.POP_DIST)
+            {
+                logger.LogWarning(
+                    $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
+                    "anchor would be immediately popped; reverting to position-chasing.");
+                return ComputeFollowTargetMapPos(leader);
+            }
+
             // Return world-space anchor directly — SetSingleWaypoint's IsMapPoint check
             // will not match (values are large negative for Azeroth) and uses it as-is.
-            return new Vector3(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
+            return anchor;
         }
 
         // Priority 1: Waypoint-sharing during patrol.

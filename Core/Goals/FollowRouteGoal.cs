@@ -363,6 +363,22 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     // detection (false→true transition) fires within one API poll (~250ms)
                     // and sets NavigatingToLeader → AnyAssistNavigating()=true → fast resolve.
                     PublishPatrolWaypoint();
+
+                    // Guard: FRG.OnEnter() can fire twice in rapid succession when GOAP
+                    // briefly selects another goal (e.g. CorpseConsumed) and immediately
+                    // re-selects FRG (~15ms later). A second Resume() call would reset
+                    // _syncPauseStartUtc, extending the pause by up to 1s and causing the
+                    // assist's brief NavigatingToLeader flash (from the first arm) to fall
+                    // outside the new timer window. If already armed, just re-publish the
+                    // waypoint (to keep it fresh) and leave the original timer intact.
+                    if (_syncPauseActive)
+                    {
+                        logger.LogInformation(
+                            "[FRG] Resume - sync-pause already active: re-published top patrol waypoint, keeping original timer.");
+                        navigation.PausePathing();
+                        return;
+                    }
+
                     logger.LogInformation(
                         "[FRG] Resume - sync-pause (existing waypoints): published top patrol waypoint, " +
                         "waiting for assist to begin navigating before resuming patrol.");
@@ -390,9 +406,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             ClearAssistReturnState();
             navigation.ClearAllRoutes();
             RefillWaypoints(true);   // sets waypoints AND calls PublishPatrolWaypoint()
-            _syncPauseActive = true;
-            _syncPauseStartUtc = DateTime.UtcNow;
-            navigation.PausePathing(); // hold — don't start moving yet
+
+            if (_syncPauseActive)
+            {
+                // Second Resume() in rapid succession — keep the original timer, just
+                // hold pathing. See the equivalent guard in the HasWaypoint branch above.
+                logger.LogInformation(
+                    "[FRG] Resume - sync-pause already active (no-waypoint branch): keeping original timer.");
+                navigation.PausePathing();
+            }
+            else
+            {
+                _syncPauseActive = true;
+                _syncPauseStartUtc = DateTime.UtcNow;
+                navigation.PausePathing(); // hold — don't start moving yet
+            }
         }
         else if (classConfig.Mode == Mode.PartyLeader && assistCantFollow)
         {
@@ -547,20 +575,28 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         // ── Sync-pause: hold position until the assist starts navigating toward us ──
         // Set in Resume() when the leader has existing patrol waypoints.
-        // Resolves when AnyAssistNavigating()=True — i.e. the FFG Patrolling-transition
-        // detection (FollowFocusGoal) reacted and put NavigatingToLeader on the API.
-        // This happens within one poll cycle (~250ms), so both bots start moving together
-        // instead of the assist sitting in Idle for up to 2s while the leader sprints away.
+        // Resolves when the assist is actively navigating (NavigatingToLeader) OR already
+        // Following. The original condition — NavigatingToLeader only — was too narrow:
+        // when the assist is co-located (<7y) on re-entry, FFG's leaderJustPublishedWaypoint
+        // detection calls StartNavigatingToLeader, but UpdateNavigatingToLeader immediately
+        // exits to Idle on the very next tick (dist < FollowingMaxYards=7y). The
+        // NavigatingToLeader status lasts ~15ms — far too brief for the leader's API poll
+        // (~250ms) to catch. Adding AnyAssistIsFollowing() covers the co-located case:
+        // if the assist is Following AND within range, they are already in position and
+        // there is no head-start problem to solve.
         if (_syncPauseActive)
         {
             double elapsed = (DateTime.UtcNow - _syncPauseStartUtc).TotalSeconds;
             bool assistNavigating = assistStateStore.AnyAssistNavigating();
+            bool assistFollowing  = assistStateStore.AnyAssistIsFollowing();
+            bool assistReady      = assistNavigating || assistFollowing;
 
-            if (assistNavigating || elapsed >= SyncPauseTimeoutSec)
+            if (assistReady || elapsed >= SyncPauseTimeoutSec)
             {
                 _syncPauseActive = false;
                 logger.LogInformation(
-                    $"[FRG] Sync-pause complete: assistNavigating={assistNavigating} elapsed={elapsed:0.1}s " +
+                    $"[FRG] Sync-pause complete: assistNavigating={assistNavigating} " +
+                    $"assistFollowing={assistFollowing} elapsed={elapsed:0.1}s " +
                     $"— resuming patrol navigation.");
                 navigation.Resume();
             }
