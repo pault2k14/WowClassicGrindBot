@@ -164,14 +164,33 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private bool _lastLeaderHadApproachStart;
 
     /// <summary>
-    /// Tracks whether the approach-start anchor was co-located on the previous
-    /// <see cref="GetNavigationTarget"/> call. Used to suppress the repeated WARNING
-    /// that would otherwise fire every GOAP tick (~15ms) for the entire duration of
-    /// the leader's ATG approach — typically 60+ consecutive messages over 2+ seconds.
-    /// Only the first detection (false→true) logs a WARNING; subsequent co-located
-    /// ticks are silent. Resets when the anchor is no longer co-located or is cleared.
+    /// Session latch: set true when the approach-start anchor is first detected to
+    /// be co-located (within Navigation.POP_DIST of the assist) during the current
+    /// approach phase. Once latched, <see cref="GetNavigationTarget"/> commits to
+    /// position-chasing for the rest of the phase rather than re-evaluating each
+    /// tick. Without this latch, the assist oscillated around the POP_DIST (3.6y)
+    /// boundary: anchorDist=3.5y → return chase target (east of bot, near leader)
+    /// → bot moves east → anchorDist=3.7y → return anchor (now west of bot) →
+    /// SetSingleWaypoint fires (drift ≈ 9y > WaypointUpdateThresholdYards) → bot
+    /// turns 180°. Visible in log 17 as alternating ~948ms RightArrow/LeftArrow
+    /// presses (~85° turns) at assist 02:37:37–02:37:38. Reset to false when the
+    /// approach phase ends (HasApproachStart=false observed) and on FFG.OnEnter.
     /// </summary>
     private bool _approachAnchorColocated;
+
+    /// <summary>
+    /// Discriminates the three possible navigation target sources returned by
+    /// <see cref="GetNavigationTarget"/>: the fixed approach-start anchor, the
+    /// shared patrol waypoint, or the leader's live body (position-chasing).
+    /// Used purely for diagnostic logging on mode transitions — the per-tick
+    /// SetSingleWaypoint call in <see cref="UpdateNavigatingToLeader"/> was
+    /// previously silent, masking the anchor↔chase flip-flop bug. With mode
+    /// tracking, only mode CHANGES log; in-mode drift updates remain silent
+    /// to avoid spam during steady-state chasing.
+    /// </summary>
+    private enum NavTargetMode { Anchor, PositionChase, WaypointSharing }
+    private NavTargetMode _currentNavTargetMode = NavTargetMode.PositionChase;
+    private NavTargetMode _lastLoggedNavTargetMode = NavTargetMode.PositionChase;
 
     /// <summary>Last shared waypoint world position the assist navigated toward.
     /// Used to detect when the leader advances to a new waypoint so navigation
@@ -289,7 +308,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _lastLeaderStatus = null; // force Patrolling-transition check on first UpdateIdle tick
         _lastLeaderHadTargetWaypoint = false; // force waypoint-published detection on first UpdateIdle tick
         _lastLeaderHadApproachStart = false;  // force approach-start detection on first UpdateIdle tick
-        _approachAnchorColocated = false;     // reset co-located suppression on each FFG entry
+        _approachAnchorColocated = false;     // reset co-located latch on each FFG entry
+        _lastLoggedNavTargetMode = NavTargetMode.PositionChase; // first transition will log
 
         if (input.IsKeyDown(input.ForwardKey))
             input.StopForward(true);
@@ -648,6 +668,24 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // the assist automatically follows any unplanned detour.
         Vector3 currentNavigationTarget = GetNavigationTarget(leader);
         float navTargetDrift = currentNavigationTarget.WorldDistanceXYTo(_lastNavigatedToLeaderWorldPos);
+
+        // Mode-change diagnostic — fires whenever GetNavigationTarget switches between
+        // Anchor / PositionChase / WaypointSharing. Independent of the drift gate
+        // below: a non-Update caller (StartNavigatingToLeader, dead-band refresh,
+        // rewind path) may have already SetSingleWaypoint on the new target before
+        // we get here, leaving drift ≈ 0 on this tick. Without separating these
+        // concerns, the mode change would be silently lost. Within-mode drift
+        // updates do NOT log (chase-mode target moves with leader every tick); only
+        // mode transitions log, so spam is bounded by the rate of approach/patrol
+        // phase changes (~1 per few seconds in practice).
+        if (_currentNavTargetMode != _lastLoggedNavTargetMode)
+        {
+            logger.LogInformation(
+                $"[FFG] Nav target mode change: {_lastLoggedNavTargetMode} → {_currentNavTargetMode} " +
+                $"(target={currentNavigationTarget}, drift={navTargetDrift:0.0}y).");
+            _lastLoggedNavTargetMode = _currentNavTargetMode;
+        }
+
         if (navTargetDrift > WaypointUpdateThresholdYards)
         {
             _lastNavigatedToLeaderWorldPos = currentNavigationTarget;
@@ -806,41 +844,65 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation("[FFG] Leader approaching mob — clearing rendezvous, locking to approach-start anchor.");
             }
 
-            Vector3 anchor = new(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
-
-            // Guard: the approach-start anchor is the leader's world position at ATG entry.
-            // If the assist had been navigating toward the same location as the FRG patrol
-            // waypoint (common — the leader was just there), it may have arrived within
-            // Navigation.POP_DIST of the anchor. Setting a waypoint at a co-located point
-            // causes the navigation system's "already reached" check to fire immediately,
-            // popping the waypoint without any movement and triggering OnDestinationReached
-            // on the very next navigation.Update() call. This produces a 15ms spin-loop:
-            // Idle→NavigatingToLeader→Idle→Idle, every GOAP tick, for hundreds of milliseconds.
-            // Solution: if the anchor is within POP_DIST, fall through to position-chasing
-            // toward the leader's live body — guaranteed to be > POP_DIST away.
-            float anchorDist = playerReader.WorldPos.WorldDistanceXYTo(anchor);
-            if (anchorDist < Navigation.POP_DIST)
+            // Latch short-circuit: once the anchor was determined to be co-located in
+            // this approach phase, commit to position-chasing for the rest of the phase.
+            // The latch is reset in the else-branch below when HasApproachStart goes
+            // false (ATG.OnExit fires ClearApproachStart on the leader; the assist
+            // observes this via the next API poll).
+            //
+            // Without this latch the assist oscillates around the POP_DIST (3.6y)
+            // boundary because GetNavigationTarget is called every GOAP tick:
+            //   tick t₀ — anchorDist=3.5y → return chase target (east of bot, near leader)
+            //   tick t₁ — bot moved east → anchorDist=3.7y → return anchor (now west of bot)
+            //             SetSingleWaypoint fires (drift ≈ 9y > WaypointUpdateThresholdYards=3y)
+            //             bot turns ~180° to face anchor
+            //   tick t₂ — bot crosses 3.6y boundary again → flip back, another 180° turn
+            // This was visible in log 17 as alternating ~948ms RightArrow / 949ms
+            // LeftArrow presses (each ~85° rotation) at assist 02:37:37–02:37:38.
+            if (_approachAnchorColocated)
             {
-                // Only log on the first detection (false→true transition).
-                // Without this guard the WARNING fires every GOAP tick (~15ms) for the
-                // entire ATG duration — typically 50+ consecutive messages over 2+ seconds
-                // that drown out all other diagnostic output during approach phases.
-                if (!_approachAnchorColocated)
-                {
-                    _approachAnchorColocated = true;
-                    logger.LogWarning(
-                        $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
-                        "anchor would be immediately popped; reverting to position-chasing.");
-                }
+                _currentNavTargetMode = NavTargetMode.PositionChase;
                 return ComputeFollowTargetMapPos(leader);
             }
 
-            // Anchor is not co-located — reset flag so the next co-located episode logs once.
-            _approachAnchorColocated = false;
+            Vector3 anchor = new(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
 
-            // Return world-space anchor directly — SetSingleWaypoint's IsMapPoint check
-            // will not match (values are large negative for Azeroth) and uses it as-is.
+            // Co-location guard: the approach-start anchor is the leader's world position
+            // at ATG entry. If the assist had been navigating toward the same location as
+            // the FRG patrol waypoint (common — the leader was just there), it may have
+            // arrived within Navigation.POP_DIST of the anchor. Setting a waypoint at a
+            // co-located point causes the navigation system's "already reached" check to
+            // fire immediately, popping the waypoint without movement and triggering
+            // OnDestinationReached on the very next navigation.Update() call. When that
+            // happens, fall back to position-chasing toward the leader's live body —
+            // guaranteed to be > POP_DIST away — and LATCH the decision via
+            // _approachAnchorColocated so subsequent ticks don't re-evaluate.
+            float anchorDist = playerReader.WorldPos.WorldDistanceXYTo(anchor);
+            if (anchorDist < Navigation.POP_DIST)
+            {
+                _approachAnchorColocated = true;
+                logger.LogWarning(
+                    $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
+                    "anchor would be immediately popped; reverting to position-chasing for the remainder of this approach phase.");
+                _currentNavTargetMode = NavTargetMode.PositionChase;
+                return ComputeFollowTargetMapPos(leader);
+            }
+
+            // Anchor is not co-located — return world-space anchor directly.
+            // SetSingleWaypoint's IsMapPoint check will not match (values are large
+            // negative for Azeroth) and uses it as-is.
+            _currentNavTargetMode = NavTargetMode.Anchor;
             return anchor;
+        }
+        else
+        {
+            // Approach phase ended — reset the latch so the next approach episode
+            // (ATG re-entry, possibly on a new mob with a different anchor position)
+            // is evaluated fresh. Safe across rapid re-entry: ATG.OnExit always fires
+            // ClearApproachStart before PTG/ATG re-entry sets a new anchor, so the
+            // assist observes HasApproachStart=false at least once between phases
+            // (poll interval ~250ms).
+            _approachAnchorColocated = false;
         }
 
         // Priority 1: Waypoint-sharing during patrol.
@@ -858,6 +920,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     $"[FFG] Waypoint-sharing: navigating to leader waypoint {sharedWp}");
             }
 
+            _currentNavTargetMode = NavTargetMode.WaypointSharing;
             return sharedWp;
         }
 
@@ -871,6 +934,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             _lastSharedWaypointW = default;
         }
 
+        _currentNavTargetMode = NavTargetMode.PositionChase;
         return ComputeFollowTargetMapPos(leader);
     }
 
