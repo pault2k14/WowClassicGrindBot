@@ -90,6 +90,25 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const float StuckMinMovementWorld = 1.0f;
     private const double StuckEscapeCooldownSec = 10.0;
 
+    /// <summary>
+    /// Minimum world-units of movement within <see cref="ActiveStuckThresholdSec"/>
+    /// to consider the assist as still making progress while in
+    /// <see cref="NavState.NavigatingToLeader"/>. The bot at running speed covers
+    /// 7y/s, so 1y over 2.5 seconds is a strict "barely moving" threshold —
+    /// reached only when the bot is genuinely caught on terrain.
+    /// </summary>
+    private const float ActiveStuckMinMovementWorld = 1.0f;
+
+    /// <summary>
+    /// Time window over which active-stuck detection requires
+    /// <see cref="ActiveStuckMinMovementWorld"/> of movement. Chosen at 2.5s so
+    /// the assist reports <see cref="BotStatus.Stuck"/> *before* Navigation.cs's
+    /// chase watchdog (4s) attempts unstuck — giving the leader a chance to
+    /// pause via <see cref="AssistStateStore.ShouldLeaderPauseForAssist"/>
+    /// while the unstuck attempt happens.
+    /// </summary>
+    private const double ActiveStuckThresholdSec = 2.5;
+
     // -----------------------------------------------------------------------
     // Dependencies
     // -----------------------------------------------------------------------
@@ -227,6 +246,25 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private DateTime _stuckEscapeLastUtc = DateTime.MinValue;
 
     // -----------------------------------------------------------------------
+    // Active-navigation stuck reporting
+    //
+    // Detects a stationary assist while in NavigatingToLeader and reports
+    // BotStatus.Stuck via the API so the leader's FRG.ShouldLeaderPauseForAssist
+    // can pause patrol (which already gates on Status==Stuck per
+    // AssistStateStore.ShouldLeaderPauseForAssist line 161). Recovery flips
+    // back to BotStatus.NavigatingToLeader so the leader naturally resumes.
+    //
+    // Without this reporting, the leader sees a stuck assist as
+    // status=NavigatingToLeader && dist<20y and continues patrolling — the
+    // exact symptom in log 21 where the assist was caught on terrain for
+    // ~12 seconds while the leader engaged the next mob. See log 21,
+    // assist 00:11:03–00:11:15.
+    // -----------------------------------------------------------------------
+    private DateTime _activeStuckSinceUtc = DateTime.MinValue;
+    private Vector3 _activeStuckCheckPosW;
+    private bool _activeStuckReported;
+
+    // -----------------------------------------------------------------------
     // CantFollow: hold position, wait for leader within LeaderArrivedYards
     // -----------------------------------------------------------------------
     private DateTime _cantFollowEnteredUtc;
@@ -299,6 +337,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             wait.Update(1000);
 
         _stuckCheckLastUtc = DateTime.MinValue;
+        _activeStuckSinceUtc = DateTime.MinValue;
+        _activeStuckReported = false;
         navigation.ResetApproachEscape();
 
         // Always reset rendezvous on goal entry — the assist must re-confirm
@@ -655,6 +695,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
             // Fall through — navigation continues; no stop, no Idle transition.
         }
+
+        // Active-navigation stuck reporting. May override the Following/NavigatingToLeader
+        // status set above to BotStatus.Stuck if the assist has stopped making progress.
+        // The leader's ShouldLeaderPauseForAssist already gates on Status==Stuck (line 161
+        // of AssistStateStore), so reporting here is sufficient — no additional API change
+        // required. See log 21 (assist 00:11:03–00:11:15) for the symptom this fixes.
+        TickActiveStuckDetection();
 
         // Update navigation target.
         // Waypoint-sharing mode: when the rendezvous has been confirmed and the leader
@@ -1097,6 +1144,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navActiveElapsed = TimeSpan.Zero;
         _navProgressCheckPosW = default;
         _lastNavigatedToLeaderWorldPos = default;
+        _activeStuckSinceUtc = DateTime.MinValue;
+        _activeStuckReported = false;
     }
 
     // -----------------------------------------------------------------------
@@ -1141,6 +1190,85 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             logger.LogWarning(
                 $"[FFG] Navigation stuck timeout ({_navActiveElapsed.TotalSeconds:0.0}s without progress) — escalating to CantFollow.");
             EnterCantFollow();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Active-navigation stuck reporting
+    //
+    // Detects when the assist is in NavigatingToLeader but failing to make
+    // forward progress, and reports BotStatus.Stuck via the API so the leader's
+    // FRG.ShouldLeaderPauseForAssist gates on it (line 161 of AssistStateStore).
+    //
+    // Without this signal, the leader sees the assist as
+    // status=NavigatingToLeader && dist<20y and continues patrolling onto the
+    // next mob, leaving the stuck assist behind. Observed in log 21
+    // (assist 00:11:03–00:11:15): the assist was caught on terrain at
+    // <-404.23, -4062.5> for ~12s while the leader engaged the next mob.
+    // Navigation.cs's chase watchdog logged "No chase progress while stationary"
+    // every 1.5s during the stuck period but did not surface the condition to
+    // the leader API.
+    //
+    // Triggers on movement < ActiveStuckMinMovementWorld (1y) over
+    // ActiveStuckThresholdSec (2.5s). Recovery flips status back to
+    // NavigatingToLeader so the leader resumes naturally. Skipped during
+    // combat or evade-recovery, both of which legitimately stop movement.
+    // -----------------------------------------------------------------------
+    private void TickActiveStuckDetection()
+    {
+        if (bits.Combat() || _evadeRecoveryActive)
+        {
+            // Combat/evade naturally suspends progress; clear tracking so we
+            // don't immediately flag stuck on resumption.
+            _activeStuckSinceUtc = DateTime.MinValue;
+            _activeStuckReported = false;
+            return;
+        }
+
+        Vector3 currentPos = playerReader.WorldPos;
+        var now = DateTime.UtcNow;
+
+        if (_activeStuckSinceUtc == DateTime.MinValue)
+        {
+            // First tick of this navigation phase — anchor the position and start the clock.
+            _activeStuckSinceUtc = now;
+            _activeStuckCheckPosW = currentPos;
+            return;
+        }
+
+        float moved = currentPos.WorldDistanceXYTo(_activeStuckCheckPosW);
+        if (moved >= ActiveStuckMinMovementWorld)
+        {
+            // Made progress — reset the window and clear any prior Stuck report.
+            _activeStuckCheckPosW = currentPos;
+            _activeStuckSinceUtc = now;
+
+            if (_activeStuckReported)
+            {
+                _activeStuckReported = false;
+                // Restore NavigatingToLeader so the leader resumes patrol. Note
+                // that a concurrent Following assignment in UpdateNavigatingToLeader
+                // (when dist<10y) sets Following AFTER us when the next tick runs,
+                // so this restoration is safe — the higher-level status logic
+                // re-asserts itself naturally on the next pass.
+                assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
+                logger.LogInformation(
+                    $"[FFG] Movement resumed during navigation (moved {moved:0.00}y) — " +
+                    "reverting status from Stuck to NavigatingToLeader.");
+            }
+            return;
+        }
+
+        // Movement is below threshold. Has the stationary window elapsed?
+        double elapsed = (now - _activeStuckSinceUtc).TotalSeconds;
+        if (elapsed >= ActiveStuckThresholdSec && !_activeStuckReported)
+        {
+            _activeStuckReported = true;
+            assistStatusProvider.CurrentStatus = BotStatus.Stuck;
+            logger.LogWarning(
+                $"[FFG] Stuck while navigating — moved only {moved:0.00}y in {elapsed:0.0}s " +
+                $"at {currentPos}. Reporting Stuck so leader pauses; " +
+                "Navigation.cs chase watchdog will attempt recovery.");
         }
     }
 
