@@ -688,32 +688,48 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         if (navTargetDrift > WaypointUpdateThresholdYards)
         {
-            // Waypoint-advance suppression: when the leader pops its own patrol waypoint
-            // and publishes the next one, the new target is typically further along the
-            // same patrol route. The assist's existing route to the previous published
-            // waypoint is still a valid prefix of the route to the new waypoint —
-            // re-running the pather only to lengthen the route by ~12y at the end is
-            // wasteful and visibly disruptive: SetSingleWaypoint discards the existing
-            // route, the bot momentarily idles waiting for the new path (typically
-            // 20–40ms but up to 135ms for longer paths in this log), and the new path's
-            // routeTop is often in a slightly different direction than the previous,
-            // producing a visible body rotation as the bot turns toward the new heading.
+            // Path-preservation suppression: when the new navigation target is roughly
+            // aligned with the bot's current direction of travel AND further away than
+            // the bot's current waypoint, the existing route is still a valid prefix of
+            // the route to the new target. Re-running the pather only to lengthen the
+            // route by ~12y at the end is wasteful and visibly disruptive:
+            // SetSingleWaypoint discards the existing route, the bot momentarily idles
+            // waiting for the new path, and the new path's routeTop is often in a
+            // slightly different direction than the previous, producing a visible body
+            // rotation as the bot turns toward the new heading.
             //
-            // In log 19 (assist 22:32:54–22:32:57) this manifested as three new published
-            // waypoints in 3.6s, each triggering a fresh pathfind and a turn-around, which
-            // the user described as "back-and-forth" movement. The compounding effect of
-            // the bot constantly re-pathing also slows it down enough that the leader's
-            // 20y distance gate fires repeatedly — the "starting and stopping" symptom.
+            // Originally added in session 19 for WaypointSharing mode to absorb the
+            // leader's per-pop waypoint advances during patrol. Broadened in session 20
+            // to cover Anchor and PositionChase modes after observing the same path-
+            // discard storm during ATG/PTG cycles:
             //
-            // Fix: in WaypointSharing mode, if the new target is roughly aligned (angle
-            // < 45°) with the bot's current direction of travel AND at least as far as
-            // the existing waypoint, keep walking the existing route. Direction changes
-            // (cos < 0.7, e.g. route wrap or corner turn) still refresh as before. The
-            // bot will pick up the new target naturally when it reaches the existing
-            // waypoint via Navigation_OnDestinationReached → GetNavigationTarget.
+            //   Log 20 (assist 23:28:07–23:28:14): leader cycled ATG#1 → PTG#1 → ATG#2
+            //   → PTG#2 → Combat in 7 seconds. Each Has* toggle flipped the assist's
+            //   nav mode, and each flip with drift > 3y discarded the existing path.
+            //   Combined with intra-PositionChase drift updates as the leader's body
+            //   moved 3-4y per tick, the assist accumulated 5 path rebuilds in 2
+            //   seconds. Each rebuild started from the bot's current (already-SW)
+            //   position, producing yet another route that began SW. The bot wandered
+            //   SW for ~6s before stalling and another ~8s correcting NE before
+            //   reaching the leader, where 2 seconds of direct travel would have
+            //   sufficed. The user described this as "ran off in opposite direction
+            //   before correcting".
+            //
+            // The geometric principle (existing route is a valid prefix when the new
+            // target is in the same general direction, only further) holds regardless
+            // of which mode produced the new target. Direction changes (cos < 0.7,
+            // e.g. leader pivots, route wraps, or genuine rendezvous) still fail the
+            // angle test and refresh as before.
+            //
+            // Trade-off in PositionChase steady-state: with suppression the bot
+            // follows leader's position-from-a-few-seconds-ago instead of leader's
+            // live position. When the bot reaches the old position via
+            // OnDestinationReached, GetNavigationTarget refreshes to the latest
+            // chase point. Net: the bot trails by roughly the distance the leader
+            // moves during one nav phase rather than constantly re-pathing. Better
+            // than rebuild storms; reactive enough for normal patrol following.
             bool suppressRefresh = false;
-            if (_currentNavTargetMode == NavTargetMode.WaypointSharing &&
-                navigation.HasWaypoint())
+            if (navigation.HasWaypoint())
             {
                 Vector3 existingWp = navigation.TopWaypointW;
                 Vector3 botPos = playerReader.WorldPos;
@@ -729,9 +745,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 // aLen > 0.001 guards against the degenerate case where the bot has
                 // already arrived at the existing waypoint (zero-length vector → cos
                 // undefined). nLen >= aLen ensures the new target really is "further
-                // along" — if the leader's published target is closer to the bot than
-                // the existing waypoint, the existing route overshoots and should
-                // be refreshed.
+                // along" — if the new target is closer to the bot than the existing
+                // waypoint, the existing route overshoots and should be refreshed
+                // (e.g., leader pivoted and now is between bot and old wpTop).
                 if (aLen > 0.001f && nLen > 0.001f && nLen >= aLen)
                 {
                     float cosAngle = (ax * nx + ay * ny) / (aLen * nLen);
@@ -739,17 +755,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     {
                         suppressRefresh = true;
                         logger.LogDebug(
-                            $"[FFG] Waypoint advance suppressed: existing wp at {existingWp} ({aLen:0.0}y) " +
-                            $"still aligned with new target {currentNavigationTarget} ({nLen:0.0}y), " +
-                            $"cos={cosAngle:0.00}. Keeping existing route.");
+                            $"[FFG] Path-preservation suppression ({_currentNavTargetMode}): " +
+                            $"existing wp at {existingWp} ({aLen:0.0}y) still aligned with " +
+                            $"new target {currentNavigationTarget} ({nLen:0.0}y), cos={cosAngle:0.00}. " +
+                            "Keeping existing route.");
                     }
                 }
             }
 
             // Always update _lastNavigatedToLeaderWorldPos — even on suppression — so the
-            // next drift comparison uses the latest published target as the baseline. If
-            // we left it stale, the drift gate would re-fire on every tick (the new
-            // target is still > 3y from the historical _lastNavigatedToLeaderWorldPos).
+            // next drift comparison uses the latest target as the baseline. If we left
+            // it stale, the drift gate would re-fire on every tick (the new target is
+            // still > 3y from the historical _lastNavigatedToLeaderWorldPos).
             _lastNavigatedToLeaderWorldPos = currentNavigationTarget;
 
             if (!suppressRefresh)
