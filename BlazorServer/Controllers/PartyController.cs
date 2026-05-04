@@ -1,3 +1,5 @@
+using Core;
+using Core.GOAP;
 using Core.Party;
 
 using Microsoft.AspNetCore.Mvc;
@@ -11,6 +13,9 @@ namespace BlazorServer.Controllers;
 /// <list type="bullet">
 ///   <item><c>GET  /party/leader/state</c> — assist polls for the leader's live position and status.</item>
 ///   <item><c>POST /party/assist/state</c> — assist pushes its own state to the leader.</item>
+///   <item><c>POST /party/debug/evade/{guid}</c> — test-only: injects a synthetic
+///   <see cref="EvadeBlacklistEvent"/> on the leader to exercise the blacklist +
+///   evade-recovery pipeline end-to-end without needing a real in-game evade trigger.</item>
 /// </list>
 /// Rate limiting is performed on the client side via <see cref="PartyApiConfig"/>.
 /// The endpoints themselves are stateless read/writes against singleton services.
@@ -48,5 +53,81 @@ public sealed class PartyController : ControllerBase
         state.Timestamp = DateTime.UtcNow;
         store.Update(state);
         return Ok();
+    }
+
+    /// <summary>
+    /// Test-only endpoint: injects a synthetic <see cref="EvadeBlacklistEvent"/>
+    /// into the leader's <see cref="GoapAgent"/> dispatcher, exercising the same
+    /// code path a real evade in <see cref="Goals.ApproachTargetGoal"/> or
+    /// <see cref="Goals.CombatGoal"/> would trigger.
+    /// <para>
+    /// What this verifies end-to-end on a live two-bot setup:
+    /// <list type="number">
+    ///   <item>Leader: <c>HandleGoapEvent</c> sets <c>_evadeRecoveryUntilUtc</c>,
+    ///   sets <c>_evadeLeaderWaiting</c>, calls <c>stopMoving.Stop()</c>, and
+    ///   calls <c>leaderNavProvider.AddBlacklistedMobGuid(guid)</c>.</item>
+    ///   <item>Leader: next <c>GET /party/leader/state</c> includes the GUID in
+    ///   <see cref="LeaderState.BlacklistedMobGuids"/>.</item>
+    ///   <item>Assist: <c>FollowFocusGoal.Update</c> diff loop sees the new GUID,
+    ///   calls <c>IgnoreTarget</c>, raises its own <see cref="EvadeBlacklistEvent"/>,
+    ///   and sets <c>CantFollow=true</c>.</item>
+    ///   <item>Both bots: <c>GoapKey.evadeRecovery</c> flips on/off as the 25-second
+    ///   recovery window opens and expires.</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// Use <c>guid=0</c> to exercise the ghost-combat branch instead (15-second
+    /// recovery, no GUID added to the blacklist — only the timing path is verified
+    /// since the API blacklist transport is skipped).
+    /// </para>
+    /// <para>
+    /// Always available, including in Release builds. The endpoint:
+    /// <list type="bullet">
+    ///   <item>requires the bot to be running in <see cref="Mode.PartyLeader"/>
+    ///   mode (refuses with 409 otherwise — see <c>GoapAgent.RaiseDebugEvent</c>);</item>
+    ///   <item>requires the bot to be started (refuses with 409 if
+    ///   <c>BotController.GoapAgent</c> is null);</item>
+    ///   <item>does nothing destructive — it only triggers the same logic a real
+    ///   evade would, which is bounded by the existing recovery-window timing.</item>
+    /// </list>
+    /// The party API is expected to bind to a non-public address; protect at the
+    /// network layer if exposing beyond localhost / LAN.
+    /// </para>
+    /// </summary>
+    /// <param name="guid">The mob GUID to inject. Use <c>0</c> for the ghost-combat
+    /// branch.</param>
+    [HttpPost("debug/evade/{guid:int}")]
+    public IActionResult PostDebugEvade(
+        int guid,
+        [FromServices] IBotController botController)
+    {
+        // Mirrors the access pattern in LeaderStateService.DetermineStatus,
+        // which also reaches GoapAgent through IBotController.
+        GoapAgent? agent = botController.GoapAgent;
+        if (agent == null)
+        {
+            return Conflict("Bot is not started — GoapAgent is not yet available. " +
+                "Start the bot before invoking this endpoint.");
+        }
+
+        bool dispatched = agent.RaiseDebugEvent(new EvadeBlacklistEvent(guid));
+        if (!dispatched)
+        {
+            // RaiseDebugEvent only refuses when classConfig.Mode != PartyLeader.
+            // Reflect that in the HTTP response so the test driver gets a clear signal.
+            return Conflict("Bot is not running in PartyLeader mode. " +
+                "The leader-side blacklist + evade-recovery pipeline can only be " +
+                "exercised on a leader process.");
+        }
+
+        return Ok(new
+        {
+            dispatched = true,
+            guid,
+            note = guid == 0
+                ? "Ghost-combat branch: 15s recovery window, no GUID added to blacklist."
+                : "Evade branch: 25s recovery window, GUID added to leader blacklist " +
+                  "and propagated to assist via /party/leader/state."
+        });
     }
 }

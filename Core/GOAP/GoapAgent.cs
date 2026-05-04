@@ -755,6 +755,59 @@ public sealed partial class GoapAgent : IDisposable
             goal.OnGoapEvent(new GoapStateEvent(goapKey, value));
     }
 
+    /// <summary>
+    /// Test-only entry point that injects a synthetic <see cref="GoapEventArgs"/>
+    /// into the same dispatcher (<see cref="HandleGoapEvent"/>) that real goal-raised
+    /// events flow through. Exists to verify the leader→assist blacklist + evade-recovery
+    /// pipeline without needing to find a real evading mob in WoW Classic.
+    /// <para>
+    /// Bypasses the normal "goal raises event via SendGoapEvent" path and calls the
+    /// dispatcher directly. This is observationally identical: every goal's
+    /// <c>GoapEvent</c> is wired to <see cref="HandleGoapEvent"/> at agent construction
+    /// (see the <c>a.GoapEvent += HandleGoapEvent</c> subscription at line 183), and
+    /// no goal's <see cref="IGoapEventListener.OnGoapEvent"/> branches on
+    /// <see cref="EvadeBlacklistEvent"/> — only <see cref="HandleGoapEvent"/> does.
+    /// So there is no observable difference between routing through a goal and
+    /// calling the dispatcher directly.
+    /// </para>
+    /// <para>
+    /// Refuses non-PartyLeader modes: invoking on an assist would arm the assist's
+    /// own evade-recovery window via the <see cref="EvadeBlacklistEvent"/> branch,
+    /// which is harmless but not useful for the leader-side test it exists to support.
+    /// The assist's evade-recovery is already exercised end-to-end as a side effect
+    /// of injecting on the leader (the GUID propagates via the API to the assist's
+    /// FFG blacklist diff loop, which itself raises <see cref="EvadeBlacklistEvent"/>
+    /// locally).
+    /// </para>
+    /// <para>
+    /// Threading: called from an HTTP request thread, not the GOAP thread. Same call
+    /// pattern as the <see cref="Active"/> property setter (which calls
+    /// <c>stopMoving.Stop()</c> and <c>input.Reset()</c> from the UI thread); the
+    /// underlying handlers were already designed to tolerate this.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// True if the event was dispatched. False if refused — currently only when
+    /// the bot is not running in <see cref="Mode.PartyLeader"/>.
+    /// </returns>
+    public bool RaiseDebugEvent(GoapEventArgs e)
+    {
+        if (classConfig.Mode != Mode.PartyLeader)
+        {
+            logger.LogWarning(
+                $"[GoapAgent] RaiseDebugEvent refused: mode is {classConfig.Mode}, " +
+                "expected PartyLeader. The leader-side blacklist + evade-recovery " +
+                "pipeline cannot be exercised on an assist.");
+            return false;
+        }
+
+        logger.LogInformation(
+            $"[GoapAgent] RaiseDebugEvent dispatching synthetic {e.GetType().Name} " +
+            "via HandleGoapEvent — TEST-INDUCED, not from a real evade trigger.");
+
+        HandleGoapEvent(e);
+        return true;
+    }
     private void RemoveClosestPoiByType(string type)
     {
         if (routeInfo.PoiList.Count == 0) return;
