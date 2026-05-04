@@ -688,8 +688,74 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         if (navTargetDrift > WaypointUpdateThresholdYards)
         {
+            // Waypoint-advance suppression: when the leader pops its own patrol waypoint
+            // and publishes the next one, the new target is typically further along the
+            // same patrol route. The assist's existing route to the previous published
+            // waypoint is still a valid prefix of the route to the new waypoint —
+            // re-running the pather only to lengthen the route by ~12y at the end is
+            // wasteful and visibly disruptive: SetSingleWaypoint discards the existing
+            // route, the bot momentarily idles waiting for the new path (typically
+            // 20–40ms but up to 135ms for longer paths in this log), and the new path's
+            // routeTop is often in a slightly different direction than the previous,
+            // producing a visible body rotation as the bot turns toward the new heading.
+            //
+            // In log 19 (assist 22:32:54–22:32:57) this manifested as three new published
+            // waypoints in 3.6s, each triggering a fresh pathfind and a turn-around, which
+            // the user described as "back-and-forth" movement. The compounding effect of
+            // the bot constantly re-pathing also slows it down enough that the leader's
+            // 20y distance gate fires repeatedly — the "starting and stopping" symptom.
+            //
+            // Fix: in WaypointSharing mode, if the new target is roughly aligned (angle
+            // < 45°) with the bot's current direction of travel AND at least as far as
+            // the existing waypoint, keep walking the existing route. Direction changes
+            // (cos < 0.7, e.g. route wrap or corner turn) still refresh as before. The
+            // bot will pick up the new target naturally when it reaches the existing
+            // waypoint via Navigation_OnDestinationReached → GetNavigationTarget.
+            bool suppressRefresh = false;
+            if (_currentNavTargetMode == NavTargetMode.WaypointSharing &&
+                navigation.HasWaypoint())
+            {
+                Vector3 existingWp = navigation.TopWaypointW;
+                Vector3 botPos = playerReader.WorldPos;
+
+                float ax = existingWp.X - botPos.X;
+                float ay = existingWp.Y - botPos.Y;
+                float nx = currentNavigationTarget.X - botPos.X;
+                float ny = currentNavigationTarget.Y - botPos.Y;
+
+                float aLen = MathF.Sqrt(ax * ax + ay * ay);
+                float nLen = MathF.Sqrt(nx * nx + ny * ny);
+
+                // aLen > 0.001 guards against the degenerate case where the bot has
+                // already arrived at the existing waypoint (zero-length vector → cos
+                // undefined). nLen >= aLen ensures the new target really is "further
+                // along" — if the leader's published target is closer to the bot than
+                // the existing waypoint, the existing route overshoots and should
+                // be refreshed.
+                if (aLen > 0.001f && nLen > 0.001f && nLen >= aLen)
+                {
+                    float cosAngle = (ax * nx + ay * ny) / (aLen * nLen);
+                    if (cosAngle > 0.7f)
+                    {
+                        suppressRefresh = true;
+                        logger.LogDebug(
+                            $"[FFG] Waypoint advance suppressed: existing wp at {existingWp} ({aLen:0.0}y) " +
+                            $"still aligned with new target {currentNavigationTarget} ({nLen:0.0}y), " +
+                            $"cos={cosAngle:0.00}. Keeping existing route.");
+                    }
+                }
+            }
+
+            // Always update _lastNavigatedToLeaderWorldPos — even on suppression — so the
+            // next drift comparison uses the latest published target as the baseline. If
+            // we left it stale, the drift gate would re-fire on every tick (the new
+            // target is still > 3y from the historical _lastNavigatedToLeaderWorldPos).
             _lastNavigatedToLeaderWorldPos = currentNavigationTarget;
-            navigation.SetSingleWaypoint(currentNavigationTarget); // world coords — SetWayPoints detects non-map range
+
+            if (!suppressRefresh)
+            {
+                navigation.SetSingleWaypoint(currentNavigationTarget); // world coords — SetWayPoints detects non-map range
+            }
         }
 
         // Record position for TryUnstuck direction.
