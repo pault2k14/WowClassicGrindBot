@@ -64,6 +64,25 @@ public sealed partial class GoapAgent : IDisposable
 
     private bool _evadeLeaderWaiting;
 
+    // -----------------------------------------------------------------------
+    // Assist-side blacklist tracking
+    //
+    // Tracks GUIDs already observed in the leader's BlacklistedMobGuids API
+    // field. When a NEW GUID arrives, the agent-level diff in GoapThread
+    // dispatches EvadeBlacklistEvent so the assist's CombatGoal exits via
+    // its evadeRecovery precondition (CombatGoal.cs:191).
+    //
+    // Critical: this MUST live on the agent (not on FFG), because Combat is
+    // cost 4 and FFG is cost 19 — Combat preempts FFG. A leader-published
+    // blacklist GUID dispatched during the assist's combat would otherwise
+    // not be seen by the assist until combat ended naturally, by which
+    // point the mob is already dead. Observed in log 22 (assist 18:03:34
+    // through 18:03:46): the assist cast Smite 4 times against the
+    // blacklisted GUID before FFG.OnEnter ran the original FFG-level diff
+    // — 3 seconds AFTER kill credit.
+    // -----------------------------------------------------------------------
+    private readonly System.Collections.Generic.HashSet<int> _knownBlacklistedGuids = new();
+
     private bool active;
     public bool Active
     {
@@ -285,6 +304,53 @@ public sealed partial class GoapAgent : IDisposable
                     {
                         AssistNotRequestReturn();
                         previousAssistCantFollow = false;
+                    }
+                }
+            }
+
+            // ── Assist side: API-based mob blacklist ─────────────────────
+            // Diff BlacklistedMobGuids from the leader API at the agent level so
+            // the signal interrupts the assist's combat regardless of which goal
+            // is currently active. Without this, the equivalent diff in
+            // FollowFocusGoal.Update only runs when FFG is the active goal —
+            // but Combat (cost 4) preempts FFG (cost 19), so a leader evade
+            // dispatched during the assist's combat would not reach the assist
+            // until combat ends naturally. By that point the mob is dead and
+            // the signal is moot. See log 22 (assist 18:03:34 through
+            // 18:03:46): assist cast Smite 4 times against guid=7945779 after
+            // the leader had blacklisted it; the assist saw the GUID only when
+            // FFG.OnEnter fired post-loot, 3 seconds after kill credit.
+            //
+            // Each new GUID:
+            //   1. IgnoreTarget(guid) — addon-side ignore so targeting won't
+            //      re-acquire it
+            //   2. HandleGoapEvent(EvadeBlacklistEvent) — same dispatcher real
+            //      evades and the test endpoint use; sets _evadeRecoveryUntilUtc
+            //   3. The block below (line 312) will then observe the new
+            //      _evadeRecoveryUntilUtc value on this same iteration and
+            //      broadcast GoapKey.evadeRecovery=true, which CombatGoal
+            //      consumes via OnGoapEvent (CombatGoal.cs:126) and reacts to
+            //      on its next Update tick (CombatGoal.cs:191).
+            //   4. assistStatusProvider.CantFollow=true keeps FFG selectable
+            //      after CombatGoal exits — matches the original FFG diff loop
+            //      behavior (line 433 of FollowFocusGoal.cs).
+            if (classConfig.Mode == Mode.AssistFocus)
+            {
+                LeaderState? leaderState = leaderConnection.LastLeaderState;
+                if (leaderState != null && leaderState.BlacklistedMobGuids is { Length: > 0 })
+                {
+                    foreach (int guid in leaderState.BlacklistedMobGuids)
+                    {
+                        if (guid != 0 && _knownBlacklistedGuids.Add(guid))
+                        {
+                            logger.LogInformation(
+                                $"[GoapAgent] New blacklisted mob guid={guid} from API — " +
+                                "ignoring target and dispatching EvadeBlacklistEvent.");
+
+                            playerReader.IgnoreTarget(guid);
+                            HandleGoapEvent(new EvadeBlacklistEvent(guid));
+                            assistStatusProvider.CantFollow = true;
+                        }
                     }
                 }
             }

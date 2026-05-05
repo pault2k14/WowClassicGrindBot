@@ -217,14 +217,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private Vector3 _lastSharedWaypointW;
 
     // -----------------------------------------------------------------------
-    // Mob blacklist — API-based replacement for chatReader.LeaderBlacklistTarget.
-    // The assist diffs leader.BlacklistedMobGuids each tick. Any GUID present
-    // in the new snapshot but not in _knownBlacklistedGuids triggers an
-    // IgnoreTarget call and EvadeBlacklistEvent, mirroring the old chat flow.
-    // -----------------------------------------------------------------------
-    private readonly System.Collections.Generic.HashSet<int> _knownBlacklistedGuids = new();
-
-    // -----------------------------------------------------------------------
     // Navigation active-time timeout
     // -----------------------------------------------------------------------
     private TimeSpan _navActiveElapsed;
@@ -407,33 +399,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (bits.Drowning())
             input.PressJump();
 
-        // ── API-based mob blacklist ─────────────────────────────────────────
-        // The leader publishes BlacklistedMobGuids in every LeaderState response.
-        // We diff against _knownBlacklistedGuids; any new GUID triggers the same
-        // flow the old chat message did: stop attack, IgnoreTarget, EvadeBlacklistEvent.
-        LeaderState? leaderForBlacklist = leaderConnection.LastLeaderState;
-        if (leaderForBlacklist != null &&
-            leaderForBlacklist.BlacklistedMobGuids is { Length: > 0 })
-        {
-            foreach (int guid in leaderForBlacklist.BlacklistedMobGuids)
-            {
-                if (guid != 0 && _knownBlacklistedGuids.Add(guid))
-                {
-                    logger.LogInformation($"[FFG] New blacklisted mob guid={guid} from API — ignoring target.");
-                    input.PressStopAttack();
-                    wait.Update();
-                    playerReader.IgnoreTarget(guid);
-                    input.PressClearTarget();
-                    wait.Update();
-
-                    SendGoapEvent(new EvadeBlacklistEvent(guid));
-                    // assistStatusProvider.CantFollow keeps assistshouldfollow=true so FFG
-                    // remains selectable throughout evade recovery, even when dmgTaken/dmgDone
-                    // would otherwise block it. Cleared when the assist re-enters Following range.
-                    assistStatusProvider.CantFollow = true;
-                }
-            }
-        }
+        // Note: API-based mob blacklist diff lives in GoapAgent.GoapThread
+        // (not here) so the signal interrupts the assist's combat regardless
+        // of which goal is active. Combat (cost 4) preempts FFG (cost 19),
+        // so an FFG-only diff would only fire after combat ended naturally —
+        // observed in log 22 (assist 18:03:34–18:03:46): the assist saw the
+        // GUID 3 seconds AFTER kill credit because FFG.OnEnter fired only
+        // post-loot. The agent-level diff is the correct location.
 
         if (chatReader.ForcedFollow)
         {
