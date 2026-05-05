@@ -710,6 +710,27 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         $"[FRG] Pausing for assist — dist={dist:0.0}y " +
                         $"status={stuckAssist?.Status.ToString() ?? "TooFar"}");
 
+                    // Diagnostic detail: print the inputs that produced `dist`,
+                    // so we can distinguish "leader genuinely > 20 y away from
+                    // assist" from "leader is reading a stale assist snapshot".
+                    // Added after log 30 showed the assist reporting
+                    // "Reached follow position (dist=7.0y)" only 220 ms before
+                    // the leader logged "Pausing for assist — dist=20.1y" —
+                    // physically impossible without one side reading bad data.
+                    Vector3 leaderPos = playerReader.WorldPos;
+                    logger.LogInformation(
+                        $"[FRG] Pause-detail: leaderPos=<{leaderPos.X:F2},{leaderPos.Y:F2},{leaderPos.Z:F2}> " +
+                        $"pauseYards={LeaderPauseYards}");
+                    foreach (AssistState s in assistStateStore.GetAll())
+                    {
+                        float d = leaderPos.WorldDistanceXYTo(s.WorldPos);
+                        logger.LogInformation(
+                            $"[FRG] Pause-detail: assist id='{s.AssistId}' " +
+                            $"pos=<{s.WorldX:F2},{s.WorldY:F2},{s.WorldZ:F2}> " +
+                            $"status={s.Status} cantFollow={s.CantFollow} " +
+                            $"dist={d:F2}y ageMs={s.AgeMs:F0} stale={assistStateStore.IsStale(s)}");
+                    }
+
                     _pausedByAssistDistance = true;
                     // StopMovement must be called before PausePathing.
                     // PausePathing() suspends navigation and stops steering (left/right keys)
@@ -736,6 +757,25 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     float dist = assistStateStore.GetNearestAssistDistanceYards(playerReader.WorldPos);
                     logger.LogInformation(
                         $"[FRG] Assist Following and within range (dist={dist:0.0}y) — resuming patrol.");
+
+                    // Same diagnostic detail as the pause path. The pause and
+                    // resume thresholds are different (LeaderPauseYards=20,
+                    // LeaderResumeYards=15), and during a flapping window the
+                    // resume side can also fire on stale data.
+                    Vector3 leaderPos = playerReader.WorldPos;
+                    logger.LogInformation(
+                        $"[FRG] Resume-detail: leaderPos=<{leaderPos.X:F2},{leaderPos.Y:F2},{leaderPos.Z:F2}> " +
+                        $"resumeYards={LeaderResumeYards}");
+                    foreach (AssistState s in assistStateStore.GetAll())
+                    {
+                        float d = leaderPos.WorldDistanceXYTo(s.WorldPos);
+                        logger.LogInformation(
+                            $"[FRG] Resume-detail: assist id='{s.AssistId}' " +
+                            $"pos=<{s.WorldX:F2},{s.WorldY:F2},{s.WorldZ:F2}> " +
+                            $"status={s.Status} cantFollow={s.CantFollow} " +
+                            $"dist={d:F2}y ageMs={s.AgeMs:F0} stale={assistStateStore.IsStale(s)}");
+                    }
+
                     _pausedByAssistDistance = false;
                     // Normal flow below will call navigation.Resume() / RefillWaypoints.
                     navigation.ClearAllRoutes();
