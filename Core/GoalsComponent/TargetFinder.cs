@@ -74,6 +74,29 @@ public sealed class TargetFinder : IDisposable
             targetFinderDisabledUntilUtc = until; // extend, don't shorten
     }
 
+    /// <summary>
+    /// Extend the internal "disabled" window from an external caller. Used by
+    /// <c>FollowRouteGoal.SuppressTargetFinderBriefly</c> to gate
+    /// <see cref="Search"/> for the full 25 s evade-recovery window — without
+    /// this the side thread's <c>Thread_LookingForTarget</c> can press Tab
+    /// inside the suppression window because <c>ManualResetEventSlim.Reset()</c>
+    /// only blocks future <c>Wait()</c> calls, not threads already past Wait
+    /// and inside <see cref="Search"/>.
+    ///
+    /// Observed in log 25 (leader 23:01:23:458 SuppressTargetFinderBriefly →
+    /// 23:01:23:731 Tab pressed by side thread, 273 ms later → "Found target!"
+    /// re-acquired the blacklisted mob 7963945 → wantNavPaused=true → leader
+    /// stationary for the rest of the 25 s window).
+    ///
+    /// Same "extend, don't shorten" policy as
+    /// <see cref="DisableTargetFinderForBlacklist"/>.
+    /// </summary>
+    public void DisableUntil(DateTime utc)
+    {
+        if (utc > targetFinderDisabledUntilUtc)
+            targetFinderDisabledUntilUtc = utc;
+    }
+
     public void Reset()
     {
         npcNameTargeting.ChangeNpcType(NpcNames.None);

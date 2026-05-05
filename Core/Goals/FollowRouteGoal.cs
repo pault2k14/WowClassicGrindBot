@@ -860,7 +860,26 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     public void SuppressTargetFinderBriefly(int durationMs)
     {
         _suppressTargetFinderUntilUtc = DateTime.UtcNow.AddMilliseconds(durationMs);
+
+        // Two layers of defence:
+        //
+        // 1. ManualResetEventSlim.Reset() — blocks the side thread on its NEXT
+        //    Wait() call. Insufficient on its own: if Wait() already returned
+        //    before the Reset was issued (HTTP thread runs HandleGoapEvent
+        //    while the side thread is mid-iteration), the in-flight Search()
+        //    continues, presses Tab, and acquires whatever's nearest.
+        //
+        // 2. targetFinder.DisableUntil(utc) — the next Search() call short-
+        //    circuits inside its own IsTargetFinderDisabled() check
+        //    (TargetFinder.cs:94) and returns false BEFORE pressing Tab. This
+        //    is the layer that actually stops the in-flight case once the
+        //    side thread loops back to the top of its Search(). For the
+        //    extreme race where Search is already past line 94 and about to
+        //    press Tab, the post-Search guard inside Thread_LookingForTarget
+        //    catches and discards the result.
         sideActivityManualReset.Reset();
+        targetFinder.DisableUntil(_suppressTargetFinderUntilUtc);
+
         logger.LogInformation($"[FRG] Target finder suppressed for {durationMs}ms after evade-blacklist broadcast.");
     }
 
@@ -881,6 +900,43 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             if (pathSettings.CanRunSideActivity() &&
                 targetFinder.Search(NpcNameToFind, bits.Target_NotDead, sideActivityCts.Token))
             {
+                // Belt-and-suspenders for the extreme race: SuppressTargetFinderBriefly
+                // was called by HandleGoapEvent on a different thread WHILE this Search()
+                // was already past TargetFinder.cs:94's IsTargetFinderDisabled() check
+                // and pressed Tab. If that happened, discard the result — do not let
+                // the existing branches below queue _pauseNavRequested, since that would
+                // leave wantNavPaused=true on subsequent FRG.Update ticks and stall
+                // navigation for the rest of the suppression window.
+                //
+                // Observed in log 25:
+                //   23:01:23:458  HandleGoapEvent → SuppressTargetFinderBriefly
+                //                  → ManualResetEventSlim.Reset() (no effect on
+                //                    in-flight thread) + DisableUntil (now also added,
+                //                    but thread was already past the Search check)
+                //   23:01:23:731  Tab pressed (273 ms later, mid-Search)
+                //   23:01:23:732  "Found target!" → _pauseNavRequested=1
+                //   23:01:23:xxx  navigation paused, wantNavPaused=true 25 s
+                //
+                // After this guard, the same race produces:
+                //   "[FRG] Side thread acquired target during suppression — discarding."
+                //   ClearTarget pressed, _pauseNavRequested NOT queued, navigation
+                //   continues per FRG's normal patrol logic.
+                if (_suppressTargetFinderUntilUtc != DateTime.MinValue &&
+                    DateTime.UtcNow < _suppressTargetFinderUntilUtc)
+                {
+                    logger.LogInformation(
+                        "[FRG] Side thread acquired target during suppression — discarding.");
+                    if (bits.Target())
+                    {
+                        input.PressClearTarget();
+                        wait.Update();
+                    }
+                    targetFinder.Reset();
+                    sideActivityManualReset.Reset();
+                    wait.Update();
+                    continue;
+                }
+
                 if (bits.Target() && bits.TargetTarget_PlayerOrPet()
                     && playerReader.IsIgnored(playerReader.TargetGuid)
                     && (bits.Combat() || bits.Focus_Combat()))

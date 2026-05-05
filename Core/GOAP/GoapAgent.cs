@@ -800,6 +800,22 @@ public sealed partial class GoapAgent : IDisposable
                 input.PressStopAttack();
                 input.PressClearTarget();
 
+                // Mark the GUID as ignored in the addon-side ignore list. Real-evade
+                // call sites (CombatGoal.cs:209, ApproachTargetGoal.cs:265 / 456)
+                // call this themselves before/around their SendGoapEvent dispatch —
+                // for those paths this is now idempotent (the addon de-duplicates
+                // adds). The test endpoint (PartyController.PostDebugEvade →
+                // RaiseDebugEvent → HandleGoapEvent) had no such call, leaving the
+                // leader's IsIgnored set empty for the synthetic GUID. Result, log 25:
+                //   23:01:48:472  evade window elapsed
+                //   23:01:48:473  New Plan = Combat (CombatGoal re-eligible)
+                //   23:01:48:535+ leader resumes Heroic Strike on guid=7963945
+                //                 because the session-24 IsIgnored short-circuit
+                //                 in CombatGoal.Update (line 198) saw IsIgnored=false
+                //   23:01:54:894  kill credit on the supposedly-blacklisted mob
+                // Centralizing the call here makes every dispatch path symmetric.
+                playerReader.IgnoreTarget(evade.TargetGuid);
+
                 if (classConfig.Mode == Mode.PartyLeader)
                 {
                     _evadeLeaderWaiting = true;

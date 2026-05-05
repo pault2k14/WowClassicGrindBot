@@ -75,6 +75,20 @@ public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
         if (bits.TargetTarget_PlayerOrPet())
             return false;
 
+        // If the focus's target is in playerReader.IsIgnored (just blacklisted via
+        // an evade event — agent-level diff on assist, real-evade call sites on
+        // leader, or the new HandleGoapEvent IgnoreTarget call covering the test
+        // endpoint), do NOT re-acquire it via PageUp+F. Doing so triggers a tight
+        // ping-pong: TFT acquires the blacklisted GUID via the focus chain → plan
+        // switches to Combat → CombatGoal's session-24 IsIgnored short-circuit
+        // (CombatGoal.cs:198) bounces it → plan back to TFT → loop. Three full
+        // cycles observed on the assist in log 25 (23:01:51:534, 23:01:51:996,
+        // 23:01:52:476) before CombatGoal.FindPossibleThreats's Tab path finally
+        // caught it and re-fired EvadeBlacklistEvent at 23:01:52:910 — starting
+        // a fresh 25 s evade-recovery window on top of the first one's tail.
+        if (bits.FocusTarget() && playerReader.IsIgnored(playerReader.FocusTargetGuid))
+            return false;
+
         return
             (bits.FocusTarget_Hostile() && bits.FocusTarget_Combat()) ||
             !bits.FocusTarget_Hostile();
