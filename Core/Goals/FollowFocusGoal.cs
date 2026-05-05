@@ -124,9 +124,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private readonly LeaderConnectionStatus leaderConnection;
     private readonly LeaderNavigationProvider leaderNavProvider;
 
-    // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true.
-    private bool _evadeRecoveryActive;
-
     // -----------------------------------------------------------------------
     // Nav state machine
     // -----------------------------------------------------------------------
@@ -315,8 +312,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
     public void OnGoapEvent(GoapEventArgs e)
     {
-        if (e is GoapStateEvent s && s.Key == GoapKey.evadeRecovery)
-            _evadeRecoveryActive = s.Value;
+        // FFG previously cached GoapKey.evadeRecovery state for two purposes:
+        //   1. A hold-position gate in Update() that suppressed all
+        //      navigation during the evade window.
+        //   2. Suppression of stuck-detection inside the navigation timeout,
+        //      active-stuck, and idle-stuck reporters.
+        // Both are removed in session 27. Fix 4 (FRG.wantNavPaused filtering
+        // IsIgnored) lets the leader actually retreat during the evade
+        // window, so the original "leader is sitting next to the mob" worry
+        // that motivated the hold gate no longer applies — FFG should track
+        // the retreating leader normally. And the stuck-detection
+        // suppression was protecting the gate's own forced stationary
+        // window; with the gate gone, real stalls during evade should be
+        // surfaced (BotStatus.Stuck → leader pauses → recovery), not
+        // hidden. Nothing in FFG needs to react to the evadeRecovery state
+        // any more.
     }
 
     // -----------------------------------------------------------------------
@@ -420,44 +430,64 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 wait.Update(1000);
         }
 
-        // ── Evade-recovery hold ────────────────────────────────────────────
-        // During the evade-recovery window, FFG must not initiate navigation
-        // toward the leader. The leader is still next to the blacklisted mob
-        // when the event fires (and stays there until the leader-side
-        // PressClearTarget releases the wantNavPaused gate in FRG.cs:741);
-        // chasing the leader's body via PositionChase would route the assist
-        // into the danger zone — observed in log 23 (assist 18:35:58:836–
-        // 18:36:00:440): CombatGoal exited via its evadeRecovery=false
-        // precondition, planner picked FFG, UpdateIdle saw dist=18.0y > 14y
-        // and dispatched StartNavigatingToLeader → ROUTESET routeCount=3 →
-        // 1.7s of movement keys → priest arrived at 8.6y from leader (i.e.,
-        // ~10y from the mob), and continued from there to 21.4y from leader
-        // by leader 18:37:03:717.
+        // ── Evade-recovery hold (REMOVED in session 27) ────────────────────
+        // Session 23 added a hold-position gate here that returned early during
+        // _evadeRecoveryActive, on the premise that "the leader is still next
+        // to the blacklisted mob when the event fires (and stays there until
+        // the leader-side PressClearTarget releases the wantNavPaused gate in
+        // FRG.cs:741); chasing the leader's body via PositionChase would
+        // route the assist into the danger zone."
         //
-        // The flag is already tracked here for stuck-detection gating
-        // (TickActiveStuckDetection at 1191, TickIdleStuckDetection at 1252)
-        // but was not previously used to gate navigation initiation. With
-        // this gate the priest holds position for the duration of the
-        // recovery window (EvadeRecoveryDurationSec=25s); once the broadcast
-        // clears _evadeRecoveryActive, the normal state machine resumes and
-        // the priest catches up to the leader from a safe distance.
+        // That premise was true at the time because Defect D (FRG.wantNavPaused
+        // didn't filter IsIgnored) prevented the leader from moving during
+        // evade. Fix 4 in session 26 closed Defect D — wantNavPaused now
+        // filters playerReader.IsIgnored, so the leader actually retreats.
         //
-        // CantFollow is excepted because it has its own hold-and-timeout
-        // logic that should continue ticking (CantFollowTimeoutSec=120s).
-        if (_evadeRecoveryActive && _navState != NavState.CantFollow)
-        {
-            if (_navState == NavState.NavigatingToLeader)
-            {
-                logger.LogInformation(
-                    "[FFG] Evade recovery active — stopping in-flight navigation, holding position.");
-                navigation.Stop();
-                input.StopForward(true);
-                ResetNavState();
-                EnterState(NavState.Idle);
-            }
-            wait.Update();
-            return;
-        }
+        // Log 27 confirmed the new failure mode created by leaving this gate
+        // in place after Fix 4:
+        //   00:50:05:631  evade fires
+        //   00:50:05:829  leader's FRG starts navigating (Fix 4 working) —
+        //                  RightArrow movement keys begin
+        //   00:50:08:608  leader has covered ~18y, still moving
+        //   00:50:09:602  leader hits LeaderPauseYards=20y → "[FRG] Pausing
+        //                  for assist — dist=20.0y status=TooFar"
+        //   00:50:05:771–30:610  assist FFG total silence (this gate held it
+        //                  in Idle for the full 24.84s window)
+        //   00:50:30:646  leader's evade window elapses
+        //   00:50:31:011  Tab in CombatGoal.FindPossibleThreats finds the
+        //                  same blacklisted mob still adjacent (because the
+        //                  leader couldn't continue retreating)
+        //   00:50:31:057  re-fired evade → cycle restarts
+        //
+        // Removing the gate lets FFG's normal state machine run during the
+        // evade-recovery window. The assist stays Idle while inside
+        // FollowingMaxYards (7y), transitions to NavigatingToLeader when the
+        // retreating leader exceeds NavigatingMinYards (14y), and tracks the
+        // leader's retreat naturally. The original "into the danger zone"
+        // concern is moot because the leader's body is no longer in the
+        // danger zone — it's actively retreating away from it.
+        //
+        // Other defenses remain in place to ensure the assist does not
+        // engage the blacklisted mob during the window:
+        //   - CombatGoal's AddPrecondition(GoapKey.evadeRecovery, false)
+        //     keeps Combat unselectable for the entire 25 s window.
+        //   - TFT.CanRun rejects on _evadeRecoveryActive AND, independently,
+        //     when playerReader.FocusTargetGuid is in IsIgnored (Fix 3/5a).
+        //   - CombatGoal.Update's session-24 IsIgnored short-circuit
+        //     (CombatGoal.cs:198) catches any race window where Combat
+        //     somehow runs an Update tick.
+        //   - TFT.Update's IsIgnored guard before the F press (Fix 5b).
+        //
+        // Stuck detection now runs unconditionally during the evade window
+        // (see TickNavActiveTimeout / TickActiveStuckDetection /
+        // TickIdleStuckDetection). The previous code suppressed it during
+        // evade because the hold gate above forced the assist stationary
+        // and we didn't want false-positive Stuck reports for that forced
+        // pause. With the gate gone, the assist navigates during evade and
+        // any real stall is a real problem — surfacing it (BotStatus.Stuck
+        // → leader pauses → recovery / pather-based escape) is exactly the
+        // right behaviour during a flee. Only bits.Combat() remains as an
+        // exemption because cast-loop stationarity is genuinely not a stall.
 
         // ── State machine ──────────────────────────────────────────────────
         switch (_navState)
@@ -1175,7 +1205,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        bool countActive = !bits.Combat() && !_evadeRecoveryActive;
+        // Accumulate elapsed only outside combat. Combat legitimately suspends
+        // forward movement (cast loops, etc.) and is handled by CombatGoal —
+        // FFG isn't even the active goal then in most cases. Evade-recovery
+        // is NOT exempted: during a flee the assist must keep moving, and a
+        // genuine stall during the window is exactly the case the timeout
+        // should surface (escalation to CantFollow → leader navigates back).
+        bool countActive = !bits.Combat();
         if (countActive)
             _navActiveElapsed += now - _navLastTickUtc;
 
@@ -1223,13 +1259,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // Triggers on movement < ActiveStuckMinMovementWorld (1y) over
     // ActiveStuckThresholdSec (2.5s). Recovery flips status back to
     // NavigatingToLeader so the leader resumes naturally. Skipped during
-    // combat or evade-recovery, both of which legitimately stop movement.
+    // combat (CombatGoal handles its own positioning, the assist legitimately
+    // stops to cast). NOT skipped during evade-recovery: with the session-27
+    // hold-gate removal the assist navigates during the window, so a stall
+    // there is a real stall — and surfacing it (leader pauses, navigates
+    // back to the stuck assist) is the right behaviour for a crucial flee.
     // -----------------------------------------------------------------------
     private void TickActiveStuckDetection()
     {
-        if (bits.Combat() || _evadeRecoveryActive)
+        if (bits.Combat())
         {
-            // Combat/evade naturally suspends progress; clear tracking so we
+            // Combat naturally suspends progress; clear tracking so we
             // don't immediately flag stuck on resumption.
             _activeStuckSinceUtc = DateTime.MinValue;
             _activeStuckReported = false;
@@ -1288,7 +1328,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     private void TickIdleStuckDetection()
     {
-        if (bits.Combat() || _evadeRecoveryActive)
+        if (bits.Combat())
         {
             _stuckCheckLastUtc = DateTime.MinValue;
             return;
