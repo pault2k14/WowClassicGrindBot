@@ -209,9 +209,37 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if (bits.Drowning())
             input.PressJump();
 
-        if (_evadeRecoveryActive)
+        // Abort if either:
+        //  (a) the GoapKey.evadeRecovery broadcast has fired and OnGoapEvent set
+        //      _evadeRecoveryActive=true (the original gate), OR
+        //  (b) the current target is already in playerReader.IsIgnored — which is
+        //      what HandleGoapEvent (real evade or test endpoint) effectively
+        //      asserts when it dispatches EvadeBlacklistEvent: the leader's
+        //      ApproachTargetGoal/PullTargetGoal/CombatGoal sites all call
+        //      playerReader.IgnoreTarget(guid) on the same update tick that
+        //      dispatches the event, and the test endpoint's PartyController
+        //      does the same. The agent-level diff on the assist also calls
+        //      IgnoreTarget before HandleGoapEvent.
+        //
+        // Without (b), ATG's update tick that is already in flight when
+        // HandleGoapEvent sets _evadeRecoveryUntilUtc on a different thread
+        // proceeds through the PressTargetFocus → PressTargetOfTarget →
+        // PressApproach chain at lines ~439–444, which re-acquires the
+        // blacklisted mob via the focus chain — undoing the ClearTarget that
+        // HandleGoapEvent just pressed. Observed in log 24 (leader
+        // 21:39:35:376 Insert pressed by HandleGoapEvent → 21:39:35:422 PageUp
+        // → 21:39:35:501 F → re-target on blacklisted mob 7962675 → leader
+        // stuck via wantNavPaused for 15s).
+        bool currentTargetIsIgnored =
+            bits.Target() && playerReader.TargetGuid != 0 &&
+            playerReader.IsIgnored(playerReader.TargetGuid);
+
+        if (_evadeRecoveryActive || currentTargetIsIgnored)
         {
-            logger.LogInformation("[ApproachTargetGoal] Evade recovery active — aborting approach.");
+            string reason = _evadeRecoveryActive
+                ? "evade recovery active"
+                : $"current target guid={playerReader.TargetGuid} is in IsIgnored (broadcast not yet seen)";
+            logger.LogInformation($"[ApproachTargetGoal] Aborting approach — {reason}.");
             input.StopForward(false);
             input.PressStopAttack();
             wait.Update();

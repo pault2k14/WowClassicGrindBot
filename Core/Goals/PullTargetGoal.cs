@@ -224,9 +224,19 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (_evadeRecoveryActive)
+        // See ApproachTargetGoal.cs Update() for the rationale: also abort when
+        // the current target is in playerReader.IsIgnored, in case the broadcast
+        // of GoapKey.evadeRecovery hasn't reached us yet on this update tick.
+        bool currentTargetIsIgnored =
+            bits.Target() && playerReader.TargetGuid != 0 &&
+            playerReader.IsIgnored(playerReader.TargetGuid);
+
+        if (_evadeRecoveryActive || currentTargetIsIgnored)
         {
-            logger.LogInformation("[PullTargetGoal] Evade recovery active — aborting pull.");
+            string reason = _evadeRecoveryActive
+                ? "evade recovery active"
+                : $"current target guid={playerReader.TargetGuid} is in IsIgnored (broadcast not yet seen)";
+            logger.LogInformation($"[PullTargetGoal] Aborting pull — {reason}.");
             input.PressStopAttack();
             wait.Update();
             input.PressClearTarget();

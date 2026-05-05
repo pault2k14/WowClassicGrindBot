@@ -291,13 +291,30 @@ public sealed partial class GoapAgent : IDisposable
                         AssistRequestReturn();
                         previousAssistCantFollow = true;
 
-                        logger.LogInformation(
-                            $"[GoapAgent] Assist CantFollow — navigating to assist position.");
-                        foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                        // Only log "navigating to assist position" when we will
+                        // actually issue a GoToOneWaypoint call. AnyAssistCantFollow()
+                        // returns true on either Status==BotStatus.CantFollow OR a
+                        // bare CantFollow flag (AssistStateStore.cs:109), but
+                        // GetCantFollowState() requires Status==BotStatus.CantFollow
+                        // (line 139). The agent-level blacklist diff on the assist
+                        // (GoapAgent.cs:352) sets only the flag, not the status —
+                        // so most evade-driven CantFollow transitions go through
+                        // the flag-only path and have no navigable target.
+                        AssistState? cantFollowForLog = assistStateStore.GetCantFollowState();
+                        if (cantFollowForLog != null)
                         {
-                            AssistState? cantFollow = assistStateStore.GetCantFollowState();
-                            if (cantFollow != null)
-                                goal.GoToOneWaypoint(cantFollow.MapPosNoZ);
+                            logger.LogInformation(
+                                $"[GoapAgent] Assist CantFollow — navigating to assist " +
+                                $"position ({cantFollowForLog.MapX:0.00},{cantFollowForLog.MapY:0.00}).");
+                            foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                                goal.GoToOneWaypoint(cantFollowForLog.MapPosNoZ);
+                        }
+                        else
+                        {
+                            logger.LogInformation(
+                                "[GoapAgent] Assist CantFollow flag set (status not " +
+                                "BotStatus.CantFollow) — broadcasting AssistRequestReturn " +
+                                "without navigating.");
                         }
                     }
                     else

@@ -322,6 +322,19 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (sideActivityCts.IsCancellationRequested)
             sideActivityCts = new();
 
+        // Reset the "wantNavPaused caused us to pause" flag on Resume. Abort()
+        // pauses navigation through a different code path and does not touch
+        // _pausedByLocalLogic, so it can carry stale state across Abort/Resume
+        // cycles. Without this reset, if wantNavPaused happens to be true on
+        // the first post-Resume Update tick, the transition log
+        // "[FRG] Target acquired -> stopping navigation" (line 747) does not
+        // fire because the gate `wantNavPaused && !_pausedByLocalLogic` is
+        // false — silencing the diagnostics for an actual navigation pause.
+        // Observed in log 24 (leader 21:39:36:079 → 21:39:51:090): 15 seconds
+        // of complete silence after ATG's focus-chain race re-acquired the
+        // blacklisted mob just before the goal switch into FRG.
+        _pausedByLocalLogic = false;
+
         if (_suppressTargetFinderUntilUtc == DateTime.MinValue || DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
             sideActivityManualReset.Set();
         else
