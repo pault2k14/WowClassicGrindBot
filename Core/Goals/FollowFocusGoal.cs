@@ -420,6 +420,45 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 wait.Update(1000);
         }
 
+        // ── Evade-recovery hold ────────────────────────────────────────────
+        // During the evade-recovery window, FFG must not initiate navigation
+        // toward the leader. The leader is still next to the blacklisted mob
+        // when the event fires (and stays there until the leader-side
+        // PressClearTarget releases the wantNavPaused gate in FRG.cs:741);
+        // chasing the leader's body via PositionChase would route the assist
+        // into the danger zone — observed in log 23 (assist 18:35:58:836–
+        // 18:36:00:440): CombatGoal exited via its evadeRecovery=false
+        // precondition, planner picked FFG, UpdateIdle saw dist=18.0y > 14y
+        // and dispatched StartNavigatingToLeader → ROUTESET routeCount=3 →
+        // 1.7s of movement keys → priest arrived at 8.6y from leader (i.e.,
+        // ~10y from the mob), and continued from there to 21.4y from leader
+        // by leader 18:37:03:717.
+        //
+        // The flag is already tracked here for stuck-detection gating
+        // (TickActiveStuckDetection at 1191, TickIdleStuckDetection at 1252)
+        // but was not previously used to gate navigation initiation. With
+        // this gate the priest holds position for the duration of the
+        // recovery window (EvadeRecoveryDurationSec=25s); once the broadcast
+        // clears _evadeRecoveryActive, the normal state machine resumes and
+        // the priest catches up to the leader from a safe distance.
+        //
+        // CantFollow is excepted because it has its own hold-and-timeout
+        // logic that should continue ticking (CantFollowTimeoutSec=120s).
+        if (_evadeRecoveryActive && _navState != NavState.CantFollow)
+        {
+            if (_navState == NavState.NavigatingToLeader)
+            {
+                logger.LogInformation(
+                    "[FFG] Evade recovery active — stopping in-flight navigation, holding position.");
+                navigation.Stop();
+                input.StopForward(true);
+                ResetNavState();
+                EnterState(NavState.Idle);
+            }
+            wait.Update();
+            return;
+        }
+
         // ── State machine ──────────────────────────────────────────────────
         switch (_navState)
         {

@@ -754,6 +754,35 @@ public sealed partial class GoapAgent : IDisposable
 
                 _evadeRecoveryUntilUtc = DateTime.UtcNow.AddSeconds(EvadeRecoveryDurationSec);
 
+                // Press StopAttack and ClearTarget unconditionally for both modes.
+                //
+                // CombatGoal.Update has an _evadeRecoveryActive branch
+                // (CombatGoal.cs:191) that calls PressStopAttack + PressClearTarget,
+                // but that branch is UNREACHABLE in practice: CombatGoal has
+                // AddPrecondition(GoapKey.evadeRecovery, false). The moment
+                // _evadeRecoveryUntilUtc is set above and the next GoapThread
+                // iteration broadcasts GoapKey.evadeRecovery=true, the planner
+                // deselects CombatGoal and calls OnExit. OnExit does not press
+                // StopAttack (only stopMoving.Stop and PressEnableSoftInteract;
+                // see CombatGoal.cs:168). Auto-attack remains toggled on.
+                //
+                // Symptom on warriors and other auto-attack classes: leader
+                // continues swinging at the blacklisted mob until kill credit
+                // or de-aggro. Observed in log 23:
+                //   18:36:56:918  evade fires
+                //   18:36:57:010  New Plan = Follow (CombatGoal exited via planner,
+                //                  not via the _evadeRecoveryActive branch)
+                //   (no StopAttack press anywhere after evade)
+                //   18:37:17:403  Kill credit — mob died from continued attacks
+                //                  22.5 seconds later.
+                //
+                // Pressing StopAttack here ensures the toggle is released the
+                // instant the evade event is dispatched, regardless of which
+                // goal is currently active or which goal will be selected next.
+                // Idempotent: pressing while already stopped is a no-op.
+                input.PressStopAttack();
+                input.PressClearTarget();
+
                 if (classConfig.Mode == Mode.PartyLeader)
                 {
                     _evadeLeaderWaiting = true;
@@ -774,6 +803,13 @@ public sealed partial class GoapAgent : IDisposable
                     $"[GoapAgent] Ghost combat escape (guid=0) — starting {GhostCombatEscapeDurationSec}s recovery window.");
 
                 _evadeRecoveryUntilUtc = DateTime.UtcNow.AddSeconds(GhostCombatEscapeDurationSec);
+
+                // Same fix as the real-evade branch above: PressStopAttack and
+                // PressClearTarget unconditionally because CombatGoal's
+                // _evadeRecoveryActive Update branch is unreachable due to the
+                // precondition gate. See the long comment above for details.
+                input.PressStopAttack();
+                input.PressClearTarget();
 
                 if (classConfig.Mode == Mode.PartyLeader)
                 {
