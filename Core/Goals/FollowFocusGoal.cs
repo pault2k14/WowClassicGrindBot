@@ -732,7 +732,28 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation(
                     $"[FFG] Within follow range ({dist:0.0}y < {NavigatingExitYards}y) — reporting Following, keeping navigation active.");
                 assistStatusProvider.CurrentStatus = BotStatus.Following;
-                assistStatusProvider.CantFollow = false;
+                // NOTE: Do NOT clear assistStatusProvider.CantFollow here.
+                // This branch fires while the assist is still actively navigating
+                // (see comment block above — we explicitly keep navigation active
+                // between 7 y and 10 y to avoid the stop-start leapfrog). Clearing
+                // the CantFollow override at this point removes the only thing
+                // keeping FFG selectable during evade recovery while dmgDone is
+                // still latched from a recent CombatGoal cast — the planner then
+                // returns NO PLAN (CombatGoal is blocked by evadeRecovery=false,
+                // TFT by _evadeRecoveryActive, FFG by assistshouldfollow=false),
+                // GoapAgent never calls FFG.OnExit, and the in-flight movement
+                // keys (W/Right/Left from navigation.Update) stay pressed for the
+                // remainder of the recovery window. Observed in log 28:
+                //   01:23:07:469  this branch fired, CantFollow cleared
+                //   01:23:07:484  NO PLAN with dmgDone=True, evadeRecovery=True
+                //   01:23:07:484–30:716  total log silence, assist runs forward
+                //   01:23:30:844  Combat selected, FFG.OnExit finally fires
+                // CantFollow is correctly cleared in two other places:
+                //   - line 535 (UpdateIdle, dist < FollowingMaxYards=7y)
+                //   - line 707 (UpdateNavigatingToLeader, dist < FollowingMaxYards
+                //              and entering Idle)
+                // Both fire only when the assist has truly settled — those are
+                // the right moments to drop the override.
             }
             // Fall through — navigation continues; no stop, no Idle transition.
         }

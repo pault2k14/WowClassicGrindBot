@@ -477,6 +477,26 @@ public sealed partial class GoapAgent : IDisposable
             }
             else if (!wasEmpty)
             {
+                // NO PLAN transition. Exit the previously-running goal so any
+                // in-flight input state (movement keys held by navigation.Update,
+                // approach state, soft-interact toggles, ghost-combat tracking,
+                // etc.) is released cleanly — every goal's OnExit is designed
+                // to do this. Without the explicit OnExit, the previous goal's
+                // last frame of pressed keys (e.g. FFG's W/Right/Left from
+                // navigation.Update) stays pressed for the entire NO PLAN
+                // window because no goal's Update is called and no transition-
+                // to-different-goal triggers OnExit at line 469. Observed in
+                // log 28: 01:23:07:484 NO PLAN → 23 s of autorun → 01:23:30:844
+                // Combat selected, only then did FFG.OnExit fire. CurrentGoal=
+                // null keeps the next-iteration path consistent with the
+                // existing invariant — when NextGoal eventually returns a
+                // non-null goal, line 466's `newGoal != CurrentGoal` test
+                // becomes true and the new goal goes through OnEnter normally.
+                if (CurrentGoal != null)
+                {
+                    CurrentGoal.OnExit();
+                    CurrentGoal = null;
+                }
                 LogNewEmptyGoal(logger);
                 LogCompleteGoapState();
                 wasEmpty = true;
