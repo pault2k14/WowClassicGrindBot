@@ -385,6 +385,19 @@ public sealed partial class GoapAgent : IDisposable
             {
                 previousEvadeRecovery = evadeRecoveryActive;
                 BroadcastGoapEvent(GoapKey.evadeRecovery, evadeRecoveryActive);
+
+                // Mirror to AssistStatusProvider so PartyStatePublisher can
+                // suppress its Following → Combat override during the window.
+                // See AssistStatusProvider.EvadeRecoveryActive for the full
+                // rationale; without this mirror the publisher would mask the
+                // assist's correct Following claim with Combat for the entire
+                // 25 s, the leader's diff loop would observe assist not-Following
+                // / not-Navigating, and FRG.OnGoapEvent would Abort. The
+                // assignment is unconditional on mode because AssistFocus is the
+                // only mode where the publisher runs (gated in BuildSnapshot),
+                // so this is a no-op for PartyLeader-side ticks.
+                assistStatusProvider.EvadeRecoveryActive = evadeRecoveryActive;
+
                 if (!evadeRecoveryActive)
                 {
                     logger.LogInformation("[GoapAgent] Evade recovery elapsed — resuming normal combat.");

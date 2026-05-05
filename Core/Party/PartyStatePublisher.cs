@@ -83,9 +83,34 @@ public sealed class PartyStatePublisher : IReader
         // Fall back to Combat/Dead if not in FFG context.
         BotStatus status = assistStatusProvider.CurrentStatus;
         if (bits.Dead())
+        {
             status = BotStatus.Dead;
-        else if (bits.Combat() && status == BotStatus.Following)
-            status = BotStatus.Combat; // don't report Following while in combat
+        }
+        else if (bits.Combat() && status == BotStatus.Following
+                 && !assistStatusProvider.EvadeRecoveryActive)
+        {
+            // Normal-grind override: assist's status is Following but it's
+            // taking hits. Report Combat so the leader's distance gate
+            // pauses until CombatGoal (cost 4) preempts FFG (cost 19) and
+            // OnExit clears the stale Following claim — typically within
+            // one GOAP tick (~50 ms).
+            //
+            // Suppressed during evade-recovery: in that window CombatGoal
+            // is precondition-blocked by evadeRecovery=false and cannot
+            // preempt FFG, so FFG correctly keeps publishing Following while
+            // the blacklisted mob's combat flag stays latched for the full
+            // 25 s. Without the gate, the override masks the assist's
+            // correct Following claim and the leader's diff loop sees the
+            // assist as not-Following / not-Navigating → AssistIsNotFollowing
+            // → FRG.OnGoapEvent → Abort. Observed in log 31:
+            //   14:32:39:047  assist Entered Combat
+            //   14:32:39:991  FFG: Reached follow position, status=Following
+            //   14:32:44:673  leader briefly saw AssistIsFollowing=True
+            //   14:32:44:906  next snapshot showed Combat → "assist truly
+            //                  unavailable — aborting"
+            //   14:32:44:906→14:33:08:567  leader sat motionless 24 s
+            status = BotStatus.Combat;
+        }
 
         return new AssistState
         {

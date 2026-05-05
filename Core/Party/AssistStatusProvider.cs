@@ -30,4 +30,28 @@ public sealed class AssistStatusProvider
     /// to hold mutable coordination state.
     /// </summary>
     public bool CantFollow { get; set; }
+
+    /// <summary>
+    /// Mirror of <c>GoapKey.evadeRecovery</c> — set by <see cref="GOAP.GoapAgent"/>
+    /// when the evade-recovery world-state is broadcast, cleared when it elapses.
+    /// Read by <see cref="PartyStatePublisher.BuildSnapshot"/> to decide whether
+    /// to suppress the Following → Combat override during the 25 s window.
+    ///
+    /// <para>The override exists to prevent the leader from advancing while
+    /// the assist is mid-fight in normal grind operation: if the assist's
+    /// status is Following but it has just taken a hit (passing mob), the
+    /// snapshot reports Combat so the leader's distance gate pauses until
+    /// CombatGoal (cost 4) preempts FFG (cost 19) and OnExit sets status to
+    /// Waiting — typically within one GOAP tick (~50 ms).</para>
+    ///
+    /// <para>During the evade-recovery window the override pathologically
+    /// hides the assist's correct Following claim. CombatGoal is
+    /// precondition-blocked by <c>evadeRecovery=false</c>, so it cannot
+    /// preempt FFG and OnExit cannot fire to clear the Following status —
+    /// FFG legitimately keeps publishing Following while bits.Combat() stays
+    /// true (the blacklisted mob remains aggroed until the leader retreats
+    /// far enough for it to leash). Without this flag the publisher can't
+    /// tell the two cases apart.</para>
+    /// </summary>
+    public bool EvadeRecoveryActive { get; set; }
 }
