@@ -677,13 +677,35 @@ public sealed partial class GoapAgent : IDisposable
             assistIsFollowing || assistCantFollow || assistNavigating || _evadeLeaderWaiting;
 
         // assistshouldfollow gates FollowFocusGoal on the assist.
-        // assistStatusProvider.CantFollow acts as the override that keeps FFG selectable
-        // during evade recovery and genuine CantFollow — even when combat conditions
-        // (dmgTaken/dmgDone) would otherwise set this false and leave the assist with NO PLAN.
+        // Three branches keep FFG selectable:
+        //   1. evadeRecoveryActive — the authoritative override during the
+        //      25 s blacklist-evade window. Throughout this window CombatGoal
+        //      is precondition-blocked (evadeRecovery=false fails) and TFT
+        //      is gated by its own _evadeRecoveryActive flag, so FFG is the
+        //      ONLY goal that can navigate the assist. Latched combat
+        //      residue (dmgDone/dmgTaken from a Smite cast just before the
+        //      evade dispatch) must NOT block FFG here, otherwise the
+        //      planner returns NO PLAN, GoapAgent's NO-PLAN-OnExit fires
+        //      (session 28 fix), FFG.OnExit sets BotStatus.Waiting, the
+        //      leader's diff loop sees assist→Waiting, broadcasts
+        //      AssistIsNotFollowing(), and FRG.OnGoapEvent aborts patrol —
+        //      observed in log 29 at assist 02:18:15:578 → leader 02:18:15:897.
+        //   2. assistStatusProvider.CantFollow — genuine "the assist truly
+        //      cannot get back to the leader" (navigation exhausted, path
+        //      failed). Set by the goals listed in AssistStatusProvider.cs.
+        //      No longer overloaded with evade-recovery duty, so its lifecycle
+        //      (cleared in FFG line 535/707 when the assist settles) is no
+        //      longer fragile around the evade window.
+        //   3. Normal path — no forced-follow chat command and no recent
+        //      damage. This is the steady-state "assist should follow leader
+        //      because nothing else is going on."
+        bool evadeRecoveryActive = DateTime.UtcNow < _evadeRecoveryUntilUtc;
         WorldState[GoapKey.assistshouldfollow] =
             leaderConnection.HasValidLeaderState &&
-            (assistStatusProvider.CantFollow || // override: keep FFG selectable during evade/CantFollow
-             (!chatReader.ForcedFollow && !(playerCombat && dmgTaken) && !dmgDone && !dmgTaken));
+            !chatReader.ForcedFollow &&
+            (evadeRecoveryActive ||
+             assistStatusProvider.CantFollow ||
+             (!(playerCombat && dmgTaken) && !dmgDone && !dmgTaken));
 
         WorldState[GoapKey.partymembercombat]  = PartyMemberInCombat();
         WorldState[GoapKey.partyleadercombat]  = PartyLeaderInCombat();
@@ -702,7 +724,7 @@ public sealed partial class GoapAgent : IDisposable
             (assistCantFollow ||
              AvailableGoals.OfType<FollowRouteGoal>().Any(g => g.WaitingForAssist));
 
-        WorldState[GoapKey.evadeRecovery]        = DateTime.UtcNow < _evadeRecoveryUntilUtc;
+        WorldState[GoapKey.evadeRecovery]        = evadeRecoveryActive;
         WorldState[GoapKey.partyleadercanfollowroute] = CanPartyLeaderFollowRoute();
         WorldState[GoapKey.approachEscapeActive] = navigation.IsApproachEscapeActive;
     }
