@@ -86,7 +86,13 @@ public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
         // 23:01:52:476) before CombatGoal.FindPossibleThreats's Tab path finally
         // caught it and re-fired EvadeBlacklistEvent at 23:01:52:910 — starting
         // a fresh 25 s evade-recovery window on top of the first one's tail.
-        if (bits.FocusTarget() && playerReader.IsIgnored(playerReader.FocusTargetGuid))
+        //
+        // Check FocusTargetGuid != 0 directly rather than gating on bits.FocusTarget().
+        // The addon's bits and FocusTargetGuid are read independently and can briefly
+        // disagree — a race window where CanRun returns true while FocusTargetGuid
+        // is still set to the blacklisted GUID. The GUID-based check is authoritative
+        // and avoids that race.
+        if (playerReader.FocusTargetGuid != 0 && playerReader.IsIgnored(playerReader.FocusTargetGuid))
             return false;
 
         return
@@ -117,6 +123,19 @@ public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
         {
             if (bits.FocusTarget_Combat())
             {
+                // Defense in depth — same check as CanRun(). The two are read at
+                // different points (plan time vs. Update time) and the focus's
+                // target can change between them. Without this guard, an Update
+                // tick that begins while FocusTargetGuid points at a blacklisted
+                // GUID will press F (TargetTargetOfTarget) and acquire the
+                // blacklisted mob, defeating the CanRun gate.
+                if (playerReader.FocusTargetGuid != 0 &&
+                    playerReader.IsIgnored(playerReader.FocusTargetGuid))
+                {
+                    wait.Update();
+                    return;
+                }
+
                 input.PressTargetFocus();
                 input.PressTargetOfTarget();
             }

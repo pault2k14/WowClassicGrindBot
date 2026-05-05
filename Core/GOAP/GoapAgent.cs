@@ -339,8 +339,15 @@ public sealed partial class GoapAgent : IDisposable
             // FFG.OnEnter fired post-loot, 3 seconds after kill credit.
             //
             // Each new GUID:
-            //   1. IgnoreTarget(guid) — addon-side ignore so targeting won't
-            //      re-acquire it
+            //   1. IgnoreTarget(guid) — adds to PlayerReader.BlacklistAreaMobs
+            //      (Core, not the addon) with the 30 s TTL declared on
+            //      PlayerReader.BLACKLIST_IGNORE_SECONDS. While the entry is
+            //      live, IsIgnored(guid) returns true and the IsIgnored
+            //      short-circuits in CombatGoal/ATG/PTG.Update bail the goal
+            //      cleanly. After ~30 s the entry self-expires; by that point
+            //      the leader should have retreated far enough that the mob
+            //      is no longer relevant (FRG.wantNavPaused's IsIgnored term
+            //      from session 26 ensures retreat actually happens).
             //   2. HandleGoapEvent(EvadeBlacklistEvent) — same dispatcher real
             //      evades and the test endpoint use; sets _evadeRecoveryUntilUtc
             //   3. The block below (line 312) will then observe the new
@@ -800,13 +807,15 @@ public sealed partial class GoapAgent : IDisposable
                 input.PressStopAttack();
                 input.PressClearTarget();
 
-                // Mark the GUID as ignored in the addon-side ignore list. Real-evade
-                // call sites (CombatGoal.cs:209, ApproachTargetGoal.cs:265 / 456)
+                // Add the GUID to PlayerReader.BlacklistAreaMobs (the IsIgnored
+                // map — Core, not the addon) with the standard 30 s TTL.
+                // Real-evade call sites (CombatGoal.cs:209, ApproachTargetGoal.cs:265 / 456)
                 // call this themselves before/around their SendGoapEvent dispatch —
-                // for those paths this is now idempotent (the addon de-duplicates
-                // adds). The test endpoint (PartyController.PostDebugEvade →
-                // RaiseDebugEvent → HandleGoapEvent) had no such call, leaving the
-                // leader's IsIgnored set empty for the synthetic GUID. Result, log 25:
+                // for those paths this is idempotent (IgnoreTarget overwrites the
+                // entry's expiry if already present). The test endpoint
+                // (PartyController.PostDebugEvade → RaiseDebugEvent → HandleGoapEvent)
+                // had no such call, leaving the leader's IsIgnored set empty for
+                // the synthetic GUID. Result, log 25:
                 //   23:01:48:472  evade window elapsed
                 //   23:01:48:473  New Plan = Combat (CombatGoal re-eligible)
                 //   23:01:48:535+ leader resumes Heroic Strike on guid=7963945

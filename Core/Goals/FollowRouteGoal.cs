@@ -751,9 +751,38 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
         // ── Combat target gate ─────────────────────────────────────────────
+        // wantNavPaused must reject targets that are in playerReader.IsIgnored,
+        // not just targetBlacklist (the zone-rect blacklist). They are different
+        // sets: targetBlacklist gates region-based avoidance; IsIgnored gates
+        // per-mob blacklisting via evade dispatches (HandleGoapEvent's session-25
+        // Fix 1, ATG/CombatGoal/PTG real-evade sites, and the agent-level diff
+        // loop on the assist).
+        //
+        // Without the IsIgnored filter, the leader pauses navigation on a mob
+        // that was just blacklisted — defeating the entire point of the 25 s
+        // evade-recovery window, since the leader can't retreat and the mob
+        // keeps attacking. Observed in log 26 (leader 23:42:10:687 → 23:42:34:667,
+        // 24 s of stationary inside the first window, then 23:42:37:265 →
+        // 23:42:46:283, 9 s of stationary inside the second window). Side-thread
+        // suppression (Fix 2) was working — zero Tab presses during the windows
+        // — but the leader's bits.Target() stayed pointing at guid=7968930
+        // throughout (confirmed by the CombatGoal IsIgnored bail at 23:42:34:759
+        // seeing the same guid from before the evade), so wantNavPaused was
+        // being driven by a blacklisted target.
+        //
+        // After this filter:
+        //   wantNavPaused = false (target is in IsIgnored)
+        //   → "Target did not meet requirements" branch at line 765 fires:
+        //     - PressClearTarget (re-press, in case the previous one was lost)
+        //     - targetFinder.Reset
+        //     - sideActivityManualReset.Set (harmless during suppression because
+        //       Fix 2a's targetFinder.DisableUntil makes Search() return false)
+        //   → !wantNavPaused at line 820 lets navigation.Update run
+        //   → leader physically retreats along the patrol route
         bool wantNavPaused = bits.Target() && bits.Target_Hostile()
             && bits.Target_Alive() && !bits.Target_Tagged() && playerReader.WithInCombatRange()
-            && !targetBlacklist.Is();
+            && !targetBlacklist.Is()
+            && !playerReader.IsIgnored(playerReader.TargetGuid);
 
         if (wantNavPaused && !_pausedByLocalLogic)
         {
