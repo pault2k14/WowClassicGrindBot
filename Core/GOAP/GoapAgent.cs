@@ -594,6 +594,11 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.evadeRecovery: " + (DateTime.UtcNow < _evadeRecoveryUntilUtc));
         logger.LogInformation("GoapKey.partyleadercanfollowroute: " + CanPartyLeaderFollowRoute());
         logger.LogInformation("GoapKey.approachEscapeActive: " + navigation.IsApproachEscapeActive);
+        bool targetIgnoredLog = IsTargetIgnoredOrAbsent(hasTarget, playerReader.TargetGuid);
+        bool focusTargetIgnoredLog = IsTargetIgnoredOrAbsent(b.FocusTarget(), playerReader.FocusTargetGuid);
+        logger.LogInformation("GoapKey.targetIsIgnored: " + targetIgnoredLog);
+        logger.LogInformation("GoapKey.focusTargetIsIgnored: " + focusTargetIgnoredLog);
+        logger.LogInformation("GoapKey.allPartyTargetsIsIgnored: " + (targetIgnoredLog && focusTargetIgnoredLog));
 
         if (classConfig.Mode == Mode.AssistFocus)
         {
@@ -659,6 +664,18 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.focushastarget]         = b.FocusTarget();
         WorldState[GoapKey.consumablecorpsenearby] = State.ConsumableCorpseCount > 0;
         WorldState[GoapKey.forcedfollow]           = chatReader.ForcedFollow;
+
+        // ── Target / focus-target ignore state ────────────────────────────
+        // "Ignored" means: not present, OR present but in PlayerReader.IsIgnored
+        // (the per-bot blacklist with 30 s TTL set by every evade dispatch).
+        // CombatGoal in PartyLeader / AssistFocus modes uses these to decide
+        // whether ANY target slot in the party offers something fightable —
+        // see GoapKey.allPartyTargetsIsIgnored for the full rationale.
+        bool targetIgnored = IsTargetIgnoredOrAbsent(hasTarget, playerReader.TargetGuid);
+        bool focusTargetIgnored = IsTargetIgnoredOrAbsent(b.FocusTarget(), playerReader.FocusTargetGuid);
+        WorldState[GoapKey.targetIsIgnored]          = targetIgnored;
+        WorldState[GoapKey.focusTargetIsIgnored]     = focusTargetIgnored;
+        WorldState[GoapKey.allPartyTargetsIsIgnored] = targetIgnored && focusTargetIgnored;
 
         // ── Leader side: read from API store ──────────────────────────────
         // AssistFocus / Grind modes don't post to the store; AnyAssistIsFollowing() returns
@@ -786,6 +803,20 @@ public sealed partial class GoapAgent : IDisposable
             && !dmgTaken
             && State.LastCombatKillCount == 0
             && !State.ShouldConsumeCorpse;
+    }
+
+    /// <summary>
+    /// Helper for the targetIsIgnored / focusTargetIsIgnored world-state keys.
+    /// Returns true when the slot offers nothing fightable: either the slot is
+    /// empty (<paramref name="present"/> == false), or the GUID in it is on the
+    /// per-bot ignore list (recently blacklisted, 30 s TTL). An empty slot
+    /// counts as "ignored" because the planner shouldn't select Combat just
+    /// because a slot exists — it should select Combat because the slot points
+    /// at something to fight.
+    /// </summary>
+    private bool IsTargetIgnoredOrAbsent(bool present, int guid)
+    {
+        return !present || playerReader.IsIgnored(guid);
     }
 
     private void HandleGoapEvent(GoapEventArgs e)

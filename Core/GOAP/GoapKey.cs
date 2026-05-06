@@ -79,6 +79,35 @@ public enum GoapKey
     /// </summary>
     approachEscapeActive,
 
+    /// <summary>
+    /// True when the player has no target, OR the current target's GUID is
+    /// in <c>PlayerReader.IsIgnored</c> (recently blacklisted via evade).
+    /// "Ignored" semantics: nothing fightable in this slot.
+    /// </summary>
+    targetIsIgnored,
+
+    /// <summary>
+    /// True when the player has no focus target, OR the focus target's GUID
+    /// is in <c>PlayerReader.IsIgnored</c>. Same "nothing fightable here"
+    /// semantics as <see cref="targetIsIgnored"/>.
+    /// </summary>
+    focusTargetIsIgnored,
+
+    /// <summary>
+    /// True when both <see cref="targetIsIgnored"/> and
+    /// <see cref="focusTargetIsIgnored"/> are true — i.e. neither the bot's
+    /// own target nor its focus's target offers anything fightable.
+    /// CombatGoal in PartyLeader/AssistFocus modes requires this to be false,
+    /// which lets Combat select either when the bot has its own fightable
+    /// target OR when only its focus's target is fightable (in which case
+    /// CombatGoal.Update swaps to it via PressTargetFocus + PressTargetOfTarget).
+    /// During evade recovery, both slots typically reference the freshly
+    /// blacklisted mob → both ignored → key true → Combat blocked → planner
+    /// falls back to FRG/FFG. When a non-blacklisted aggressor appears in
+    /// either slot the key flips false and Combat becomes selectable.
+    /// </summary>
+    allPartyTargetsIsIgnored,
+
     LENGTH
 }
 
@@ -134,6 +163,9 @@ public static class GoapKey_Extension
         GoapKey.evadeRecovery => "evade recovery",
         GoapKey.partyleadercanfollowroute => "leader can follow route",
         GoapKey.approachEscapeActive => "approach escape active",
+        GoapKey.targetIsIgnored => "target is ignored or absent",
+        GoapKey.focusTargetIsIgnored => "focus target is ignored or absent",
+        GoapKey.allPartyTargetsIsIgnored => "all party targets ignored or absent",
         _ => unknown
     };
 
@@ -185,6 +217,9 @@ public static class GoapKey_Extension
         GoapKey.evadeRecovery => "!evade recovery",
         GoapKey.partyleadercanfollowroute => "!leader can follow route",
         GoapKey.approachEscapeActive => "!approach escape active",
+        GoapKey.targetIsIgnored => "!target is ignored or absent",
+        GoapKey.focusTargetIsIgnored => "!focus target is ignored or absent",
+        GoapKey.allPartyTargetsIsIgnored => "!all party targets ignored or absent",
         _ => unknown
     };
 

@@ -42,8 +42,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private int consecutiveNoAction;
     private bool debug;
 
-    private bool _evadeRecoveryActive;
-
     private const double GhostCombatTimeoutSec = 20.0;
     private DateTime _ghostCombatSinceUtc = DateTime.MinValue;
     private bool _ghostCombatActive;
@@ -84,13 +82,20 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         {
             AddPrecondition(GoapKey.partymembercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
-            AddPrecondition(GoapKey.evadeRecovery, false);
+            // Replaces evadeRecovery=false. Allows Combat selection during the
+            // evade window when a non-blacklisted aggressor is fightable in
+            // either the assist's own target slot or the focus chain
+            // (= the leader's target). When only Mob A is around, both slots
+            // are ignored → key true → Combat blocked → FFG continues retreat.
+            AddPrecondition(GoapKey.allPartyTargetsIsIgnored, false);
         }
         else if(classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.partyleadercombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
-            AddPrecondition(GoapKey.evadeRecovery, false);
+            // Symmetric to AssistFocus above. On the leader the focus chain
+            // resolves to the assist's target.
+            AddPrecondition(GoapKey.allPartyTargetsIsIgnored, false);
         }
         else
         {
@@ -100,6 +105,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             AddPrecondition(GoapKey.targetisalive, true);
             AddPrecondition(GoapKey.targethostile, true);
             AddPrecondition(GoapKey.incombatrange, true);
+            // Standalone Grind: no party, no focus chain — the only slot is
+            // the bot's own target. Keep the simpler evadeRecovery gate.
             AddPrecondition(GoapKey.evadeRecovery, false);
         }
 
@@ -123,10 +130,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 float distance = (lastMaxDistance + lastMinDistance) / 2f;
                 SendGoapEvent(new CorpseEvent(GetCorpseLocation(distance), distance, playerReader.Direction));
             }
-            else if (s.Key == GoapKey.evadeRecovery)
-            {
-                _evadeRecoveryActive = s.Value;
-            }
+            // Previously also captured GoapKey.evadeRecovery into a local
+            // _evadeRecoveryActive field used by Update() to bail out of
+            // combat. Removed: the bail logic now uses fresh per-tick reads
+            // of playerReader.IsIgnored against current/focus target GUIDs,
+            // and the planner-level gate is the new GoapKey.allPartyTargetsIsIgnored
+            // precondition (see ctor). This goal no longer needs to react
+            // to evadeRecovery events directly.
         }
     }
 
@@ -188,25 +198,60 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        // See ApproachTargetGoal.cs Update() for the rationale: also abort when
-        // the current target is in playerReader.IsIgnored, in case the broadcast
-        // of GoapKey.evadeRecovery hasn't reached us yet on this update tick.
+        // ── Target / focus-target ignore handling ─────────────────────────
+        // Three cases:
+        //   (1) current target is fightable           → fall through, fight it.
+        //   (2) current is ignored/absent, focus is fightable
+        //                                            → swap via PressTargetFocus
+        //                                              + PressTargetOfTarget,
+        //                                              fall through, fight focus's target.
+        //   (3) both ignored/absent                   → bail (StopAttack/ClearTarget).
+        //
+        // Case 3 is normally prevented by the planner — CombatGoal's
+        // PartyLeader/AssistFocus preconditions include allPartyTargetsIsIgnored=false,
+        // so the planner won't pick Combat unless at least one slot is fightable.
+        // The bail here is defense-in-depth for the tick where world state was
+        // computed before a Tab/auto-target flipped the bot's slot to a
+        // blacklisted GUID. In standalone Grind mode there's no focus chain,
+        // so case 2 doesn't apply — the swap branch is gated on party modes.
         bool currentTargetIsIgnored =
-            bits.Target() && playerReader.TargetGuid != 0 &&
-            playerReader.IsIgnored(playerReader.TargetGuid);
+            !bits.Target() || playerReader.IsIgnored(playerReader.TargetGuid);
+        bool focusTargetIsIgnored =
+            !bits.FocusTarget() || playerReader.IsIgnored(playerReader.FocusTargetGuid);
 
-        if (_evadeRecoveryActive || currentTargetIsIgnored)
+        bool isPartyMode = classConfig.Mode == Mode.PartyLeader
+                         || classConfig.Mode == Mode.AssistFocus;
+
+        if (currentTargetIsIgnored && (focusTargetIsIgnored || !isPartyMode))
         {
-            string reason = _evadeRecoveryActive
-                ? "evade recovery active"
-                : $"current target guid={playerReader.TargetGuid} is in IsIgnored (broadcast not yet seen)";
-            logger.LogInformation($"[CombatGoal] Exiting combat goal — {reason}.");
+            // Case 3: nothing fightable in any party slot.
+            logger.LogInformation(
+                $"[CombatGoal] Exiting combat goal — current target guid={playerReader.TargetGuid} " +
+                $"and focus target guid={playerReader.FocusTargetGuid} are both ignored or absent.");
             input.PressStopAttack();
             wait.Update();
             input.PressClearTarget();
             wait.Update();
             stopMoving.Stop();
             return;
+        }
+
+        if (currentTargetIsIgnored && isPartyMode && !focusTargetIsIgnored)
+        {
+            // Case 2: bot's own target is blacklisted but focus chain has a
+            // fightable mob. Swap: TargetFocus selects the focus unit
+            // (party member), TargetOfTarget then selects what they're
+            // fighting. WoW Classic sticky-targeting will keep us on that
+            // GUID for the remainder of the fight (auto-aggro from Mob A
+            // will not re-acquire because we already have a target).
+            logger.LogInformation(
+                $"[CombatGoal] Current target guid={playerReader.TargetGuid} is ignored — " +
+                $"swapping to focus chain target guid={playerReader.FocusTargetGuid}.");
+            input.PressTargetFocus();
+            wait.Update();
+            input.PressTargetOfTarget();
+            wait.Update();
+            // Fall through into normal combat handling against the new target.
         }
 
         if (classConfig.Mode == Mode.PartyLeader
