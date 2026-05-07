@@ -284,6 +284,23 @@ public sealed partial class Navigation : IDisposable
     private float _chaseProgBestDist = float.MaxValue;
     private DateTime _chaseProgSinceUtc = DateTime.MinValue;
 
+    /// <summary>
+    /// Seconds since the watchdog last recorded a new closest-distance to the
+    /// chase target. Returns 0 when no chase is currently being tracked
+    /// (e.g., navigation isn't running, or the target hasn't been seen yet).
+    /// <para>
+    /// This is the "no progress toward target" timer — distinct from raw
+    /// displacement, which can keep accumulating while the bot grinds along
+    /// geometry without actually closing on the target. <see cref="FollowFocusGoal"/>
+    /// reads this to escalate to CantFollow when the assist has been wedged
+    /// long enough to indicate an unrecoverable obstacle.
+    /// </para>
+    /// </summary>
+    public double ChaseSinceBestSec =>
+        _chaseProgSinceUtc == DateTime.MinValue
+            ? 0.0
+            : (DateTime.UtcNow - _chaseProgSinceUtc).TotalSeconds;
+
     private Vector3 _chaseLastPos;
     private DateTime _chaseLastMovedUtc = DateTime.MinValue;
     private DateTime _chaseUnstuckCooldownUntilUtc = DateTime.MinValue;

@@ -100,6 +100,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const float ActiveStuckMinMovementWorld = 1.0f;
 
     /// <summary>
+    /// Minimum cumulative displacement from the anchor captured AT the moment
+    /// of Stuck before clearing the Stuck status. ASYMMETRIC with the trigger
+    /// threshold (1y) — recovery must demonstrate real escape from the
+    /// obstacle, not just slow incremental drift. Without this, a bot
+    /// grinding sideways along a wall at 0.5y/s clears Stuck every ~2 s
+    /// (drift exceeds 1y) without ever escaping; the leader sees a flicker
+    /// of Stuck and immediately reverts before any recovery action can
+    /// take effect. Observed in assist log 01:50:54–01:51:09: four
+    /// Stuck→Resume cycles in 10 s while the bot was visibly pinned against
+    /// terrain making zero chase progress (sinceBest=140 s).
+    /// </summary>
+    private const float ActiveStuckResumeMinMovementWorld = 3.0f;
+
+    /// <summary>
     /// Time window over which active-stuck detection requires
     /// <see cref="ActiveStuckMinMovementWorld"/> of movement. Chosen at 2.5s so
     /// the assist reports <see cref="BotStatus.Stuck"/> *before* Navigation.cs's
@@ -108,6 +122,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// while the unstuck attempt happens.
     /// </summary>
     private const double ActiveStuckThresholdSec = 2.5;
+
+    /// <summary>
+    /// Threshold for the chase-watchdog escalation to CantFollow. When
+    /// <see cref="GoalsComponent.Navigation.ChaseSinceBestSec"/> exceeds this
+    /// value while the assist is in NavigatingToLeader, FFG concludes that
+    /// the assist is wedged on geometry that can't be navigated around (the
+    /// chase watchdog's own unstuck attempts at 4 s and route-refill at 6 s
+    /// have failed to make progress) and escalates to CantFollow so the
+    /// leader navigates back to retrieve the assist. Distinct from
+    /// raw-displacement timers (TickNavActiveTimeout, TickActiveStuckDetection)
+    /// which can be reset by sideways drift; sinceBest measures progress
+    /// toward target and only resets on a genuine new closest-distance.
+    /// </summary>
+    private const double ChaseWatchdogCantFollowSec = 15.0;
 
     // -----------------------------------------------------------------------
     // Dependencies
@@ -252,6 +280,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private DateTime _activeStuckSinceUtc = DateTime.MinValue;
     private Vector3 _activeStuckCheckPosW;
     private bool _activeStuckReported;
+
+    /// <summary>
+    /// World-position anchor captured at the moment Stuck was reported.
+    /// Used by TickActiveStuckDetection's asymmetric resume check — the
+    /// bot must displace at least <see cref="ActiveStuckResumeMinMovementWorld"/>
+    /// from this anchor before the Stuck flag clears.
+    /// </summary>
+    private Vector3 _activeStuckAnchorW;
 
     // -----------------------------------------------------------------------
     // CantFollow: hold position, wait for leader within LeaderArrivedYards
@@ -676,6 +712,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     {
         // ── Active-time timeout ─────────────────────────────────────────────
         TickNavActiveTimeout();
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
+        // ── Chase-progress watchdog escalation ──────────────────────────────
+        // When Navigation's chase watchdog reports it's been more than
+        // ChaseWatchdogCantFollowSec (15 s) since the assist last achieved a
+        // new closest-distance to the chase target, escalate to CantFollow.
+        // sinceBest is progress-toward-target, not raw displacement — it
+        // doesn't reset on geometry-grinding drift the way TickNavActiveTimeout
+        // can. By the time it reaches 15 s, the watchdog's own recovery
+        // paths (unstuck attempt at 4 s, route refill at 6 s) have failed
+        // to make progress, so the obstacle is unrecoverable and the leader
+        // should retrieve the assist.
+        TickChaseWatchdog();
         if (_navState != NavState.NavigatingToLeader)
             return;
 
@@ -1262,6 +1312,50 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     }
 
     // -----------------------------------------------------------------------
+    // Chase-progress watchdog escalation
+    //
+    // Reads Navigation.ChaseSinceBestSec — the time since the chase watchdog
+    // last recorded a new closest-distance to the chase target. Distinct
+    // from raw-displacement timers in this class:
+    //
+    //   - TickNavActiveTimeout: resets on NavigationProgressResetYards (3 y)
+    //     of any movement. A bot grinding sideways along terrain can
+    //     accumulate 3 y of drift in a few seconds and reset the timer
+    //     forever, never escalating.
+    //
+    //   - TickActiveStuckDetection: triggers/resumes on raw displacement
+    //     within a sliding window. Even with the asymmetric resume threshold
+    //     (3 y from anchor), 3 y of drift along a wall eventually clears
+    //     the Stuck flag — same flapping risk over a longer cycle.
+    //
+    // ChaseSinceBestSec is the only metric that's resilient to drift
+    // because it only resets when the bot achieves a NEW closest distance
+    // to the chase target. A bot wedged against geometry making zero
+    // progress toward target accumulates sinceBest indefinitely regardless
+    // of how much sideways drift occurs.
+    //
+    // When sinceBest exceeds ChaseWatchdogCantFollowSec (15 s), the chase
+    // watchdog's own internal recovery paths (unstuck attempt at 4 s,
+    // route refill at 6 s — both in Navigation.cs) have already had two
+    // chances to make progress and failed. The obstacle is unrecoverable
+    // by automated means; escalate to CantFollow so the leader navigates
+    // back to retrieve the assist.
+    //
+    // Skipped when chase isn't being tracked (ChaseSinceBestSec returns 0).
+    // -----------------------------------------------------------------------
+    private void TickChaseWatchdog()
+    {
+        double sinceBest = navigation.ChaseSinceBestSec;
+        if (sinceBest < ChaseWatchdogCantFollowSec)
+            return;
+
+        logger.LogWarning(
+            $"[FFG] Chase watchdog: {sinceBest:0.0}s without closing on chase target — " +
+            $"escalating to CantFollow. Leader will navigate back to retrieve assist.");
+        EnterCantFollow();
+    }
+
+    // -----------------------------------------------------------------------
     // Active-navigation stuck reporting
     //
     // Detects when the assist is in NavigatingToLeader but failing to make
@@ -1308,16 +1402,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        float moved = currentPos.WorldDistanceXYTo(_activeStuckCheckPosW);
-        if (moved >= ActiveStuckMinMovementWorld)
+        // ── Asymmetric resume path ──────────────────────────────────────────
+        // While Stuck is reported, the resume check uses a SEPARATE anchor
+        // (captured at the moment of Stuck) and a HIGHER threshold (3y vs
+        // the 1y trigger). This prevents slow incremental drift along an
+        // obstacle from clearing Stuck without real escape — the symptom
+        // the user observed in log 01:50:54-01:51:09 where the bot
+        // flapped Stuck → NavigatingToLeader four times in 10 s while still
+        // pinned against a wall (sinceBest=140 s on the chase watchdog).
+        if (_activeStuckReported)
         {
-            // Made progress — reset the window and clear any prior Stuck report.
-            _activeStuckCheckPosW = currentPos;
-            _activeStuckSinceUtc = now;
-
-            if (_activeStuckReported)
+            float displaced = currentPos.WorldDistanceXYTo(_activeStuckAnchorW);
+            if (displaced >= ActiveStuckResumeMinMovementWorld)
             {
                 _activeStuckReported = false;
+                _activeStuckCheckPosW = currentPos;
+                _activeStuckSinceUtc = now;
                 // Restore NavigatingToLeader so the leader resumes patrol. Note
                 // that a concurrent Following assignment in UpdateNavigatingToLeader
                 // (when dist<10y) sets Following AFTER us when the next tick runs,
@@ -1325,22 +1425,39 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 // re-asserts itself naturally on the next pass.
                 assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
                 logger.LogInformation(
-                    $"[FFG] Movement resumed during navigation (moved {moved:0.00}y) — " +
-                    "reverting status from Stuck to NavigatingToLeader.");
+                    $"[FFG] Movement resumed during navigation (displaced {displaced:0.00}y " +
+                    $"from stuck anchor) — reverting status from Stuck to NavigatingToLeader.");
             }
+            // Else: still wedged. Keep Stuck status. Don't advance the
+            // trigger anchor; the trigger window is irrelevant while
+            // already reported. The chase watchdog (TickChaseWatchdog,
+            // 15 s on Navigation.ChaseSinceBestSec) is the escalation
+            // path when Stuck persists too long.
+            return;
+        }
+
+        // ── Trigger path ────────────────────────────────────────────────────
+        float moved = currentPos.WorldDistanceXYTo(_activeStuckCheckPosW);
+        if (moved >= ActiveStuckMinMovementWorld)
+        {
+            // Made progress — reset the trigger window.
+            _activeStuckCheckPosW = currentPos;
+            _activeStuckSinceUtc = now;
             return;
         }
 
         // Movement is below threshold. Has the stationary window elapsed?
         double elapsed = (now - _activeStuckSinceUtc).TotalSeconds;
-        if (elapsed >= ActiveStuckThresholdSec && !_activeStuckReported)
+        if (elapsed >= ActiveStuckThresholdSec)
         {
             _activeStuckReported = true;
+            _activeStuckAnchorW = currentPos;  // resume anchor pinned here
             assistStatusProvider.CurrentStatus = BotStatus.Stuck;
             logger.LogWarning(
                 $"[FFG] Stuck while navigating — moved only {moved:0.00}y in {elapsed:0.0}s " +
                 $"at {currentPos}. Reporting Stuck so leader pauses; " +
-                "Navigation.cs chase watchdog will attempt recovery.");
+                $"resume requires {ActiveStuckResumeMinMovementWorld:0.0}y of displacement " +
+                $"or {ChaseWatchdogCantFollowSec:0.0}s of no chase progress (escalates to CantFollow).");
         }
     }
 
