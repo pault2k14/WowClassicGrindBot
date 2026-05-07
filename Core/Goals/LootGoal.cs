@@ -199,11 +199,27 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
             wait.Update();
         }
 
+        // Snapshot bag hash so we can detect items landing during the wait.
+        // With WoW Classic auto-loot enabled, soft-interact direct loot
+        // bypasses the loot frame entirely — items go straight to bag,
+        // LootWindowOpen never fires, and the wait would otherwise time out
+        // even though the loot was successful (assist log 23:51 Loot 2:
+        // Frayed Cloak hit bag at 23:51:36:221 but Loot Failed open: -3016ms
+        // was logged). Bag delta is the truthful signal.
+        int bagHashBefore = bagReader.HashNewOrStackGain;
+
+        // Exit the open-wait early on bag change as well as frame-open, so
+        // auto-loot success is detected promptly rather than after the full
+        // LOOTFRAME_OPEN_TIME_MS timeout.
+        bool LootWindowOpenOrBagChanged() =>
+            LootWindowOpen() ||
+            bagReader.HashNewOrStackGain != bagHashBefore;
+
         int maxTimeLootWindowOpenMs =
             Math.Max(playerReader.DoubleNetworkLatency, Loot.LOOTFRAME_OPEN_TIME_MS);
 
         float windowOpenElapsedMs = wait.Until(maxTimeLootWindowOpenMs,
-            LootWindowOpen,
+            LootWindowOpenOrBagChanged,
             TryPressSafeApproachOnCooldownIfNeeded);
 
         int availableItems = playerReader.LootWindowCount.Value;
@@ -215,7 +231,15 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
 
         float windowClosedElapsedMs = wait.Until(maxTimeLootWindowClosedMs, LootWindowClosed);
 
-        bool success = windowOpenElapsedMs >= 0 && windowClosedElapsedMs >= 0;
+        // Truthful success signal: did items actually land in the bag?
+        // Replaces the old (windowOpen >= 0 && windowClosed >= 0) rule which
+        // (a) reported false success when LootWindowCount was stale from a
+        // prior loot — assist log 23:50 Loot 1 logged "Loot Successful items:
+        // 2 - open: 0.0002ms - close: 0ms" with no items actually entering
+        // the bag — and (b) reported false failure under auto-loot when the
+        // loot frame never opened (Loot 2 above).
+        bool success = bagReader.HashNewOrStackGain != bagHashBefore;
+
         if (success)
             LogLootSuccess(logger, availableItems, windowOpenElapsedMs, windowClosedElapsedMs);
         else
@@ -548,6 +572,35 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         }
 
         CheckForCanGather();
+
+        // Override stale MinRangeZero with corpse-position distance when a
+        // CorpseEvent is available. MinRangeZero() can return true incorrectly
+        // immediately after a soft-interact target change because the addon
+        // hasn't refreshed the new target's MinRange field yet — observed in
+        // assist log 23:50 (Loot 1): soft-interact at 23:50:38:387 acquired
+        // GUID 8142882 as target, MinRangeZero on the next read returned true,
+        // bot skipped movement, but IsInMeleeRange() ~1 second later in
+        // HandleSuccessfulLoot returned false (no second I press fired). The
+        // CorpseEvent's MapLoc is recorded by CombatGoal at kill time and is
+        // not subject to addon-refresh lag, so it's the authoritative source.
+        // Falls through to MinRangeZero() when no CorpseEvent is available.
+        const float MELEE_RANGE_YARDS = 5.0f;
+        CorpseEvent? closestCorpse = GetClosestCorpse();
+        if (closestCorpse != null)
+        {
+            Vector3 corpseWorldPos = WorldMapAreaDB.ToWorld_FlipXY(
+                closestCorpse.MapLoc, playerReader.WorldMapArea);
+            float corpseDistance =
+                playerReader.WorldPos.WorldDistanceXYTo(corpseWorldPos);
+            if (corpseDistance > MELEE_RANGE_YARDS)
+            {
+                logger.LogInformation(
+                    $"Corpse at {corpseDistance:F1}y > {MELEE_RANGE_YARDS}y — " +
+                    $"forcing approach (MinRangeZero may be stale post-target-change).");
+                return MoveToTargetAndReached();
+            }
+        }
+
         return (bits.Target() && playerReader.MinRangeZero()) || MoveToTargetAndReached();
     }
 
