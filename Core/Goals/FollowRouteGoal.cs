@@ -335,10 +335,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // blacklisted mob just before the goal switch into FRG.
         _pausedByLocalLogic = false;
 
-        if (_suppressTargetFinderUntilUtc == DateTime.MinValue || DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
-            sideActivityManualReset.Set();
-        else
+        if (_suppressTargetFinderUntilUtc != DateTime.MinValue && DateTime.UtcNow < _suppressTargetFinderUntilUtc)
             logger.LogInformation($"[FRG] Resume: target finder still suppressed for {(_suppressTargetFinderUntilUtc - DateTime.UtcNow).TotalMilliseconds:F0}ms.");
+        TryEnableSideTargetFinding();
 
         bool assistIsFollowing  = assistStateStore.AnyAssistIsFollowing();
         bool assistCantFollow   = assistStateStore.AnyAssistCantFollow();
@@ -398,6 +397,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     _syncPauseActive = true;
                     _syncPauseStartUtc = DateTime.UtcNow;
                     navigation.PausePathing();
+
+                    // Disable the side target-finding thread for the duration of the
+                    // sync-pause. Helper at line 340 Set the event before this branch
+                    // ran (pause flags were both false on Resume entry); undo that
+                    // Set now that _syncPauseActive=true. Single-shot — the helper
+                    // checks _syncPauseActive before any future Set, so no other
+                    // call site can re-enable until sync-pause completes.
+                    sideActivityManualReset.Reset();
+                    targetFinder.Reset();
                     return;
                 }
 
@@ -433,6 +441,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 _syncPauseActive = true;
                 _syncPauseStartUtc = DateTime.UtcNow;
                 navigation.PausePathing(); // hold — don't start moving yet
+
+                // Disable the side target-finding thread — same reasoning as
+                // the HasWaypoint sync-pause entry above.
+                sideActivityManualReset.Reset();
+                targetFinder.Reset();
             }
         }
         else if (classConfig.Mode == Mode.PartyLeader && assistCantFollow)
@@ -577,13 +590,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     public override void Update()
     {
         // ── Target finder suppression expiry (must run before early returns) ──
-        // Re-enable the side thread once the evade-blacklist suppression window elapses.
+        // The per-target evade-blacklist suppression window has elapsed.
+        // Use the helper so the side thread is only re-enabled when the
+        // leader is actually patrolling — if a pause-for-assist is currently
+        // in effect, the helper skips Set and the pause-exit path will
+        // re-enable the side thread when patrol resumes.
         if (_suppressTargetFinderUntilUtc != DateTime.MinValue &&
             DateTime.UtcNow >= _suppressTargetFinderUntilUtc)
         {
             _suppressTargetFinderUntilUtc = DateTime.MinValue;
-            logger.LogInformation("[FRG] Target finder suppression elapsed — resuming.");
-            sideActivityManualReset.Set();
+            logger.LogInformation("[FRG] Target finder suppression elapsed.");
+            TryEnableSideTargetFinding();
         }
 
         // ── Sync-pause: hold position until the assist starts navigating toward us ──
@@ -612,6 +629,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     $"assistFollowing={assistFollowing} elapsed={elapsed:0.1}s " +
                     $"— resuming patrol navigation.");
                 navigation.Resume();
+
+                // Re-enable side target-finding alongside navigation.
+                // _syncPauseActive was just cleared above, so the helper's
+                // pause-flag gate passes; the suppression-window gate is
+                // applied identically to Resume() line 340.
+                TryEnableSideTargetFinding();
             }
             else
             {
@@ -740,6 +763,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     navigation.StopMovement();
                     navigation.PausePathing();
 
+                    // Disable the side target-finding thread on this transition.
+                    // Single-shot is sufficient: TryEnableSideTargetFinding() (used by
+                    // Resume() line 340 and the suppression-expiry watchdog at line 589)
+                    // checks _pausedByAssistDistance before any Set, so nothing
+                    // re-enables the side thread until the pause exits.
+                    sideActivityManualReset.Reset();
+                    targetFinder.Reset();
+
                     // If assist is CantFollow, navigate to them.
                     if (assistCantFollow && !_assistReturnActive)
                     {
@@ -780,6 +811,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     // Normal flow below will call navigation.Resume() / RefillWaypoints.
                     navigation.ClearAllRoutes();
                     RefillWaypoints(false);
+
+                    // Re-enable the side target-finding thread now that we're
+                    // resuming patrol. _pausedByAssistDistance was just cleared
+                    // above, so the helper's pause-flag gate passes; the
+                    // suppression-window gate is applied identically to
+                    // Resume() line 340.
+                    TryEnableSideTargetFinding();
                 }
 
                 if (_pausedByAssistDistance && !_assistReturnActive)
@@ -950,6 +988,41 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         targetFinder.DisableUntil(_suppressTargetFinderUntilUtc);
 
         logger.LogInformation($"[FRG] Target finder suppressed for {durationMs}ms after evade-blacklist broadcast.");
+    }
+
+    /// <summary>
+    /// Re-enable <see cref="Thread_LookingForTarget"/> by signalling
+    /// <see cref="sideActivityManualReset"/> if and only if BOTH gates pass:
+    /// <list type="number">
+    /// <item>No per-target evade-blacklist suppression window is active
+    ///       (<see cref="_suppressTargetFinderUntilUtc"/> elapsed or unset).</item>
+    /// <item>The leader is not paused waiting for the assist —
+    ///       neither <see cref="_pausedByAssistDistance"/> nor
+    ///       <see cref="_syncPauseActive"/> is true.</item>
+    /// </list>
+    /// <para>
+    /// Used in place of direct <c>sideActivityManualReset.Set()</c> at every
+    /// call site that could fire while the leader is stationary — namely
+    /// <see cref="Resume"/>'s top (which runs externally; pause flags may
+    /// already be true on entry) and the suppression-window-expiry watchdog
+    /// (which runs every <see cref="Update"/> tick regardless of pause state).
+    /// </para>
+    /// <para>
+    /// Pause-ENTRY transitions still need an explicit
+    /// <c>sideActivityManualReset.Reset()</c> to disable an already-running
+    /// side thread; this helper covers re-enabling only.
+    /// </para>
+    /// </summary>
+    private void TryEnableSideTargetFinding()
+    {
+        if (_suppressTargetFinderUntilUtc != DateTime.MinValue &&
+            DateTime.UtcNow < _suppressTargetFinderUntilUtc)
+            return;
+
+        if (_pausedByAssistDistance || _syncPauseActive)
+            return;
+
+        sideActivityManualReset.Set();
     }
 
     private bool IsSuppressedBlacklistedTarget()
