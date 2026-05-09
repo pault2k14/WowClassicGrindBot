@@ -259,6 +259,41 @@ public sealed partial class Navigation : IDisposable
     private Vector3 _routeEscapeLastProgressPos;
     private DateTime _routeEscapeLastProgressUtc = DateTime.MinValue;
 
+    // Fix B (log-34b 03:43:43:444): independent watchdog for unreachable RouteEscape
+    // targets. The existing TryRouteUnstuck no-progress check (RouteEscapeNoMovementSec)
+    // only runs when TryRouteUnstuck is called, which requires
+    // stuckDetector.IsGettingCloser==false. Sub-yard drift can keep IsGettingCloser
+    // returning true intermittently, so the existing checks never fire and the bot
+    // sits on the unreachable target indefinitely. This watchdog runs every Update
+    // tick regardless of stuckDetector state and clears the stale waypoint stack
+    // after the timeout — relying on the empty-waypoints check at line 700 to fire
+    // OnDestinationReached, which FRG converts to RefillWaypoints(false).
+    //
+    // Threshold rationale:
+    //   12s > 10y attempt's per-yard timeout (8s) so existing escalation can run
+    //        first when called; long enough to avoid spurious fires on slow legitimate
+    //        navigation; matches the observed log-34b stall duration before combat hit.
+    //   2y matches the existing progress threshold at line 1583.
+    private const double RouteEscapeUnreachableTimeoutSec = 12.0;
+    private const float RouteEscapeUnreachableMinDisplacementYards = 2.0f;
+
+    // Fix C: bounded cache of recently-confirmed-unreachable RouteEscape targets.
+    // Populated by CheckRouteEscapeUnreachable when it abandons a target; consulted
+    // by TryRouteUnstuck before SetSingleWaypoint to skip projections that fall
+    // onto a known-failed spot. Synchronous validation is not possible here
+    // because the pather is async (IPPather pather, line 37) — no reachability API.
+    // Cache is bounded (FIFO eviction) and cleared on Resume() so each patrol
+    // session starts fresh.
+    //
+    // Clearance rationale:
+    //   5y is small enough that a future 20y/30y escalation in the same direction
+    //   (which lands 10y/20y further than the failed 10y attempt) is not rejected,
+    //   so the existing escalation can still find paths around small obstacles.
+    //   Large enough to reject re-projecting onto the same cliff/wall.
+    private const int RouteEscapeFailedTargetsCapacity = 4;
+    private const float RouteEscapeFailedTargetClearance = 5.0f;
+    private readonly List<Vector3> _routeEscapeFailedTargets = new(RouteEscapeFailedTargetsCapacity);
+
     // Backoff to prevent request spam on repeated blacklist rejections
     private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
     private DateTime noPathCooldownUntilUtc = DateTime.MinValue;
@@ -697,6 +732,13 @@ public sealed partial class Navigation : IDisposable
         if (escapeInsertCooldownTicks > 0)
             escapeInsertCooldownTicks--;
 
+        // Fix B watchdog: if RouteEscape's target is unreachable, clear waypoints so
+        // the empty-waypoints check below fires OnDestinationReached — which FRG
+        // converts into RefillWaypoints(false), restoring the patrol from path settings.
+        // Placed BEFORE the wp=0/route=0 check so a clear in this tick triggers the
+        // OnDestinationReached fire on the same tick (no extra latency).
+        CheckRouteEscapeUnreachable();
+
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
             logger.LogInformation(
@@ -1092,6 +1134,13 @@ public sealed partial class Navigation : IDisposable
         stuckDetector.Acquire(StuckOwnerId);
         ResetStuckParameters();
         ResetChaseProgressWatchdog();
+
+        // Fix C: clear the failed-targets cache so each patrol session starts fresh.
+        // Without this, a target that was unreachable in a previous session (e.g.,
+        // before a death/resurrect or a route change) would still gate escape
+        // projections in the new session. ResetStuckParameters above already
+        // resets the RouteEscape state flags; this clears the learned cache.
+        _routeEscapeFailedTargets.Clear();
 
         if (pather.GetType() != typeof(RemotePathingAPIV3) && routeToNextWaypoint.Count > 0)
         {
@@ -1647,6 +1696,30 @@ public sealed partial class Navigation : IDisposable
             playerW.Y + Sin(facing) * _routeEscapeCurrentYards,
             0f);
 
+        // Fix C: skip projection if it falls onto a known-unreachable target the
+        // watchdog (CheckRouteEscapeUnreachable) recently abandoned. Without this,
+        // a 20y/30y escalation in the same direction would land near the same
+        // failed spot, waste another full timeout cycle, and feed the watchdog
+        // again — eating up to 8s + 16s + 24s = 48s of wasted attempts before
+        // exhausting. Returning false routes execution back to
+        // stuckDetector.Update; the next stuck cycle (if any) re-enters here at
+        // the next yards level. Note: _routeEscapeCurrentYards has ALREADY been
+        // incremented above (line 1676), so the next entry will project at the
+        // higher level; we don't need to escalate again here.
+        for (int i = 0; i < _routeEscapeFailedTargets.Count; i++)
+        {
+            Vector3 failed = _routeEscapeFailedTargets[i];
+            float clearance = escapeW.WorldDistanceXYTo(failed);
+            if (clearance < RouteEscapeFailedTargetClearance)
+            {
+                logger.LogInformation(
+                    $"[NAV] RouteEscape: skipping {_routeEscapeCurrentYards:0}y projection {escapeW} — " +
+                    $"too close to known-unreachable target {failed} " +
+                    $"(clearance={clearance:0.00}y < {RouteEscapeFailedTargetClearance}y).");
+                return false;
+            }
+        }
+
         logger.LogInformation($"[NAV] RouteEscape: attempt {_routeEscapeCurrentYards:0}y -> {escapeW}");
 
         SetSingleWaypoint(escapeW);
@@ -1667,6 +1740,91 @@ public sealed partial class Navigation : IDisposable
         _routeEscapeStartPos = default;
         _routeEscapeLastProgressPos = default;
         _routeEscapeLastProgressUtc = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Fix B (log-34b 03:43:43:444 → 03:46:23+): Independent watchdog for unreachable
+    /// RouteEscape targets. Runs every Update tick.
+    ///
+    /// Background: <see cref="TryRouteUnstuck"/> projects an escape target 10y/20y/30y
+    /// in the player's facing direction and replaces the patrol queue with that single
+    /// waypoint via <see cref="SetSingleWaypoint"/> (which calls
+    /// <see cref="SetWayPoints"/>, which calls <c>wayPoints.Clear()</c>). If the
+    /// projected target is unreachable (e.g., projected onto a Z=24 cliff while the
+    /// player stands at Z=0, exactly the log-34b case), the bot has no way to recover:
+    ///   * The pather can't find a path; <see cref="PPatherService"/> returns
+    ///     "Closest spot is too far from target" repeatedly, but those results are
+    ///     superseded as stale before <see cref="PathCalculatedCallback"/>'s failure
+    ///     path can fire <see cref="OnPathFailed"/>.
+    ///   * <see cref="TryRouteUnstuck"/>'s built-in no-progress check
+    ///     (<see cref="RouteEscapeNoMovementSec"/>) only runs when
+    ///     <see cref="TryRouteUnstuck"/> is called, which requires
+    ///     <c>stuckDetector.IsGettingCloser==false</c>. Sub-yard drift can keep
+    ///     <c>IsGettingCloser</c> returning true intermittently, so the existing
+    ///     check never fires.
+    ///   * Goal cycles (Combat → Loot → Skin → FRG re-entry) preserve the stale
+    ///     waypoint because <see cref="HasWaypoint"/> returns true and FRG.Resume's
+    ///     <c>HasWaypoint || HasNext</c> branch runs the sync-pause path instead of
+    ///     refilling from <c>pathSettings.Path</c>.
+    ///
+    /// Fix: when <see cref="_routeEscapeActive"/> AND elapsed >=
+    /// <see cref="RouteEscapeUnreachableTimeoutSec"/> AND player has displaced &lt;
+    /// <see cref="RouteEscapeUnreachableMinDisplacementYards"/> from the escape start
+    /// position, declare the target unreachable, clear the waypoint stack, and let
+    /// the empty-waypoints check at line 700 fire <see cref="OnDestinationReached"/>
+    /// — which FRG.Navigation_OnDestinationReached converts into
+    /// <c>RefillWaypoints(false)</c>, restoring the patrol from
+    /// <c>pathSettings.Path</c>.
+    ///
+    /// Also feeds the unreachable target into <see cref="_routeEscapeFailedTargets"/>
+    /// for Fix C — the next escape attempt will skip projections too close to this
+    /// known-failed target instead of wasting an escalation cycle on the same spot.
+    /// </summary>
+    private void CheckRouteEscapeUnreachable()
+    {
+        if (!_routeEscapeActive) return;
+        if (_routeEscapeStartUtc == DateTime.MinValue) return;
+        if (_routeEscapeStartPos == default) return;
+
+        double escapeSec = (DateTime.UtcNow - _routeEscapeStartUtc).TotalSeconds;
+        if (escapeSec < RouteEscapeUnreachableTimeoutSec) return;
+
+        Vector3 playerNow = Nav2D(playerReader.WorldPos);
+        float displaced = playerNow.WorldDistanceXYTo(Nav2D(_routeEscapeStartPos));
+        if (displaced >= RouteEscapeUnreachableMinDisplacementYards) return;
+
+        Vector3 unreachableTarget = wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
+
+        logger.LogWarning(
+            $"[NAV] RouteEscape unreachable: escapeSec={escapeSec:0.0}s " +
+            $"displacement={displaced:0.00}y < {RouteEscapeUnreachableMinDisplacementYards}y. " +
+            $"target={unreachableTarget}. Clearing waypoints to trigger refill via OnDestinationReached.");
+
+        // Fix C: remember this target so the next escape attempt skips re-projecting
+        // onto the same unreachable spot. Bounded FIFO; oldest evicted at capacity.
+        if (unreachableTarget != default)
+        {
+            if (_routeEscapeFailedTargets.Count >= RouteEscapeFailedTargetsCapacity)
+                _routeEscapeFailedTargets.RemoveAt(0);
+            _routeEscapeFailedTargets.Add(unreachableTarget);
+        }
+
+        // Clear the unreachable single-waypoint stack. The very next check at
+        // line 700 (wp=0 && route=0) fires OnDestinationReached, which FRG's
+        // handler converts to RefillWaypoints(false). Also reset escape flags
+        // (escapeRouteInProgress, escapeActive) which SetWayPoints would clear,
+        // and call SyncRouteStateToTop to reset the stuckDetector target so it
+        // doesn't keep pointing at the cleared waypoint.
+        wayPoints.Clear();
+        routeToNextWaypoint.Clear();
+        escapeRouteInProgress = false;
+        escapeActive = false;
+        ResetRouteEscape();
+        SyncRouteStateToTop();
+
+        // Allow OnDestinationReached to fire on the immediately-following empty-
+        // waypoints check even if the latch was set earlier in the session.
+        ClearDestinationLatch();
     }
 
     public void ResetApproachEscape([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
