@@ -1251,6 +1251,52 @@ public sealed partial class Navigation : IDisposable
     /// </summary>
     public Vector3 TopWaypointW => wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
 
+    /// <summary>
+    /// World-space coordinates of the topmost <i>non-blacklisted</i> waypoint in the
+    /// stack. Walks top-down through <see cref="wayPoints"/> and returns the first
+    /// entry that is not contained in any <see cref="AreaBlacklist"/> rect. Returns
+    /// <see langword="default"/> when no waypoints are queued or all are blacklisted.
+    ///
+    /// <para>Why this exists (log-35 14:08:16:226 → 14:08:16:894+):
+    /// <see cref="TryConsumeReachedWaypoint"/> pops the just-completed waypoint and
+    /// fires <see cref="OnWayPointReached"/> <i>before</i>
+    /// <see cref="SkipBlacklistedWaypoints"/> runs later in the same Update tick at
+    /// line 759. If the new top is blacklisted, the event subscriber sees the bad
+    /// waypoint via <see cref="TopWaypointW"/>; the leader publishes it to
+    /// <see cref="Core.Party.LeaderNavigationProvider"/>; the assist polls it and
+    /// sets it via <c>SetSingleWaypoint</c>; the assist's own
+    /// <see cref="SkipBlacklistedWaypoints"/> immediately pops it; the assist's
+    /// <c>OnDestinationReached</c> fires; the FFG handler re-fetches the same bad
+    /// waypoint and sets it again — infinite loop every ~15ms.</para>
+    ///
+    /// <para>Use this property in <see cref="FollowRouteGoal"/> for publication to
+    /// the API. Internal Navigation code should continue using <c>wayPoints.Peek()</c>
+    /// directly (the in-process pipeline filters blacklists at the right step).</para>
+    /// </summary>
+    public Vector3 TopPublishableWaypointW
+    {
+        get
+        {
+            if (wayPoints.Count == 0)
+                return default;
+
+            if (AreaBlacklist == null)
+                return Nav2D(wayPoints.Peek());
+
+            // Stack<T>.GetEnumerator iterates top-down (LIFO order). First non-
+            // blacklisted entry from the top is the publication candidate the
+            // leader will navigate to once SkipBlacklistedWaypoints runs.
+            foreach (Vector3 wp in wayPoints)
+            {
+                Vector3 w = Nav2D(wp);
+                if (!AreaBlacklist.ContainsWorld(w))
+                    return w;
+            }
+
+            return default;
+        }
+    }
+
     public Vector3 NextMapPoint()
     {
         return WorldMapAreaDB.ToMap_FlipXY(Nav2D(routeToNextWaypoint.Peek()), playerReader.WorldMapArea);
@@ -3011,14 +3057,34 @@ public sealed partial class Navigation : IDisposable
             return wayPoints.Count > 0;
 
         int removed = 0;
+        Vector3 firstPopped = default;
+        Vector3 lastPopped = default;
         while (wayPoints.Count > 0 && IsBlacklistedPoint(wayPoints.Peek()))
         {
+            Vector3 popped = Nav2D(wayPoints.Peek());
+            if (removed == 0) firstPopped = popped;
+            lastPopped = popped;
+
             wayPoints.Pop();
             removed++;
         }
 
         if (removed > 0)
+        {
+            // log-35 14:08:16:226: this pop was previously silent (only NavDbg
+            // gated at 250ms), masking the leader-publishes-bad-waypoint bug for
+            // 35 s of debug session. Surfacing at Warning level makes it visible
+            // every time a blacklisted entry is filtered, including the post-
+            // OnWayPointReached transient-top window that broadcasts to the API.
+            Vector3 newTop = wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
+            logger.LogWarning(
+                $"[NAV] SkipBlacklistedWaypoints popped {removed} blacklisted " +
+                $"waypoint(s). first={firstPopped} last={lastPopped} " +
+                $"newWpTop={(wayPoints.Count > 0 ? newTop.ToString() : "<none>")} " +
+                $"wpCount={wayPoints.Count}");
+
             UpdateTotalRoute();
+        }
 
         return wayPoints.Count > 0;
     }

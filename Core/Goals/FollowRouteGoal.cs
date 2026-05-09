@@ -1307,13 +1307,24 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // Publish the NEW top waypoint so assist bots know the leader's next target.
         // Only during normal patrol — not during AssistReturn (GoToOneWaypoint), which
         // navigates to the assist's position and should not override the patrol waypoint.
+        //
+        // Use TopPublishableWaypointW (not TopWaypointW) — log-35 14:08:16:226 case:
+        // the just-popped-to top can be inside a blacklist; SkipBlacklistedWaypoints
+        // will remove it later in the same Update tick at line 759, but only after
+        // this event has already fired. Publishing the unfiltered top broadcasts a
+        // transient bad waypoint to the API, where the assist polls it ~600ms later
+        // and immediately enters an infinite SetSingleWaypoint→OnDestinationReached
+        // loop because the assist's own SkipBlacklistedWaypoints pops it on every
+        // Update tick. TopPublishableWaypointW walks the stack top-down and returns
+        // the first non-blacklisted entry, matching what the leader will navigate
+        // to once SkipBlacklistedWaypoints runs.
         if (classConfig.Mode == Mode.PartyLeader && !_assistReturnActive)
         {
-            Vector3 nextWp = navigation.TopWaypointW;
+            Vector3 nextWp = navigation.TopPublishableWaypointW;
             if (nextWp != default)
                 leaderNavProvider.SetTargetWaypoint(nextWp);
             else
-                leaderNavProvider.ClearTargetWaypoint(); // all waypoints exhausted — route will wrap
+                leaderNavProvider.ClearTargetWaypoint(); // all waypoints exhausted/blacklisted — route will wrap
         }
 
         MountIfPossible();
@@ -1583,13 +1594,19 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     /// the same destination (waypoint-sharing mode).
     /// Only called during normal patrol refill — GoToOneWaypoint (AssistReturn)
     /// must NOT publish, as that navigates to the assist's CantFollow position.
+    ///
+    /// Uses <see cref="Navigation.TopPublishableWaypointW"/> instead of
+    /// <see cref="Navigation.TopWaypointW"/> — the former walks past entries
+    /// that <see cref="Navigation.SkipBlacklistedWaypoints"/> is about to filter
+    /// out, preventing transient blacklisted-waypoint broadcasts that put the
+    /// assist into an infinite SetSingleWaypoint loop (log-35 14:08:16:226).
     /// </summary>
     private void PublishPatrolWaypoint()
     {
         if (classConfig.Mode != Mode.PartyLeader)
             return;
 
-        Vector3 wp = navigation.TopWaypointW;
+        Vector3 wp = navigation.TopPublishableWaypointW;
         if (wp != default)
         {
             leaderNavProvider.SetTargetWaypoint(wp);

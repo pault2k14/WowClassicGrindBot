@@ -1154,6 +1154,39 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             Vector3 sharedWp = new(leader.TargetWaypointWorldX, leader.TargetWaypointWorldY, 0f);
 
+            // Defensive blacklist guard (log-35 14:08:16:226 → 14:08:16:894+):
+            // The leader can briefly publish a transient blacklisted waypoint via
+            // OnWayPointReached before its own SkipBlacklistedWaypoints filters
+            // it out. The leader-side fix in FRG.Navigation_OnWayPointReached and
+            // PublishPatrolWaypoint now uses TopPublishableWaypointW to avoid this,
+            // but timing windows or future leader/assist blacklist divergence can
+            // still produce a bad shared waypoint. Without this guard, the assist
+            // sets the bad waypoint, Navigation.SkipBlacklistedWaypoints pops it,
+            // OnDestinationReached fires (silent — NavDbg gated), this method is
+            // called again from the dist-fallback at FFG line 957, returns the
+            // same bad waypoint, SetSingleWaypoint is called again — infinite
+            // loop every ~15ms, observed for 35+ seconds in log-35.
+            //
+            // Fall back to position-chase but DON'T clear _rendezvousConfirmed —
+            // when the leader publishes a clean waypoint on the next pop,
+            // waypoint-sharing resumes automatically without requiring a fresh
+            // rendezvous co-location.
+            if (navigation.AreaBlacklist != null &&
+                navigation.AreaBlacklist.ContainsWorld(sharedWp))
+            {
+                if (sharedWp.WorldDistanceXYTo(_lastSharedWaypointW) > WaypointUpdateThresholdYards)
+                {
+                    _lastSharedWaypointW = sharedWp; // remember to dedup log spam
+                    logger.LogWarning(
+                        $"[FFG] Waypoint-sharing: leader's target waypoint {sharedWp} " +
+                        "is in assist's blacklist — falling back to position-chase " +
+                        "(rendezvous remains confirmed; will resume sharing on next clean publish).");
+                }
+
+                _currentNavTargetMode = NavTargetMode.PositionChase;
+                return ComputeFollowTargetWorldPos(leader);
+            }
+
             // Log only when the shared waypoint changes meaningfully — avoids per-tick spam.
             if (sharedWp.WorldDistanceXYTo(_lastSharedWaypointW) > WaypointUpdateThresholdYards)
             {
