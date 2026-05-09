@@ -1350,6 +1350,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
 
         logger.LogWarning(
+            $"[NAV-DIAG] Chase watchdog fire: stuckDetector.OwnerId={navigation.StuckDetectorOwnerId} " +
+            $"Enabled={navigation.StuckDetectorEnabled} sinceBest={sinceBest:0.0}s");
+        logger.LogWarning(
             $"[FFG] Chase watchdog: {sinceBest:0.0}s without closing on chase target — " +
             $"escalating to CantFollow. Leader will navigate back to retrieve assist.");
         EnterCantFollow();

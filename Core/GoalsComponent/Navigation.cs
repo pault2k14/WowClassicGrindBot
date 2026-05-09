@@ -301,6 +301,19 @@ public sealed partial class Navigation : IDisposable
             ? 0.0
             : (DateTime.UtcNow - _chaseProgSinceUtc).TotalSeconds;
 
+    /// <summary>
+    /// Diagnostic-only pass-through for the stuckDetector's current owner id.
+    /// Used by FollowFocusGoal's chase watchdog firing log to confirm whether
+    /// the detector was Released (ownerId=0) or held by Navigation (ownerId=1)
+    /// at escalation time. See [NAV-DIAG] log lines.
+    /// </summary>
+    public int StuckDetectorOwnerId => stuckDetector.OwnerId;
+
+    /// <summary>
+    /// Diagnostic-only pass-through for the stuckDetector's enabled flag.
+    /// </summary>
+    public bool StuckDetectorEnabled => stuckDetector.Enabled;
+
     private Vector3 _chaseLastPos;
     private DateTime _chaseLastMovedUtc = DateTime.MinValue;
     private DateTime _chaseUnstuckCooldownUntilUtc = DateTime.MinValue;
@@ -1073,6 +1086,9 @@ public sealed partial class Navigation : IDisposable
         active = true;
         ClearDestinationLatch();
         SetLastSafeAnchor(playerReader.WorldPos);
+        logger.LogInformation(
+            $"[NAV-DIAG] Resume() pre: stuckDetector.OwnerId={stuckDetector.OwnerId} " +
+            $"Enabled={stuckDetector.Enabled} -> Acquire(StuckOwnerId={StuckOwnerId})");
         stuckDetector.Acquire(StuckOwnerId);
         ResetStuckParameters();
         ResetChaseProgressWatchdog();
@@ -1127,6 +1143,9 @@ public sealed partial class Navigation : IDisposable
         Interlocked.Exchange(ref pathRequestPending, 0);
         Volatile.Write(ref waitingRequestId, 0);
 
+        logger.LogInformation(
+            $"[NAV-DIAG] PausePathing() pre: stuckDetector.OwnerId={stuckDetector.OwnerId} " +
+            $"Enabled={stuckDetector.Enabled} -> Release(StuckOwnerId={StuckOwnerId})");
         stuckDetector.Release(StuckOwnerId);
     }
 
@@ -1134,6 +1153,9 @@ public sealed partial class Navigation : IDisposable
     {
         active = false;
         ClearDestinationLatch();
+        logger.LogInformation(
+            $"[NAV-DIAG] Stop() pre: stuckDetector.OwnerId={stuckDetector.OwnerId} " +
+            $"Enabled={stuckDetector.Enabled} -> Release(StuckOwnerId={StuckOwnerId})");
         stuckDetector.Release(StuckOwnerId);
 
         Volatile.Write(ref activePathRequestId, Interlocked.Increment(ref nextPathRequestId));
@@ -1187,6 +1209,26 @@ public sealed partial class Navigation : IDisposable
 
     public void SetWayPoints(Span<Vector3> points)
     {
+        bool wasActive = active;
+        if (!wasActive)
+        {
+            // Transitioning from paused/stopped → active. Re-Acquire stuckDetector
+            // ownership; otherwise the detector remains in ownerId=0 (Released by
+            // PausePathing or Stop), and all subsequent Update / IsGettingCloser /
+            // SetTargetLocation calls from Navigation silently no-op (see
+            // StuckDetector.IsOwner gate). Without this, the bot stops moving
+            // because IsGettingCloser returns true unconditionally and AdjustHeading
+            // never fires. Reproduces in AssistReturn after a distance-pause
+            // (PausePathing → assistrequestreturn → SetWayPoints) and in
+            // FFG.UpdateCantFollow recovery (Stop → SetSingleWaypoint).
+            // Acquire is idempotent (resets internal timers); harmless when called
+            // twice.
+            stuckDetector.Acquire(StuckOwnerId);
+        }
+        logger.LogInformation(
+            $"[NAV-DIAG] SetWayPoints(count={points.Length}) wasActive={wasActive} " +
+            $"stuckDetector.OwnerId={stuckDetector.OwnerId} Enabled={stuckDetector.Enabled}" +
+            (wasActive ? " (already active, no Acquire)" : " (was paused, re-Acquired)"));
         active = true;
         SetLastSafeAnchor(playerReader.WorldPos);
         wayPoints.Clear();
