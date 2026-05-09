@@ -1390,7 +1390,42 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             float dHere = playerMap.MapDistanceXYTo(pathMap[resumeIndex]);
             float dNext = playerMap.MapDistanceXYTo(pathMap[resumeIndex + 1]);
-            if (dHere < 1.5f || dNext <= dHere * 1.25f)
+
+            // Distance-based: leader is essentially at the closest waypoint, or past
+            // the midpoint of the segment to the next one (B is at most 25% farther
+            // than A by straight-line distance).
+            bool incByDistance = dHere < 1.5f || dNext <= dHere * 1.25f;
+
+            // Projection-based: leader has positive progress along segment A→B (t > 0
+            // means the leader's foot of perpendicular onto the segment line lies past
+            // A in the direction of B). Catches the case where the leader is mid-
+            // segment, slightly closer to A in straight-line distance, but has already
+            // traveled past A toward B — incByDistance misses this for long segments
+            // (e.g. segment 55y, leader 22y past A but 33y from B → dNext/dHere = 1.52,
+            // fails the 1.25 cutoff). Without this projection check, the distance-pause
+            // exit at line 813 sets the just-passed waypoint as the new resume target,
+            // and PublishPatrolWaypoint broadcasts it to the assist as a regression.
+            // Observed at 47:48, 47:56, 48:11 in leader_movement_32.txt.
+            //
+            // Map coordinates throughout (consistent with dHere/dNext above); sign of t
+            // is preserved across the map↔world FlipXY transform so the test result is
+            // identical in either coordinate system.
+            bool incByProgress = false;
+            Vector3 a = pathMap[resumeIndex];
+            Vector3 b = pathMap[resumeIndex + 1];
+            float abx = b.X - a.X;
+            float aby = b.Y - a.Y;
+            float abLenSq = abx * abx + aby * aby;
+            if (abLenSq > 0.001f)
+            {
+                float apx = playerMap.X - a.X;
+                float apy = playerMap.Y - a.Y;
+                float t = (apx * abx + apy * aby) / abLenSq;
+                if (t > 0.0f)
+                    incByProgress = true;
+            }
+
+            if (incByDistance || incByProgress)
                 resumeIndex++;
         }
 
