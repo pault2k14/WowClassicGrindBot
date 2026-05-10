@@ -716,7 +716,47 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             // ── API-based distance / status gate ───────────────────────────
             if (classConfig.Mode == Mode.PartyLeader)
             {
-                bool shouldPause = assistStateStore.ShouldLeaderPauseForAssist(
+                // Fix 6 (log-36 02:52:55:728 → 02:53:21:994): suppress the
+                // pause-for-assist gate while the leader is inside a blacklist.
+                // The blacklist-escape route in Navigation.Refill
+                // (TryComputeEscapeOutOfBlacklist) only runs when navigation.Update
+                // is processing — which requires active=true. PausePathing() sets
+                // active=false, so a paused leader cannot escape the rect it's
+                // sitting in. The previous behavior held the leader stationary
+                // inside the forbidden rect indefinitely (26 s in log-36) until
+                // the assist's 30 s TickNavActiveTimeout fired CantFollow →
+                // AssistReturn → SetWayPoints + Resume re-activated nav, at
+                // which point Refill ran and the escape route was finally set.
+                //
+                // Fix: don't pause inside a blacklist. If currently paused for
+                // assist distance, force-resume so navigation.Update at line 928
+                // can fire Refill. The escape route (~24 y to the rect's safe
+                // edge in log-36) brings the leader out; on the next tick the
+                // distance gate evaluates normally (now outside) and the leader
+                // pauses there if still > LeaderPauseYards from the assist.
+                // Assist's position-chase target is then a clean point outside
+                // the rect — assist can navigate to it without the SetWaypoint/
+                // SkipBlacklistedWaypoints loop that prompted Fixes 4 & 5.
+                bool insideBlacklist =
+                    navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true;
+
+                if (insideBlacklist && _pausedByAssistDistance)
+                {
+                    logger.LogWarning(
+                        $"[FRG] Distance gate suppressed: leader is inside a blacklist at " +
+                        $"<{playerReader.WorldPos.X:F2},{playerReader.WorldPos.Y:F2},{playerReader.WorldPos.Z:F2}> " +
+                        "— resuming pathing so the escape route can fire. " +
+                        "Distance gate will re-evaluate after escape on the next tick.");
+                    _pausedByAssistDistance = false;
+                    navigation.Resume();
+                }
+
+                // When inside a blacklist, force shouldPause=false so the
+                // pause-entry branch below cannot re-enter the pause we just
+                // cleared. _pausedByAssistDistance is already false (either we
+                // just cleared it above, or the leader was never paused), so
+                // the resume-exit branch (`else if`) also cannot fire.
+                bool shouldPause = !insideBlacklist && assistStateStore.ShouldLeaderPauseForAssist(
                     playerReader.WorldPos, LeaderPauseYards);
 
                 bool shouldResume = assistStateStore.ShouldLeaderResumePatrol(
