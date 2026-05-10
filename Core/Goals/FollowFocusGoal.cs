@@ -137,6 +137,34 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private const double ChaseWatchdogCantFollowSec = 15.0;
 
+    /// <summary>
+    /// SetSingleWaypoint loop guard thresholds. Detects unreachable navigation
+    /// targets (most commonly a target inside the leader's blacklist) by
+    /// counting consecutive SetSingleWaypoint calls within
+    /// <see cref="StationarySetTimeWindowMs"/> of each other where the bot
+    /// moved less than <see cref="StationarySetMovementThresholdYards"/>
+    /// between sets. After <see cref="MaxConsecutiveStationarySetsBeforeCantFollow"/>
+    /// such cycles, escalates immediately to CantFollow instead of waiting for
+    /// the 30 s <see cref="TickNavActiveTimeout"/>.
+    ///
+    /// log-36 02:52:51:236 → 02:53:21:263 baseline: leader inside blacklist,
+    /// every position-chase target also blacklisted, ~2000 wasted Update ticks
+    /// over 30 s before escalation. With this guard: ~10 ticks, ~150 ms.
+    ///
+    /// Threshold rationale:
+    ///   10 sets — high enough that single legitimate retries (e.g., one
+    ///     re-issue after a failed path) don't trip; low enough to escalate
+    ///     promptly compared to TickNavActiveTimeout's 30 s wall.
+    ///   100 ms window — observed loop runs at ~15 ms per cycle; legitimate
+    ///     path-result roundtrips take ≥250 ms, so a sub-100 ms gap between
+    ///     consecutive sets is unmistakably the loop.
+    ///   1.0 y movement — below 1 y means the bot truly hasn't progressed;
+    ///     legitimate navigation moves much more per cycle.
+    /// </summary>
+    private const int MaxConsecutiveStationarySetsBeforeCantFollow = 10;
+    private const int StationarySetTimeWindowMs = 100;
+    private const float StationarySetMovementThresholdYards = 1.0f;
+
     // -----------------------------------------------------------------------
     // Dependencies
     // -----------------------------------------------------------------------
@@ -294,6 +322,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     private DateTime _cantFollowEnteredUtc;
 
+    // -----------------------------------------------------------------------
+    // SetSingleWaypoint loop guard (Fix 5, log-36)
+    // -----------------------------------------------------------------------
+    private int _consecutiveStationarySetWaypointCount;
+    private DateTime _lastSetWaypointUtc = DateTime.MinValue;
+    private Vector3 _lastSetWaypointPlayerPos;
+
     public FollowFocusGoal(
         ConfigurableInput input,
         PlayerReader playerReader,
@@ -378,6 +413,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _activeStuckSinceUtc = DateTime.MinValue;
         _activeStuckReported = false;
         navigation.ResetApproachEscape();
+        ResetSetWaypointLoopGuardState();
 
         // Always reset rendezvous on goal entry — the assist must re-confirm
         // proximity to the leader before waypoint-sharing mode activates.
@@ -410,6 +446,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     public override void OnExit()
     {
         navigation.ResetApproachEscape();
+        ResetSetWaypointLoopGuardState();
         input.StepBackwards();
         wait.Update();
 
@@ -930,7 +967,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
             if (!suppressRefresh)
             {
-                navigation.SetSingleWaypoint(currentNavigationTarget); // world coords — SetWayPoints detects non-map range
+                SetWaypointLoopGuarded(currentNavigationTarget); // world coords — SetWayPoints detects non-map range
             }
         }
 
@@ -975,7 +1012,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
 
             _lastNavigatedToLeaderWorldPos = fallbackTarget;
-            navigation.SetSingleWaypoint(fallbackTarget);
+            // log-36: if SetWaypointLoopGuarded escalates to CantFollow (10
+            // consecutive stationary sets within 100ms, e.g. unreachable
+            // blacklisted target), the line ~1023 status assignment below
+            // would otherwise overwrite the CantFollow status back to
+            // NavigatingToLeader. Bail out early on escalation.
+            if (!SetWaypointLoopGuarded(fallbackTarget))
+                return;
         }
 
         // Guard against overwriting Following — set by the NavigatingExitYards block
@@ -1048,7 +1091,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _navActiveElapsed = TimeSpan.Zero;
         _navProgressCheckPosW = playerReader.WorldPos;
 
-        navigation.SetSingleWaypoint(target);
+        // log-36: if the loop guard escalates to CantFollow (target inside the
+        // leader's blacklist on every retry), the EnterState(NavigatingToLeader)
+        // and CurrentStatus assignment below would overwrite the CantFollow
+        // state set by EnterCantFollow. Bail out on escalation.
+        if (!SetWaypointLoopGuarded(target))
+            return;
         EnterState(NavState.NavigatingToLeader);
         assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
     }
@@ -1251,10 +1299,122 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // assist. Z is zeroed to match the format of every other path returned by
         // GetNavigationTarget (anchor, shared waypoint) — Navigation only uses XY.
         float invLen = 1f / lenXY;
-        return new Vector3(
+        Vector3 target = new Vector3(
             leaderW.X + dx * invLen * FollowStopShortYards,
             leaderW.Y + dy * invLen * FollowStopShortYards,
             0f);
+
+        // log-36 02:52:51:236 → 02:53:21:263: when the leader is inside a blacklist
+        // (e.g., killed/looted a mob inside a blacklisted area), the standard target
+        // (leader_pos + FollowStopShortYards * dir_to_assist) sits inside the same
+        // rect. Navigation.SkipBlacklistedWaypoints pops it on the next Update tick,
+        // OnDestinationReached fires, GetNavigationTarget is re-called and returns
+        // the same blacklisted point — infinite SetSingleWaypoint→pop loop at
+        // ~15ms intervals for 30 seconds until TickNavActiveTimeout escalates.
+        //
+        // Fix: project further along the leader→assist line in 2y steps until a
+        // non-blacklisted point is found. The assist navigates to the closest safe
+        // point near the leader (semantically: "get as close as possible without
+        // entering forbidden terrain"). If no safe point exists between the leader
+        // and the assist's current position, return the assist's position so the
+        // SetWaypointLoopGuarded helper detects the no-movement loop and escalates
+        // to CantFollow within ~150ms instead of 30s.
+        if (navigation.AreaBlacklist != null && navigation.AreaBlacklist.ContainsWorld(target))
+        {
+            const float STEP_YARDS = 2.0f;
+            for (float distFromLeader = FollowStopShortYards + STEP_YARDS;
+                 distFromLeader < lenXY;
+                 distFromLeader += STEP_YARDS)
+            {
+                Vector3 candidate = new Vector3(
+                    leaderW.X + dx * invLen * distFromLeader,
+                    leaderW.Y + dy * invLen * distFromLeader,
+                    0f);
+
+                if (!navigation.AreaBlacklist.ContainsWorld(candidate))
+                {
+                    logger.LogWarning(
+                        $"[FFG] Position-chase: standard target {target} is in assist's blacklist; " +
+                        $"projected toward assist to {candidate} ({distFromLeader:0.0}y from leader, " +
+                        $"{lenXY - distFromLeader:0.0}y from assist).");
+                    return candidate;
+                }
+            }
+
+            logger.LogWarning(
+                $"[FFG] Position-chase: leader→assist segment is entirely blacklisted " +
+                $"(leader={leaderW}, assist={assistW}). Returning assist position; " +
+                $"SetWaypoint loop guard will escalate to CantFollow.");
+            return new Vector3(assistW.X, assistW.Y, 0f);
+        }
+
+        return target;
+    }
+
+    /// <summary>
+    /// Wraps <see cref="Navigation.SetSingleWaypoint"/> with a loop guard that
+    /// detects "set wp → immediately popped, no movement" cycles caused by
+    /// unreachable navigation targets. The most common trigger is a target
+    /// inside the leader's blacklist that <see cref="Navigation.SkipBlacklistedWaypoints"/>
+    /// pops on every Update tick.
+    ///
+    /// <para>Counts consecutive sets within
+    /// <see cref="StationarySetTimeWindowMs"/> of each other where the bot
+    /// moved less than <see cref="StationarySetMovementThresholdYards"/>. After
+    /// <see cref="MaxConsecutiveStationarySetsBeforeCantFollow"/> such cycles,
+    /// escalates to <see cref="EnterCantFollow"/> and returns false. Returns
+    /// true on a successful set; the time/movement gate naturally resets the
+    /// counter when navigation is making progress (legitimate sets are
+    /// >100 ms apart and move >1 y between them).</para>
+    ///
+    /// <para>Without this guard, the existing <see cref="TickNavActiveTimeout"/>
+    /// (30 s) is the only escalation path; log-36 02:52:51:236 → 02:53:21:263
+    /// shows ~2000 wasted Update iterations during that wait. With it, the
+    /// loop is detected after ~150 ms and CantFollow fires immediately.</para>
+    /// </summary>
+    private bool SetWaypointLoopGuarded(Vector3 target)
+    {
+        DateTime now = DateTime.UtcNow;
+        Vector3 botPos = playerReader.WorldPos;
+
+        if (_lastSetWaypointUtc != DateTime.MinValue)
+        {
+            double elapsedMs = (now - _lastSetWaypointUtc).TotalMilliseconds;
+            float moved = botPos.WorldDistanceXYTo(_lastSetWaypointPlayerPos);
+
+            if (elapsedMs < StationarySetTimeWindowMs && moved < StationarySetMovementThresholdYards)
+            {
+                _consecutiveStationarySetWaypointCount++;
+            }
+            else
+            {
+                _consecutiveStationarySetWaypointCount = 0;
+            }
+
+            if (_consecutiveStationarySetWaypointCount >= MaxConsecutiveStationarySetsBeforeCantFollow)
+            {
+                logger.LogWarning(
+                    $"[FFG] SetWaypoint loop guard: {_consecutiveStationarySetWaypointCount} consecutive " +
+                    $"sets within {StationarySetTimeWindowMs} ms of each other, moved " +
+                    $"<{StationarySetMovementThresholdYards} y per cycle — target {target} is unreachable. " +
+                    "Escalating to CantFollow without 30 s TickNavActiveTimeout wait.");
+                ResetSetWaypointLoopGuardState();
+                EnterCantFollow();
+                return false;
+            }
+        }
+
+        navigation.SetSingleWaypoint(target);
+        _lastSetWaypointUtc = now;
+        _lastSetWaypointPlayerPos = botPos;
+        return true;
+    }
+
+    private void ResetSetWaypointLoopGuardState()
+    {
+        _consecutiveStationarySetWaypointCount = 0;
+        _lastSetWaypointUtc = DateTime.MinValue;
+        _lastSetWaypointPlayerPos = default;
     }
 
     private void EnterCantFollow()
@@ -1582,7 +1742,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation("[FFG] Rewind reached — retrying leader target.");
                 Vector3 rewindTarget = GetNavigationTarget(leader);
                 _lastNavigatedToLeaderWorldPos = rewindTarget;
-                navigation.SetSingleWaypoint(rewindTarget);
+                SetWaypointLoopGuarded(rewindTarget);
             }
             return;
         }
@@ -1636,7 +1796,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation(
                     $"[FFG] Destination reached in dead-band (leader={dist:0.0}y) — refreshing waypoint (target={refreshDist:0.0}y away), staying NavigatingToLeader.");
                 _lastNavigatedToLeaderWorldPos = refreshTarget;
-                navigation.SetSingleWaypoint(refreshTarget);
+                SetWaypointLoopGuarded(refreshTarget);
                 // Do NOT transition to Idle — remain in NavigatingToLeader.
                 return;
             }
@@ -1683,7 +1843,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         _lastNavigatedToLeaderWorldPos = retryTarget;
-        navigation.SetSingleWaypoint(retryTarget);
+        SetWaypointLoopGuarded(retryTarget);
     }
 
     private void Navigation_OnWayPointReached()
@@ -1720,7 +1880,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (refreshDist > Navigation.POP_DIST)
         {
             _lastNavigatedToLeaderWorldPos = refreshTarget;
-            navigation.SetSingleWaypoint(refreshTarget);
+            SetWaypointLoopGuarded(refreshTarget);
             // Stay in NavigatingToLeader.
         }
         else
@@ -1759,6 +1919,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         logger.LogWarning(
             $"[FFG] Path failed. Rewinding to anchor={_navRewindAnchorW}.");
-        navigation.SetSingleWaypoint(_navRewindAnchorW);
+        SetWaypointLoopGuarded(_navRewindAnchorW);
     }
 }
