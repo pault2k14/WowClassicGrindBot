@@ -848,9 +848,45 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     }
 
                     _pausedByAssistDistance = false;
-                    // Normal flow below will call navigation.Resume() / RefillWaypoints.
+
+                    // Fix 8 (log-38 ping-pong, cycles 4-7): preserve runtime
+                    // waypoint state on resume from pause-for-assist. The
+                    // wpStack is intact across PausePathing (which only sets
+                    // active=false and releases the stuck detector; wayPoints
+                    // and routeToNextWaypoint are untouched). The previous
+                    // behavior — `navigation.ClearAllRoutes(); RefillWaypoints(false);` —
+                    // rebuilt wpStack from the patrol path's "forward resume
+                    // point" relative to the leader's CURRENT position. When
+                    // the leader had navigated off-path toward a runtime
+                    // blacklist detour before the pause, the rebuild picked
+                    // up a patrol waypoint BEHIND the detour and republished
+                    // it as TargetWaypoint. The leader then navigated BACK to
+                    // that old patrol waypoint, popped it, hit the same
+                    // blacklist rejection, inserted the same detour, and
+                    // navigated forward again — yo-yo for the entire session
+                    // (log-38 observed leader oscillating between <-132,-1536>
+                    // and <-128,-1562>, ~25 y apart, for ~2 minutes with no
+                    // patrol progress; assist's waypoint-sharing target
+                    // flapping <-62.06> ↔ <-124.82> in lockstep).
+                    //
+                    // Fix: if wpStack is intact, just Resume() so the leader
+                    // continues toward its current wpTop (e.g., the runtime
+                    // detour) — preserving forward progress through the
+                    // blacklist. PublishPatrolWaypoint refreshes the broadcast
+                    // so the assist re-syncs. Fall back to the original
+                    // ClearAllRoutes + RefillWaypoints only if wpStack is
+                    // genuinely empty (no progress to preserve, e.g. after a
+                    // route completion).
                     navigation.ClearAllRoutes();
-                    RefillWaypoints(false);
+                    if (navigation.HasWaypoint())
+                    {
+                        navigation.Resume();
+                        PublishPatrolWaypoint();
+                    }
+                    else
+                    {
+                        RefillWaypoints(false);
+                    }
 
                     // Re-enable the side target-finding thread now that we're
                     // resuming patrol. _pausedByAssistDistance was just cleared
