@@ -2899,6 +2899,16 @@ public sealed partial class Navigation : IDisposable
             if (SegmentBlockedEscapeAware(startW, d)) continue;
             if (SegmentBlockedEscapeAware(d, endW)) continue;
 
+            // Fix 11 (parity with TryInsertDetour): require segments to clear
+            // the INFLATED blocking rect (the same inflation used for candidate
+            // placement) so the connecting paths can't graze the rect's
+            // corners. Without this, the pather can route through the corner
+            // because the corner clearance is sub-yard and unit drift then
+            // carries the bot into the rect. See the longer comment block in
+            // TryInsertDetour for the log-41 evidence trail.
+            if (SegmentGrazesInflatedRect(startW, d, inflated)) continue;
+            if (SegmentGrazesInflatedRect(d, endW, inflated)) continue;
+
             float score = startW.WorldDistanceXYTo(d) + d.WorldDistanceXYTo(endW);
             if (score < bestScore)
             {
@@ -3169,6 +3179,89 @@ public sealed partial class Navigation : IDisposable
     private bool SegmentBlockedEscapeAware(Vector3 startW, Vector3 endW)
         => TryGetBlockingRectEscapeAware(startW, endW, out _);
 
+    /// <summary>
+    /// Fix 11 (log-41 15:51:46:369 → 15:52:14: assist oscillating in/out of
+    /// blacklist rect (952.39,277.05)-(999.27,327.20) every ~3 s for 28 s while
+    /// the leader was paused). <see cref="TryInsertDetour"/> had chosen
+    /// candidate &lt;961.11, 259.05&gt; whose connecting segment from start
+    /// &lt;940.70, 300.69&gt; cleared the original rect's SW corner by only
+    /// 0.22 y at X=952.39; the pather then routed through the corner anyway
+    /// and the bot drifted into the rect every cycle.
+    ///
+    /// Returns true when the segment from <paramref name="a"/> to
+    /// <paramref name="b"/> "grazes" <paramref name="inflated"/>: both
+    /// endpoints lie outside the rect, yet the segment crosses the rect's
+    /// interior. <see cref="TryInsertDetour"/> and
+    /// <see cref="TryInsertDetourFromRejectedPath"/> use this on top of
+    /// <see cref="SegmentBlockedEscapeAware"/> to reject candidates whose
+    /// connecting segments clear only the ORIGINAL rect (the existing check)
+    /// while passing dangerously close to its corners — close enough that real
+    /// unit-movement drift routes the bot through the corner.
+    ///
+    /// "inflated" is the same rect used for candidate placement (rect.Inflate(m
+    /// * 0.5f)). Reusing it here means the safety buffer that gates candidate
+    /// positions now also gates the connecting segments — segments must clear
+    /// the original rect by the same 6 y as the candidates themselves.
+    ///
+    /// If either endpoint is INSIDE the inflated rect, the segment is a
+    /// legitimate entry/exit transit (e.g., bot starting position happens to
+    /// sit in the rect's inflated zone but outside the original rect), not a
+    /// graze — returns false so the candidate isn't rejected for a normal
+    /// approach. The existing <see cref="SegmentBlockedEscapeAware"/> check
+    /// still gates against the ORIGINAL rect in that case.
+    /// </summary>
+    private static bool SegmentGrazesInflatedRect(Vector3 a, Vector3 b, BlacklistRect inflated)
+    {
+        var aV = new Vector2(a.X, a.Y);
+        var bV = new Vector2(b.X, b.Y);
+        if (inflated.Contains(aV) || inflated.Contains(bV))
+            return false;
+
+        return SegmentIntersectsAxisAlignedRect(a, b, inflated);
+    }
+
+    /// <summary>
+    /// Liang–Barsky parametric segment-vs-axis-aligned-rect intersection test
+    /// in XY. Returns true if the segment from <paramref name="a"/> to
+    /// <paramref name="b"/> touches or crosses <paramref name="rect"/>;
+    /// endpoints on the rect's boundary count as intersecting.
+    /// </summary>
+    private static bool SegmentIntersectsAxisAlignedRect(Vector3 a, Vector3 b, BlacklistRect rect)
+    {
+        float dx = b.X - a.X;
+        float dy = b.Y - a.Y;
+
+        float u1 = 0f;
+        float u2 = 1f;
+
+        if (!LiangBarskyClipTest(-dx, a.X - rect.MinX, ref u1, ref u2)) return false;
+        if (!LiangBarskyClipTest( dx, rect.MaxX - a.X, ref u1, ref u2)) return false;
+        if (!LiangBarskyClipTest(-dy, a.Y - rect.MinY, ref u1, ref u2)) return false;
+        if (!LiangBarskyClipTest( dy, rect.MaxY - a.Y, ref u1, ref u2)) return false;
+
+        return u1 <= u2;
+    }
+
+    private static bool LiangBarskyClipTest(float p, float q, ref float u1, ref float u2)
+    {
+        const float Eps = 1e-6f;
+        if (MathF.Abs(p) < Eps)
+            return q >= 0f;
+
+        float r = q / p;
+        if (p < 0f)
+        {
+            if (r > u2) return false;
+            if (r > u1) u1 = r;
+        }
+        else
+        {
+            if (r < u1) return false;
+            if (r < u2) u2 = r;
+        }
+        return true;
+    }
+
     private bool SkipBlacklistedWaypoints()
     {
         if (AreaBlacklist == null) return wayPoints.Count > 0;
@@ -3266,6 +3359,25 @@ public sealed partial class Navigation : IDisposable
 
             if (SegmentBlockedEscapeAware(startW, d)) continue;
             if (SegmentBlockedEscapeAware(d, targetW)) continue;
+
+            // Fix 11 (log-41 15:51:46:369: candidate <961.11, 259.05> chosen
+            // because the segment from start <940.70, 300.69> clears the
+            // ORIGINAL rect at the SW corner (X=952.39) by only 0.22 y — bot
+            // then drifted into the rect during pather-driven movement, was
+            // ejected by Escape-first, re-pathed, drifted in again, oscillating
+            // every ~3 s for 28 s until combat broke the cycle). Require the
+            // connecting segments to also clear the INFLATED rect (the same
+            // inflated value already used for candidate placement). This adds
+            // the safety buffer to the segment validity check that
+            // SegmentBlockedEscapeAware lacks — segments must stay 6 y from the
+            // original rect's edges, matching the candidate's own placement
+            // margin. SegmentGrazesInflatedRect returns false when an endpoint
+            // sits inside the inflated rect (legitimate transit, e.g. start
+            // happens to lie in the 6 y inflated zone), preserving existing
+            // behaviour for that case while the SegmentBlockedEscapeAware check
+            // above continues to gate against the original rect.
+            if (SegmentGrazesInflatedRect(startW, d, inflated)) continue;
+            if (SegmentGrazesInflatedRect(d, targetW, inflated)) continue;
 
             float score = startW.WorldDistanceXYTo(d) + d.WorldDistanceXYTo(targetW);
             if (score < bestScore)
