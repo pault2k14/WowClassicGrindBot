@@ -1804,8 +1804,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // Refresh target is also co-located (refreshDist ≤ POP_DIST) — cannot
             // navigate any closer with the current map resolution. Accept Idle so the
             // assist does not spin indefinitely trying to reach an unreachable position.
+            //
+            // Fix 10 (parity with OnWayPointReached's co-located branch): set
+            // _rendezvousConfirmed=true so UpdateIdle's line 723 dead-band check
+            // takes the stay-put branch on the next tick instead of re-triggering
+            // StartNavigatingToLeader. In log-40 the cycle ran through
+            // OnWayPointReached (TryConsumeReachedWaypoint fires both events,
+            // OnWayPointReached first, transitioning _navState→Idle so this
+            // OnDestinationReached returns early at line 1733). Setting it here
+            // too handles the SkipBlacklistedWaypoints path (Navigation line 786)
+            // where wayPoints drops to 0 without going through
+            // TryConsumeReachedWaypoint — OnDestinationReached fires alone.
             logger.LogInformation(
                 $"[FFG] Destination reached in dead-band (leader={dist:0.0}y, target co-located {refreshDist:0.0}y) — entering Idle.");
+            _rendezvousConfirmed = true;
             navigation.Stop();
             input.StopForward(true);
             ResetNavState();
@@ -1886,6 +1898,46 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         else
         {
             // Target co-located — can't get closer; stop.
+            //
+            // Fix 10 (log-40, three 120s CantFollow timeout cycles at <952.07,297.85>
+            // & later at <949.92,294.16>): when ComputeFollowTargetWorldPos returns
+            // a target within POP_DIST of the bot — either because the entire
+            // leader→assist segment is blacklisted (returns assist's own position)
+            // OR because Fix 4 projected to a candidate near the assist that the
+            // bot is already adjacent to — we accept Idle here, but
+            // _rendezvousConfirmed stays false (line 615-617 only sets it when
+            // dist < FollowingMaxYards=7y, and we're in the dead-band 7-14y).
+            //
+            // On the very next UpdateIdle tick, line 723 check fails:
+            //   `Following && _rendezvousConfirmed` → status=Following but
+            //   _rendezvousConfirmed=false → falls to else → "Dead-band — closing
+            //   gap to confirm rendezvous" → StartNavigatingToLeader → same target
+            //   returned → wp popped → OnWayPointReached → here again.
+            //
+            // The cycle runs at ~30ms per iteration. After 10 stationary
+            // SetSingleWaypoint calls in ~300ms, Fix 5's SetWaypointLoopGuarded
+            // escalates to CantFollow, which then triggers the leader's
+            // ShouldLeaderPauseForAssist (any CantFollow → pause regardless of
+            // distance), AssistRequestReturn, and the Fix 9 phantom-AssistReturn
+            // loop. log-40 observed three 120s CantFollow cycles (12:57:41:809,
+            // 12:59:42:132, 13:01:42:472) with the leader and assist completely
+            // stuck for >4 minutes.
+            //
+            // Semantic justification: geometric impossibility of getting closer
+            // (line entirely blacklisted, or projection lands near assist) IS
+            // the rendezvous outcome for this geometry. The bot accepts dead-band
+            // distance as "close enough"; setting _rendezvousConfirmed=true lets
+            // UpdateIdle take the line 723 stay-put branch.
+            //
+            // Existing safety net at line 1252: GetNavigationTarget clears
+            // _rendezvousConfirmed when leader.Status != Patrolling, so this
+            // doesn't accidentally persist into combat/loot phases.
+            // leaderJustResumedPatrol / leaderJustPublishedWaypoint checks
+            // (lines 700 / 673) fire StartNavigatingToLeader on real leader
+            // transitions regardless of _rendezvousConfirmed, so the assist
+            // re-engages when needed.
+            _rendezvousConfirmed = true;
+
             navigation.Stop();
             ResetNavState();
             EnterState(NavState.Idle);
