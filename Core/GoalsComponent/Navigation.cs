@@ -110,6 +110,23 @@ public sealed partial class Navigation : IDisposable
     /// <summary>How far outside a forbidden rect detour points are placed (WORLD units).</summary>
     public float DetourMargin { get; set; } = 12f;
 
+    /// <summary>
+    /// Minimum world-yards a detour candidate must be from BOTH the path's start
+    /// and its target/end point to be considered. Filters degenerate candidates
+    /// produced by <see cref="BuildDetourCandidates"/> when the path endpoints
+    /// happen to sit on the rect's perimeter+margin — the score function
+    /// (startW.dist(d) + d.dist(endW)) gives such a candidate the minimum
+    /// possible score (one term goes to zero), so it always wins, and the
+    /// "detour" pushed onto the waypoint stack equals the existing target. Next
+    /// refill recomputes the same path → same rejection → same duplicate detour;
+    /// wp stack grows unbounded with no progress (log-37 assist 23:46:28→59,
+    /// 30 s of growth from wp=1 to wp=153+, 630 identical rejection-detour
+    /// insertions, bot stationary). 1 yard is small enough to admit legitimate
+    /// close-but-distinct detours, large enough to reject exact and near-exact
+    /// duplicates of either endpoint.
+    /// </summary>
+    public float MinDetourSeparationYards { get; set; } = 1.0f;
+
     /// <summary>Max detours attempted for the same target waypoint.</summary>
     public int MaxDetourAttemptsPerTarget { get; set; } = 6;
 
@@ -2776,6 +2793,25 @@ public sealed partial class Navigation : IDisposable
         {
             if (IsBlacklistedPoint(d)) continue;
 
+            // Fix 7 (log-37 assist 23:46:28→59): BuildDetourCandidates emits
+            // points on the rect's perimeter+margin. When endW or startW itself
+            // sits on that perimeter (which happens when the assist is
+            // navigating to the leader's previously-inserted detour point —
+            // FRG.PublishPatrolWaypoint via TopPublishableWaypointW returns
+            // that detour as the publishable wpTop), one candidate coincides
+            // exactly with endW (or startW). The score
+            // startW.dist(d) + d.dist(endW) collapses to startW.dist(endW) for
+            // that candidate, which is the smallest possible score; it always
+            // wins. The "detour" pushed onto the stack is the existing target,
+            // so the next refill recomputes the same path, gets the same
+            // rejection, inserts another duplicate — wp count grows unbounded
+            // (1→153+ in 30 s observed in log-37). Reject candidates that
+            // don't meaningfully separate from either endpoint; if none
+            // remain, HandleBlacklistReject's MaxSameRejectBeforeFallback
+            // counter takes over and pops the wpTop after 4 rejects.
+            if (d.WorldDistanceXYTo(endW) < MinDetourSeparationYards) continue;
+            if (d.WorldDistanceXYTo(startW) < MinDetourSeparationYards) continue;
+
             if (SegmentBlockedEscapeAware(startW, d)) continue;
             if (SegmentBlockedEscapeAware(d, endW)) continue;
 
@@ -3136,6 +3172,14 @@ public sealed partial class Navigation : IDisposable
         foreach (var d in BuildDetourCandidates(inflated, m, z))
         {
             if (IsBlacklistedPoint(d)) continue;
+
+            // Fix 7 (log-37): same as TryInsertDetourFromRejectedPath — reject
+            // candidates within MinDetourSeparationYards of either endpoint so
+            // a candidate sitting at exactly the target position cannot win
+            // the score and produce a no-op duplicate detour.
+            if (d.WorldDistanceXYTo(targetW) < MinDetourSeparationYards) continue;
+            if (d.WorldDistanceXYTo(startW) < MinDetourSeparationYards) continue;
+
             if (SegmentBlockedEscapeAware(startW, d)) continue;
             if (SegmentBlockedEscapeAware(d, targetW)) continue;
 
