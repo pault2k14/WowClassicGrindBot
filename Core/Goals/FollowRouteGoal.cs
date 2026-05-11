@@ -1417,12 +1417,91 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         logger.LogInformation($"FollowRouteGoal: GoToOneWaypoint → {waypointToGoTo}");
 
         if (classConfig.Mode == Mode.PartyLeader && assistStateStore.AnyAssistCantFollow())
+        {
+            // Fix 9 (log-39, 5×25 s phantom AssistReturn cycles): if the
+            // CantFollow assist is inside a blacklist (the common case — FFG's
+            // Fix 4/5 escalation specifically fires when leader→assist segment
+            // is entirely blacklisted), the recorded assist position is itself
+            // inside the rect. SetWayPoints below would push a blacklisted
+            // waypoint, SkipBlacklistedWaypoints (Navigation line 776) would
+            // pop it on the next Update tick (leader-outside-blacklist branch,
+            // player-inside early-return at line 3092 doesn't fire), wayPoints
+            // would empty, and OnDestinationReached would fire as a phantom
+            // arrival — leader logs "AssistReturn destination reached" 1 ms
+            // after begin (log-39 11:22:32:626→:627) while still 17.5 y from
+            // the assist.
+            //
+            // Fix: project the target outward from the assist toward the
+            // leader, stopping just past the rect edge on the leader-side.
+            // For typical small blacklists (~7 y × 7 y in log-39), the
+            // projected point lands ~5-6 y from the assist — close enough for
+            // the assist's UpdateCantFollow exit condition
+            // (FFG line 1053: `dist <= LeaderArrivedYards=6 y`) to fire once
+            // the leader arrives at the projected point, breaking the
+            // stalemate. Idempotent when target is already outside any
+            // blacklist (the non-CantFollow-pair callers).
+            //
+            // Gate the projection on `!leaderInsideBlacklist`. When the
+            // leader is also inside the blacklist (cycle 1 of log-39: both
+            // bots at the corpse-consumption site inside the same rect),
+            // PASS THE ORIGINAL TARGET THROUGH so Navigation.Refill's
+            // Escape-first ROUTE (triggered by `player_inside_blacklist`,
+            // NOT by waypoint contents) can compute an escape on the next
+            // Update tick. Once the leader is outside, the subsequent
+            // pause→GoToOneWaypoint cycle hits the projection branch and
+            // sets a reachable target.
+            Vector3 leaderW = playerReader.WorldPos;
+            Vector3 targetW = IsLikelyMapPoint(waypointToGoTo)
+                ? WorldMapAreaDB.ToWorld_FlipXY(waypointToGoTo, playerReader.WorldMapArea)
+                : waypointToGoTo;
+
+            bool leaderInsideBlacklist =
+                navigation.AreaBlacklist?.ContainsWorld(leaderW) == true;
+
+            if (!leaderInsideBlacklist)
+            {
+                Vector3 projectedW = navigation.ProjectOutOfBlacklist(targetW, leaderW);
+                // Only override when projection moved the target meaningfully
+                // AND the projected point is not degenerately at the leader.
+                // The leader-degeneracy guard is defensive — when leader is
+                // outside, ProjectOutOfBlacklist's iteration from target→leader
+                // must cross the rect boundary, so a real outside step is found
+                // before reaching the leader. The guard catches edge cases
+                // (target == leader, dist < 0.001 f) cleanly.
+                if (projectedW.WorldDistanceXYTo(targetW) > 0.01f &&
+                    projectedW.WorldDistanceXYTo(leaderW) > 0.01f)
+                {
+                    logger.LogWarning(
+                        $"[FRG] GoToOneWaypoint: assist target {targetW} inside " +
+                        $"blacklist; projecting to leader-side edge {projectedW} " +
+                        "(Fix 9 — unblocks assist's UpdateCantFollow exit at FFG line 1053).");
+                    waypointToGoTo = projectedW;
+                }
+            }
+            // else: leader inside blacklist — pass original target through.
+            // Refill's Escape-first will fire on the next Update tick based on
+            // player_inside_blacklist regardless of waypoint contents.
+
             BeginAssistReturn(waypointToGoTo);
+        }
         else
+        {
             ClearAssistReturnState();
+        }
 
         ResetRefillWaypointsGuard();
         navigation.SetWayPoints(stackalloc Vector3[1] { waypointToGoTo });
+    }
+
+    /// <summary>
+    /// Matches the heuristic in <see cref="GoalsComponent.Navigation.SetWayPoints"/>
+    /// (line 1374) for distinguishing map coords (0..100 in both X and Y) from
+    /// world coords. Local copy so Fix 9's projection can convert map→world before
+    /// blacklist checks without exposing Navigation.IsMapPoint publicly.
+    /// </summary>
+    private static bool IsLikelyMapPoint(Vector3 p)
+    {
+        return p.X is >= 0 and <= 100 && p.Y is >= 0 and <= 100;
     }
 
     public void RefillWaypoints(bool onlyClosest)

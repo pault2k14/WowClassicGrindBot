@@ -1319,6 +1319,90 @@ public sealed partial class Navigation : IDisposable
         return WorldMapAreaDB.ToMap_FlipXY(Nav2D(routeToNextWaypoint.Peek()), playerReader.WorldMapArea);
     }
 
+    /// <summary>
+    /// Project a target point that lies inside a blacklist outward along the line
+    /// toward <paramref name="fromW"/> until the first point that is not contained
+    /// in any blacklist rect, plus a small clearance margin. Returns
+    /// <paramref name="targetW"/> unchanged when it's already outside all blacklists
+    /// (idempotent) or when <see cref="AreaBlacklist"/> is null. Returns
+    /// <paramref name="fromW"/> when the entire line from target to from lies inside
+    /// the blacklist (i.e., no projection possible without overshooting the caller).
+    /// </summary>
+    /// <remarks>
+    /// Fix 9 (log-39, 5 cycles of 25 s phantom AssistReturn): the assist enters
+    /// CantFollow while standing inside a forbidden rect (FFG Fix 4/5 escalation
+    /// when leader-assist segment is entirely blacklisted). The leader's
+    /// AssistRequestReturn fires <see cref="FollowRouteGoal.GoToOneWaypoint"/>
+    /// with the assist's recorded position — which is inside the blacklist.
+    /// <see cref="SkipBlacklistedWaypoints"/> at line 776 pops this target on the
+    /// next Update tick (player-outside-blacklist branch), <c>wayPoints.Count</c>
+    /// drops to 0, <see cref="OnDestinationReached"/> fires with the leader still
+    /// 17 y away from the assist. FRG logs "AssistReturn destination reached" but
+    /// the leader never moved; assist's <c>UpdateCantFollow</c> never sees leader
+    /// within <c>LeaderArrivedYards=6</c>, so it stays CantFollow indefinitely.
+    /// Projection puts the AssistReturn target just outside the blacklist on the
+    /// leader-side edge — close enough for the assist's UpdateCantFollow exit to
+    /// fire when the leader arrives, unsticking the pair.
+    /// </remarks>
+    public Vector3 ProjectOutOfBlacklist(Vector3 targetW, Vector3 fromW)
+    {
+        if (AreaBlacklist == null)
+            return targetW;
+
+        if (!AreaBlacklist.ContainsWorld(Nav2D(targetW)))
+            return targetW;
+
+        float dx = fromW.X - targetW.X;
+        float dy = fromW.Y - targetW.Y;
+        float dist = MathF.Sqrt(dx * dx + dy * dy);
+
+        if (dist < 0.001f)
+            return targetW;
+
+        float invDist = 1f / dist;
+        dx *= invDist;
+        dy *= invDist;
+
+        const float StepYards = 0.5f;
+        const float MarginYards = 1.0f;
+
+        int maxSteps = (int)(dist / StepYards) + 1;
+        for (int i = 1; i <= maxSteps; i++)
+        {
+            float step = i * StepYards;
+            if (step >= dist)
+                break;
+
+            Vector3 candidate = new Vector3(
+                targetW.X + dx * step,
+                targetW.Y + dy * step,
+                targetW.Z);
+
+            if (!AreaBlacklist.ContainsWorld(Nav2D(candidate)))
+            {
+                // Found first outside point. Add margin for clearance — confirms
+                // the projected point isn't right against a rect edge where small
+                // pathing wobble could re-enter.
+                float marginStep = step + MarginYards;
+                if (marginStep < dist)
+                {
+                    Vector3 marginCandidate = new Vector3(
+                        targetW.X + dx * marginStep,
+                        targetW.Y + dy * marginStep,
+                        targetW.Z);
+                    if (!AreaBlacklist.ContainsWorld(Nav2D(marginCandidate)))
+                        return marginCandidate;
+                }
+                return candidate;
+            }
+        }
+
+        // Line from targetW to fromW is entirely blacklisted (fromW also inside).
+        // Caller should treat this as "no useful projection"; returning fromW
+        // makes the caller's SetWayPoints a no-op (leader at its own position).
+        return fromW;
+    }
+
     public void SetWayPoints(Span<Vector3> points)
     {
         bool wasActive = active;
