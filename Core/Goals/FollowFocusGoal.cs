@@ -1541,9 +1541,56 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 }
             }
 
+            // Fix 24 (log-47 09:25:19:460 → 09:25:46:451, assist sat in
+            // CantFollow for 27 s waiting for leader to walk over): the
+            // existing fallback below unconditionally returns the assist's
+            // own position → SetWaypoint loop guard → CantFollow within
+            // ~185 ms. That's only correct when the geometry actually blocks
+            // navigation. In log-47, leader <952.5, 272.6> and assist
+            // <967.6, 271.5> were both ~5 y south of rect (952.4, 277.05)-
+            // (999.3, 327.2). Standard target = <955.5, 272.4>:
+            //   - Strictly outside rect (Y = 272.4 < MinY = 277.05).
+            //   - Assist→target line stays in Y ∈ [271.5, 272.4], doesn't
+            //     cross rect (rect's Y range is [277.05, 327.2]).
+            //   - But target is within 6 y inflated, AND every projection
+            //     candidate along the leader→assist line lies in the same
+            //     parallel band 5 y south of MinY, also within 6 y. The
+            //     loop exhausts with no candidate → Fix 12's rect-escape
+            //     doesn't apply (assist is not inside any rect) → here.
+            // The line is just NEAR the rect, not crossing it. Standard
+            // target is reachable. Overshoot during chase is the only
+            // residual risk and Navigation's escape-first handles that.
+            //
+            // Distinguish "near a rect" from "obstructed by a rect" using
+            // strict-rect checks before escalating. Two ways the standard
+            // target can genuinely be unreachable:
+            //   (a) target lands strictly inside a rect — bot would arrive
+            //       in forbidden terrain
+            //   (b) assist→target segment strictly crosses a rect — route
+            //       passes through forbidden terrain en route
+            // If neither holds, the inflated-but-strictly-outside scenario
+            // applies: return the standard target. CantFollow only fires
+            // when the line is genuinely blocked.
+            bool targetInsideStrictRect = navigation.AreaBlacklist.ContainsWorld(target);
+            bool segmentCrossesStrictRect =
+                navigation.AreaBlacklist.TryGetBlockingRect(assistW, target, out _);
+
+            if (!targetInsideStrictRect && !segmentCrossesStrictRect)
+            {
+                logger.LogWarning(
+                    $"[FFG] Position-chase: no candidate ≥{ProjectionSafetyMarginYards:0.0}y " +
+                    $"from rect along leader→assist line, AND assist not inside any rect, " +
+                    $"BUT standard target {target} is strictly outside all rects and " +
+                    $"assist→target segment doesn't cross any rect — returning standard " +
+                    $"target (Fix 24). Line is just near rect, not obstructed by it. " +
+                    $"(leader={leaderW}, assist={assistW}).");
+                return target;
+            }
+
             logger.LogWarning(
                 $"[FFG] Position-chase: leader→assist segment is entirely blacklisted " +
-                $"(leader={leaderW}, assist={assistW}). Returning assist position; " +
+                $"(leader={leaderW}, assist={assistW}, targetInsideStrictRect={targetInsideStrictRect}, " +
+                $"segmentCrossesStrictRect={segmentCrossesStrictRect}). Returning assist position; " +
                 $"SetWaypoint loop guard will escalate to CantFollow.");
             return new Vector3(assistW.X, assistW.Y, 0f);
         }
