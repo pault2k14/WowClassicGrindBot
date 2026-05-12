@@ -52,6 +52,22 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private bool _stuckApproachingActive;
     private int _stuckApproachingDamageSnapshot;
 
+    // Fix 22 Part B (log-46 02:46:17→02:46:19, ~2s Combat then NO PLAN):
+    // Track the GUID currently latched by the Fix 17 self-defense override.
+    // Mirrors GoapAgent._selfDefenseOverrideGuid (private to that class) so
+    // CombatGoal's local Fix 17 mirror at line ~256 can keep the override
+    // active when the bot has entered the blacklist area during the chase.
+    // Without this latch, navigation.IsInBlacklistArea()=true caused the Fix 17
+    // mirror to NOT fire (currentTargetIsIgnored stayed True), case 3 bail
+    // executed (PressStopAttack + PressClearTarget), the target was cleared,
+    // GoapAgent's override condition `hasTarget` failed on the next tick, and
+    // the planner produced NO PLAN.
+    //
+    // The latch fires alongside GoapAgent's latch (set in the same tick the
+    // override first activates) and clears together (target gone, switched,
+    // or override conditions no longer hold).
+    private int _combatOverrideGuid;
+
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
         ClassConfiguration classConfiguration, ClassConfiguration classConfig,
@@ -253,18 +269,95 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // ~499) — the "only AssistFocus uses it" comment refers to the
         // PartyStatePublisher consumer, not the source assignment. Safe
         // to read from CombatGoal regardless of mode.
+        // Fix 22 Part B + Fix 23 (log-46 02:46:17:399→02:46:19:453):
+        //  - Fix 22B: the original Fix 17 condition required
+        //    `!navigation.IsInBlacklistArea()`. When the bot was attacked
+        //    outside the rect and started chasing the mob, the chase carried
+        //    the bot inside the rect after ~2 s. The Fix 17 mirror stopped
+        //    firing (currentTargetIsIgnored stayed True), case 3 bail executed,
+        //    target was cleared, GoapAgent's override dropped, Combat plan was
+        //    cancelled by the planner — only Approach key had fired, no
+        //    offensive spells reached cast range.
+        //    Latch: once the override fires for a given GUID, allow it to
+        //    continue even when the bot is now inside the rect. New
+        //    activations still require !IsInBlacklistArea() — preserves the
+        //    original guarantee that we only engage IsIgnored mobs we did
+        //    NOT seek out from inside a rect.
+        //
+        //  - Fix 23 (issue 3 in user's report — leader's return-to-assist
+        //    not triggered while assist is in self-defense combat): on the
+        //    very first activation tick of the override for a given GUID, in
+        //    AssistFocus mode, set assistStatusProvider.CantFollow=true and
+        //    press the AssistCantFollow key. This propagates through the
+        //    PartyStatePublisher API to the leader's AssistStateStore. The
+        //    leader's GoapAgent reads it via AnyAssistCantFollow() (line 878),
+        //    sets GoapKey.assistrequestreturn=true, GoapKey.assistrequestreturn-
+        //    orisfollowing=true (line 897), FollowRouteGoal's PartyLeader
+        //    precondition (line 191) is satisfied, FRG can run, and FRG's
+        //    pause/resume logic (line 888) calls GoToOneWaypoint to the
+        //    assist's last-known position. The CantFollow flag is cleared
+        //    naturally by FFG when the assist later reaches the leader.
+        bool overrideAlreadyLatched =
+            _combatOverrideGuid != 0 && _combatOverrideGuid == playerReader.TargetGuid;
+
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
             && !assistStatusProvider.EvadeRecoveryActive
-            && !navigation.IsInBlacklistArea())
+            && (!navigation.IsInBlacklistArea() || overrideAlreadyLatched))
         {
             logger.LogInformation(
                 $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +
                 $"is on IsIgnored but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
-                $"playerCombat=true, dmgTaken=true, evadeRecovery=false, insideBlacklistArea=false) — " +
+                $"playerCombat=true, dmgTaken=true, evadeRecovery=false, " +
+                $"insideBlacklistArea={navigation.IsInBlacklistArea()}, latched={overrideAlreadyLatched}) — " +
                 $"treating as fightable, falling through to engage rather than bailing.");
             currentTargetIsIgnored = false;
+
+            // Fix 22B + Fix 23: first-activation handling.
+            if (_combatOverrideGuid != playerReader.TargetGuid)
+            {
+                _combatOverrideGuid = playerReader.TargetGuid;
+
+                if (classConfig.Mode == Mode.AssistFocus && !assistStatusProvider.CantFollow)
+                {
+                    // Set BOTH the flag AND the status. AssistStateStore's
+                    // GetCantFollowState() (line 139) requires Status==CantFollow
+                    // strictly — AnyAssistCantFollow() accepts either, but the
+                    // leader's GoapAgent diff-loop (line 339-347) calls
+                    // GoToOneWaypoint only when GetCantFollowState() returns
+                    // non-null. Without the Status set, the leader broadcasts
+                    // AssistRequestReturn (FRG precondition is satisfied) but
+                    // never receives a navigable target — leader just patrols
+                    // normally. With both set, the leader navigates directly
+                    // to our last-published position.
+                    //
+                    // Status is reverted by FFG when combat ends and FFG resumes
+                    // (FFG lines 477/658/681/850/etc. set Following / Waiting /
+                    // NavigatingToLeader on its own transitions). The flag is
+                    // cleared by FFG's normal reach-leader cleanup (line 535/707).
+                    assistStatusProvider.CantFollow = true;
+                    assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
+                    input.PressAssistCantFollow();
+                    logger.LogInformation(
+                        $"[CombatGoal] Self-defense override first activation (Fix 23): " +
+                        $"signaling CantFollow=true AND Status=CantFollow (and pressing " +
+                        $"AssistCantFollow key) so the leader navigates to our position. " +
+                        $"Target guid={playerReader.TargetGuid}.");
+                }
+            }
+        }
+        else if (_combatOverrideGuid != 0)
+        {
+            // Override conditions no longer hold — clear the local latch. The
+            // CantFollow flag is intentionally NOT cleared here; FFG's normal
+            // reach-leader cleanup (FFG line 535/707) handles that lifecycle.
+            logger.LogInformation(
+                $"[CombatGoal] Self-defense override latch cleared (guid={_combatOverrideGuid}). " +
+                $"Reason: targetIgnored={currentTargetIsIgnored} hasTarget={bits.Target()} " +
+                $"playerCombat={bits.Combat()} dmgTaken={combatLog.DamageTakenCount()} " +
+                $"targetTarget={playerReader.TargetTarget} evadeRecovery={assistStatusProvider.EvadeRecoveryActive}.");
+            _combatOverrideGuid = 0;
         }
 
         if (currentTargetIsIgnored && (focusTargetIsIgnored || !isPartyMode))

@@ -836,14 +836,40 @@ public sealed partial class GoapAgent : IDisposable
         // evade window has elapsed — exactly the scenario in log-42 where
         // the assist sat outside the blacklist at <942.65, 296.71> taking
         // hits for 4.7 s after the evade window expired.
+        // Fix 22 (log-46 02:46:17:399 → 02:46:19:453, ~2 s combat then NO PLAN):
+        // latch the override across BL entry. The bot was attacked outside the
+        // rect, override fired correctly (insideBlacklistArea=false), Combat
+        // plan ran, bot pressed Approach toward the mob (which was inside the
+        // rect). Two seconds later the bot's chase had carried it into the rect
+        // (WorldState dump at 02:46:19:454: `inblacklistarea: True`). The
+        // `!botInsideBlacklistArea` term flipped False → override dropped →
+        // `allPartyTargetsIsIgnored` reverted to True → Combat precondition
+        // failed → NO PLAN. The 2 s window was insufficient for the bot to
+        // reach spell range; only Approach keys fired, no offensive spells.
+        //
+        // The latch: once the override is active for a given target GUID
+        // (initial activation while bot was geographically safe), subsequent
+        // ticks remain in override even if the chase carries the bot into the
+        // rect. The override still drops naturally on: target gone
+        // (hasTarget=false), target switched, combat ended (playerCombat=false),
+        // damage stopped (dmgTaken=false), the mob retargeted off us
+        // (TargetTarget no longer Me/Pet), or evade-recovery window opened.
+        //
+        // Initial activations still require !botInsideBlacklistArea — this
+        // prevents the override from latching onto an IsIgnored mob the bot
+        // happened to be next to inside a rect (where Navigation's escape-first
+        // takes priority over engagement).
         bool evadeRecoveryActive = DateTime.UtcNow < _evadeRecoveryUntilUtc;
         bool botInsideBlacklistArea = navigation.IsInBlacklistArea();
+        bool overrideAlreadyLatched =
+            _selfDefenseOverrideGuid != 0 &&
+            _selfDefenseOverrideGuid == playerReader.TargetGuid;
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
-            !botInsideBlacklistArea;
+            (!botInsideBlacklistArea || overrideAlreadyLatched);
         if (selfDefenseOverride)
         {
             targetIgnored = false;

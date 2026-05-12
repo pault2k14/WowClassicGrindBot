@@ -2753,88 +2753,99 @@ public sealed partial class Navigation : IDisposable
 
             if (!startedInside)
             {
-                bool nearEdge = AreaBlacklist.TryGetContainingRectInflated(
-                    Nav2D(result.StartW),
-                    DetourMargin + 6f,
-                    out _
-                );
+                // Fix 21 (log-46 02:46:00→02:46:16, 3 ping-pong cycles between
+                // <952.6, 298.1> inside rect and <937.7, 298.1> outside):
+                // removed the `nearEdge` gate (TryGetContainingRectInflated with
+                // DetourMargin+6=18y) that previously skipped this entire
+                // post-pather path-check block whenever the bot was within 18 y
+                // of any inflated rect. The pather is navmesh-aware but
+                // blacklist-unaware, so its route from <948.97, 297.98> to the
+                // SW-corner detour <934.39, 259.05> contained intermediate
+                // segments that crossed the strict rect interior. With the gate
+                // skipping these checks, the bot followed the route, drifted
+                // east into the rect, escape-first fired, exited, re-pathed,
+                // re-entered — 3 full cycles in 16 s. Removing the gate is
+                // safe because both checks use STRICT rect containment:
+                // ContainsWorld is boundary-exclusive (a node exactly on the
+                // rect edge returns false) and TryGetBlockingRect uses
+                // Liang-Barsky on the strict rect (a segment grazing the edge
+                // does not intersect the interior). Genuine reject loops are
+                // bounded by Fix 20's `minStartSeparation` candidate filter and
+                // HandleBlacklistReject's `sameRejectCount` watchdog (skip wpTop
+                // after 4 consecutive identical rejects).
+                var steps = routeToNextWaypoint.ToArray();
 
-                if (!nearEdge)
+                Vector3 prev = Nav2D(result.StartW);
+
+                for (int i = 0; i < steps.Length; i++)
                 {
-                    var steps = routeToNextWaypoint.ToArray();
+                    Vector3 cur = Nav2D(steps[i]);
 
-                    Vector3 prev = Nav2D(result.StartW);
-
-                    for (int i = 0; i < steps.Length; i++)
+                    if (AreaBlacklist.ContainsWorld(cur))
                     {
-                        Vector3 cur = Nav2D(steps[i]);
+                        logger.LogWarning(
+                            $"[BL] Path node inside blacklist; rejecting. " +
+                            $"badPoint={cur}");
 
-                        if (AreaBlacklist.ContainsWorld(cur))
+                        if (TryInsertDetourFromRejectedPath(result.StartW, result.EndW, cur))
                         {
-                            logger.LogWarning(
-                                $"[BL] Path node inside blacklist; rejecting. " +
-                                $"badPoint={cur}");
+                            sameRejectCount = 0;
+                            lastRejectStartW = default;
+                            lastRejectEndW = default;
 
-                            if (TryInsertDetourFromRejectedPath(result.StartW, result.EndW, cur))
-                            {
-                                sameRejectCount = 0;
-                                lastRejectStartW = default;
-                                lastRejectEndW = default;
-
-                                blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
-                                ResetNoProgressWatchdog();
-                                return;
-                            }
-
-                            if (HandleBlacklistReject(result))
-                            {
-                                ResetNoProgressWatchdog();
-                                return;
-                            }
-
-                            blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
-
-                            routeToNextWaypoint.Clear();
-                            SyncRouteStateToTop();
+                            blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
+                            ResetNoProgressWatchdog();
                             return;
                         }
 
-                        if (SegmentBlockedEscapeAware(prev, cur))
+                        if (HandleBlacklistReject(result))
                         {
-                            logger.LogWarning(
-                                $"[BL] Path segment crosses blacklist; rejecting. " +
-                                $"seg=({prev} -> {cur}) i={i} " +
-                                $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +
-                                $"routeEnd={(steps.Length > 0 ? Nav2D(steps[^1]).ToString() : "<none>")}");
-
-                            Vector3 hint = new Vector3((prev.X + cur.X) * 0.5f, (prev.Y + cur.Y) * 0.5f, 0f);
-
-                            if (TryInsertDetourFromRejectedPath(result.StartW, result.EndW, hint))
-                            {
-                                sameRejectCount = 0;
-                                lastRejectStartW = default;
-                                lastRejectEndW = default;
-
-                                blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
-                                ResetNoProgressWatchdog();
-                                return;
-                            }
-
-                            if (HandleBlacklistReject(result))
-                            {
-                                ResetNoProgressWatchdog();
-                                return;
-                            }
-
-                            blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
-
-                            routeToNextWaypoint.Clear();
-                            SyncRouteStateToTop();
+                            ResetNoProgressWatchdog();
                             return;
                         }
 
-                        prev = cur;
+                        blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
+
+                        routeToNextWaypoint.Clear();
+                        SyncRouteStateToTop();
+                        return;
                     }
+
+                    if (SegmentBlockedEscapeAware(prev, cur))
+                    {
+                        logger.LogWarning(
+                            $"[BL] Path segment crosses blacklist; rejecting. " +
+                            $"seg=({prev} -> {cur}) i={i} " +
+                            $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +
+                            $"routeEnd={(steps.Length > 0 ? Nav2D(steps[^1]).ToString() : "<none>")}");
+
+                        Vector3 hint = new Vector3((prev.X + cur.X) * 0.5f, (prev.Y + cur.Y) * 0.5f, 0f);
+
+                        if (TryInsertDetourFromRejectedPath(result.StartW, result.EndW, hint))
+                        {
+                            sameRejectCount = 0;
+                            lastRejectStartW = default;
+                            lastRejectEndW = default;
+
+                            blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
+                            ResetNoProgressWatchdog();
+                            return;
+                        }
+
+                        if (HandleBlacklistReject(result))
+                        {
+                            ResetNoProgressWatchdog();
+                            return;
+                        }
+
+                        blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
+
+                        routeToNextWaypoint.Clear();
+                        SyncRouteStateToTop();
+                        return;
+                    }
+
+                    prev = cur;
                 }
             }
         }
