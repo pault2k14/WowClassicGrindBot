@@ -270,8 +270,17 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             {
                 // assistStatusProvider.CantFollow keeps assistshouldfollow=true so
                 // FollowFocusGoal stays selectable throughout evade recovery.
+                //
+                // Fix 28: removed the legacy input.PressAssistCantFollow()
+                // call. See CombatGoal.cs Fix 23 first-activation branch
+                // (~ line 350) for full rationale. The chat-macro signal is
+                // dead code on the leader side (GoapAgent reads from
+                // AssistStateStore.AnyAssistCantFollow(), not from
+                // chatReader.AssistRequestReturn). The keypress generated
+                // visible in-game chat noise and a ~1.7 s typing delay
+                // while delivering zero state that the API path doesn't
+                // already deliver in 500 ms.
                 assistStatusProvider.CantFollow = true;
-                input.PressAssistCantFollow();
             }
             return;
         }

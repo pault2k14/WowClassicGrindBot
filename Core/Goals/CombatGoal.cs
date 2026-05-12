@@ -346,13 +346,43 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     // (FFG lines 477/658/681/850/etc. set Following / Waiting /
                     // NavigatingToLeader on its own transitions). The flag is
                     // cleared by FFG's normal reach-leader cleanup (line 535/707).
+                    //
+                    // Fix 28 (log-50, user-reported): removed the legacy
+                    //   input.PressAssistCantFollow();
+                    // call that used to fire here. That key triggered an
+                    // in-game chat macro ("/p i tried following but you are
+                    // too far away my position:X,Y") which the leader's
+                    // ChatReader.cs:242 used to parse. The architecture moved
+                    // to API-based party-state coordination (PartyStatePublisher
+                    // → AssistStateStore), and the leader now reads exclusively
+                    // from assistStateStore.AnyAssistCantFollow() at
+                    // GoapAgent.cs line 924-926 — chatReader.AssistRequestReturn
+                    // is dead code (only appears in legacy comments, no
+                    // production read site in Core/). The chat keypress was
+                    // pure waste: in-game chat noise visible to other players,
+                    // a NumPad5 keypress that conflicted with other macros,
+                    // and a typing delay (log-50 14:26:58:515 keypress →
+                    // 14:27:00:182 chat visible — 1.7 s lag) that the API
+                    // path beats by an order of magnitude (PartyApiConfig
+                    // .AssistPostIntervalMs=500 ms).
+                    //
+                    // The two API-path lines above this comment are the
+                    // canonical signal:
+                    //   - assistStatusProvider.CantFollow = true; → sets
+                    //     the assistshouldfollow gate to true (GoapAgent
+                    //     line 976 branch) and AnyAssistCantFollow() on
+                    //     the leader.
+                    //   - assistStatusProvider.CurrentStatus = BotStatus
+                    //     .CantFollow; → published via the next
+                    //     PartyStatePublisher tick so the leader sees the
+                    //     CantFollow state and the position to navigate to.
                     assistStatusProvider.CantFollow = true;
                     assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
-                    input.PressAssistCantFollow();
                     logger.LogInformation(
                         $"[CombatGoal] Self-defense override first activation (Fix 23): " +
-                        $"signaling CantFollow=true AND Status=CantFollow (and pressing " +
-                        $"AssistCantFollow key) so the leader navigates to our position. " +
+                        $"signaling CantFollow=true AND Status=CantFollow via the " +
+                        $"API path (AssistStatusProvider → PartyStatePublisher) so " +
+                        $"the leader navigates to our position. " +
                         $"Target guid={playerReader.TargetGuid}.");
                 }
             }
@@ -441,8 +471,17 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             // assistStatusProvider.CantFollow keeps assistshouldfollow=true so
             // FollowFocusGoal is immediately selectable during evade recovery.
+            //
+            // Fix 28: removed the legacy input.PressAssistCantFollow() call
+            // that used to follow this assignment. See the explanatory block
+            // in the Fix 23 first-activation branch above (~ line 350) for
+            // the full rationale; in short, the chat-macro path is dead code
+            // because the leader reads from AssistStateStore (API) and not
+            // from ChatReader.AssistRequestReturn. The CantFollow=true line
+            // alone is the canonical signal — assistshouldfollow flips to
+            // true via GoapAgent line 976, and the next 500 ms publisher
+            // tick propagates the CantFollow state to the leader's store.
             assistStatusProvider.CantFollow = true;
-            input.PressAssistCantFollow();
             return;
         }
 

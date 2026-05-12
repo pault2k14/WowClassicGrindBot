@@ -274,8 +274,19 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 // assistStatusProvider.CantFollow keeps assistshouldfollow=true in GoapAgent
                 // so FollowFocusGoal is immediately selectable throughout evade recovery,
                 // even when dmgTaken/dmgDone flags would otherwise block it.
+                //
+                // Fix 28: removed the legacy input.PressAssistCantFollow()
+                // call that used to follow this assignment. See the
+                // explanatory block in CombatGoal.cs Fix 23 first-activation
+                // branch (~ line 350) for the full rationale. Summary: the
+                // chat-macro signal ("i tried following…") is dead code on
+                // the leader side — GoapAgent.cs line 924-926 reads
+                // exclusively from AssistStateStore.AnyAssistCantFollow()
+                // (API path), and chatReader.AssistRequestReturn is no longer
+                // read in Core/. The keypress wasted a NumPad5 binding,
+                // generated visible in-game chat noise, and introduced a
+                // ~1.7 s typing delay vs the 500 ms API publisher.
                 assistStatusProvider.CantFollow = true;
-                input.PressAssistCantFollow();
             }
             return;
         }

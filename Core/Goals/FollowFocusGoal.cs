@@ -465,16 +465,82 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         if (_navState != NavState.CantFollow)
         {
-            // Clear the API status so the leader's FRG does not see a stale
-            // Following/NavigatingToLeader from the previous FFG run. If FFG is
-            // interrupted mid-navigation (e.g. the assist enters its own Combat or
-            // Loot goal), the navigation is stopped above but CurrentStatus would
-            // otherwise remain NavigatingToLeader. The leader's sync-pause resolves
-            // on AnyAssistNavigating()=true, causing FRG to resume patrol while the
-            // assist is actually looting — which is the "leader moving on while assist
-            // is still looting" bug. Setting Waiting here ensures the leader sees the
-            // correct Waiting status until FFG re-enters and posts Following again.
-            assistStatusProvider.CurrentStatus = BotStatus.Waiting;
+            // Fix 27 (log-50 14:27:14:932 → 14:28:02:655, leader stood still
+            // for 46 seconds while assist fought BL mob via Fix 26 self-
+            // defense override):
+            //
+            // The previous code unconditionally set Status=Waiting on every
+            // non-CantFollow exit. When the assist transitions FFG → Combat
+            // (or Loot, Consume Corpse, etc.) while still right next to the
+            // leader — log-50 measured 0.9 y at OnExit — that overwrote a
+            // perfectly valid "I'm with you" state with a misleading
+            // "I'm not following" state. Sequence in log-50:
+            //   14:27:14:792 FFG.OnEnter → UpdateIdle posts Following (0.9y)
+            //   14:27:14:807 FFG.OnExit  → OLD code overwrites to Waiting
+            //   14:27:14:932 NO PLAN, then Combat plan at 14:27:17:730
+            //   14:27:14 → 14:28:01 (47 s) — CombatGoal/Loot/Consume don't
+            //                                 touch Status, so it stays
+            //                                 Waiting the whole time
+            //   Leader-side: assistrequestreturnorisfollowing=False
+            //                → FRG precondition fails → NO PLAN for 46 s,
+            //                until the assist's next FFG.OnEnter at
+            //                14:28:01:428 re-posts Following.
+            //
+            // Worse, the 500 ms publisher interval (PartyApiConfig
+            // .AssistPostIntervalMs) meant the brief Following posted at
+            // 14:27:14:792 was overwritten by Waiting in the publisher's
+            // staging slot before the next publish tick fired — so the
+            // leader never saw the Following at all, the wasWaiting
+            // branch at line ~502 never executed, and the leader's
+            // _assistWaitingForFollowing flag (set at 14:27:02:213 when
+            // the AssistReturn destination was reached) stayed set.
+            //
+            // Fix: only set Waiting when actually far from the leader.
+            // If we're still inside FollowingMaxYards at exit time, we
+            // are positionally still "following" — only the active goal
+            // has changed. Keeping Following lets the leader's FRG
+            // precondition pass (assistisfollowing=True → assist-
+            // requestreturnorisfollowing=True) so it can patrol /
+            // pause-for-distance normally instead of locking up.
+            //
+            // The original comment's worry about NavigatingToLeader
+            // leaking into other plans doesn't apply here: FFG.UpdateIdle
+            // line ~681 only posts Following when dist < FollowingMaxYards,
+            // which is exactly the same condition we re-check here. So
+            // we never publish Following when the assist is actually
+            // out of position.
+            //
+            // Edge case — assist exits FFG mid-navigation at > 7 y from
+            // leader (e.g. NavigatingToLeader interrupted by Combat at
+            // 10 y): old behavior preserved, Status=Waiting, because
+            // the leader genuinely cannot assume we're in position.
+            LeaderState? leader = leaderConnection.LastLeaderState;
+            float distToLeader = (leader != null)
+                ? playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos)
+                : float.MaxValue;
+
+            if (distToLeader < FollowingMaxYards)
+            {
+                if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+                {
+                    logger.LogInformation(
+                        $"[FFG] OnExit: assist within {distToLeader:0.0}y of leader " +
+                        $"(< FollowingMaxYards={FollowingMaxYards}y) — setting Status=Following " +
+                        $"(was {assistStatusProvider.CurrentStatus}). " +
+                        $"Leader's FRG precondition stays satisfied through whatever non-FFG goal runs next.");
+                    assistStatusProvider.CurrentStatus = BotStatus.Following;
+                }
+            }
+            else
+            {
+                if (assistStatusProvider.CurrentStatus != BotStatus.Waiting)
+                {
+                    logger.LogInformation(
+                        $"[FFG] OnExit: assist at {distToLeader:0.0}y from leader " +
+                        $"(≥ FollowingMaxYards={FollowingMaxYards}y) — setting Status=Waiting.");
+                    assistStatusProvider.CurrentStatus = BotStatus.Waiting;
+                }
+            }
             _navState = NavState.Idle;
         }
         // CantFollow persists across plan cycles so the assist holds position.
