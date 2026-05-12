@@ -835,7 +835,40 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 bool shouldResume = assistStateStore.ShouldLeaderResumePatrol(
                     playerReader.WorldPos, LeaderResumeYards);
 
-                if (shouldPause && !_pausedByAssistDistance)
+                // Fix 25 (log-48 10:31:38:362 → 10:32:17, leader paused
+                // permanently after starting AssistReturn): when AssistReturn
+                // is already active (the leader was just dispatched toward the
+                // CantFollow assist via OnGoapEvent.assistrequestreturn or the
+                // GoapAgent diff-loop), the pause-for-assist block below would
+                // call navigation.PausePathing() and immediately kill the
+                // AssistReturn navigation that was started 1 ms earlier. Order
+                // of events in log-48 at 10:31:38:362–:364:
+                //   1. OnGoapEvent.assistrequestreturn → GoToOneWaypoint
+                //      → SetWayPoints (active=true, "was paused, re-Acquired")
+                //      → _assistReturnActive=true
+                //   2. GoapAgent diff-loop → GoToOneWaypoint (already active)
+                //   3. FRG.Update reaches pause-for-assist:
+                //      - shouldPause=true (assist.Status=CantFollow)
+                //      - !_pausedByAssistDistance=true → ENTERED pause block
+                //      - PausePathing() killed the AssistReturn nav
+                //      - inner `if (assistCantFollow && !_assistReturnActive)`
+                //        was skipped (latch already active), no re-setup
+                // Deadlock: leader paused, assist in CantFollow holding for
+                // leader-within-6 y, leader can't move to satisfy that, assist
+                // can't move without leader arrival → both standing still
+                // forever (39 s in log-48 until log ended).
+                //
+                // Fix: AssistReturn and pause-for-assist are responses to the
+                // same underlying condition (assist needs help), but pause-
+                // for-assist is for "wait here, assist will catch up" while
+                // AssistReturn is for "go fetch the assist". They are mutually
+                // exclusive — adding !_assistReturnActive prevents the latter
+                // from overriding the former. When AssistReturn completes or
+                // aborts (ClearAssistReturnState / AbortAssistReturn clears
+                // _assistReturnActive), the next FRG.Update tick re-evaluates
+                // pause-for-assist on the assist's current (post-arrival)
+                // status and acts appropriately.
+                if (shouldPause && !_pausedByAssistDistance && !_assistReturnActive)
                 {
                     float dist = assistStateStore.GetNearestAssistDistanceYards(playerReader.WorldPos);
                     AssistState? stuckAssist = assistStateStore.GetCantFollowState()
