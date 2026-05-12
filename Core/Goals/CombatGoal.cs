@@ -297,14 +297,24 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         //    pause/resume logic (line 888) calls GoToOneWaypoint to the
         //    assist's last-known position. The CantFollow flag is cleared
         //    naturally by FFG when the assist later reaches the leader.
+        // Fix 26 (log-49, paired with the GoapAgent change at line ~870):
+        // drop !navigation.IsInBlacklistArea() from initial activation here
+        // too, so the mirror keeps parity with the planner-level override.
+        // If GoapAgent flips targetIgnored=false via Fix 26's relaxed
+        // condition (which now permits insideBL=true), CombatGoal MUST
+        // mirror the flip — otherwise case 3 below bails on the very
+        // first frame (StopAttack/ClearTarget), GoapAgent's override
+        // drops on the next tick because hasTarget=false, and the bot
+        // oscillates Combat ↔ NO PLAN exactly as Fix 17 originally
+        // diagnosed in log-44. The two override sites must agree on
+        // when self-defense is active.
         bool overrideAlreadyLatched =
             _combatOverrideGuid != 0 && _combatOverrideGuid == playerReader.TargetGuid;
 
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
-            && !assistStatusProvider.EvadeRecoveryActive
-            && (!navigation.IsInBlacklistArea() || overrideAlreadyLatched))
+            && !assistStatusProvider.EvadeRecoveryActive)
         {
             logger.LogInformation(
                 $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +

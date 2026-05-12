@@ -855,10 +855,31 @@ public sealed partial class GoapAgent : IDisposable
         // damage stopped (dmgTaken=false), the mob retargeted off us
         // (TargetTarget no longer Me/Pet), or evade-recovery window opened.
         //
-        // Initial activations still require !botInsideBlacklistArea — this
-        // prevents the override from latching onto an IsIgnored mob the bot
-        // happened to be next to inside a rect (where Navigation's escape-first
-        // takes priority over engagement).
+        // Fix 26 (log-49 12:09:35:583 leader NO PLAN / 12:09:47:245 assist
+        // NO PLAN): drop the !botInsideBlacklistArea restriction entirely
+        // for INITIAL activations too. The user's design intent is that
+        // self-defense fires regardless of BL position — when a mob is
+        // actively attacking us (TargetTarget=Me/Pet) and we've taken
+        // damage, fighting back takes priority over the "escape rect first"
+        // heuristic that motivated the original BL guard.
+        //
+        // Evidence from log-49 leader at 12:09:35:583 (full self-defense
+        // setup blocked solely by inblacklistarea=True):
+        //   hastarget=True, targethostile=True, targetisalive=True,
+        //   targettargetsus=True, incombat=True, damagetaken=True,
+        //   targetIsIgnored=True, evadeRecovery=False, inblacklistarea=True
+        // Same shape at assist 12:09:47:245. Without the override, both
+        // ran allPartyTargetsIsIgnored=True → Combat-precondition fails →
+        // NO PLAN → the bots stood still while ignored mobs killed them.
+        //
+        // The latch (overrideAlreadyLatched) is preserved for the log
+        // message and for the new-activation-vs-continuation branch at
+        // line ~876 (only log a fresh activation once per guid), but it
+        // no longer guards entry. The remaining conjuncts (target actively
+        // hits us, we're in combat, we've taken damage, evade window
+        // closed) are sufficient to identify genuine self-defense and
+        // exclude "engaging an ignored mob we happen to be next to" —
+        // a non-attacking nearby mob will not have TargetTarget=Me/Pet.
         bool evadeRecoveryActive = DateTime.UtcNow < _evadeRecoveryUntilUtc;
         bool botInsideBlacklistArea = navigation.IsInBlacklistArea();
         bool overrideAlreadyLatched =
@@ -868,8 +889,7 @@ public sealed partial class GoapAgent : IDisposable
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
-            !evadeRecoveryActive &&
-            (!botInsideBlacklistArea || overrideAlreadyLatched);
+            !evadeRecoveryActive;
         if (selfDefenseOverride)
         {
             targetIgnored = false;
@@ -879,7 +899,8 @@ public sealed partial class GoapAgent : IDisposable
                 logger.LogInformation(
                     $"[GoapAgent] IsIgnored self-defense override: target guid={playerReader.TargetGuid} " +
                     $"is on IsIgnored map but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
-                    $"playerCombat=true, dmgTaken=true, evadeRecovery=false, insideBlacklistArea=false) — " +
+                    $"playerCombat=true, dmgTaken=true, evadeRecovery=false, " +
+                    $"insideBlacklistArea={botInsideBlacklistArea}, latched={overrideAlreadyLatched}) — " +
                     $"treating as not-ignored so Combat plan can engage.");
             }
         }
