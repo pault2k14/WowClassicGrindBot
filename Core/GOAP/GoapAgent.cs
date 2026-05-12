@@ -67,7 +67,7 @@ public sealed partial class GoapAgent : IDisposable
     // -----------------------------------------------------------------------
     // Session blacklist tracking (used by both PartyLeader and AssistFocus)
     //
-    // Original purpose (assist-side, before Fix 15): tracked GUIDs already
+    // Original purpose (assist-side, pre-Fix 15): tracked GUIDs already
     // observed in the leader's BlacklistedMobGuids API field. When a NEW
     // GUID arrived, the agent-level diff in GoapThread dispatched
     // EvadeBlacklistEvent so the assist's CombatGoal exited via its
@@ -82,21 +82,20 @@ public sealed partial class GoapAgent : IDisposable
     // ran the original FFG-level diff — 3 seconds AFTER kill credit.
     //
     // Fix 15 extension: also populated by the EvadeBlacklistEvent handler
-    // (line ~1019) regardless of mode. This means the leader's own evade
+    // (line ~1040) regardless of mode. This means the leader's own evade
     // dispatches (from TargetFinder / ATG / PTG) now also record the GUID
     // here. The per-tick refresh block in GoapThread iterates this set and
     // keeps every guid's IsIgnored TTL alive as long as the bot is inside
-    // any blacklist rect inflated by BlacklistMemoryBufferYards. Once the
-    // bot is geographically clear of every rect's inflated zone, the next
-    // tick's cleanup observes IsIgnored=false (TTL has decayed naturally)
-    // and drops the guid from this set.
+    // any blacklist rect inflated by BlacklistMemoryBufferYards.
+    //
+    // Fix 16 (log-43 22:35:50 → 22:41:23 stuck cycle): this set is
+    // append-only per session. Cleanup of expired guids was removed because
+    // it broke the API observer's dedup invariant — see the explanatory
+    // comment in GoapThread at the refresh block. Memory cost of unbounded
+    // session growth is negligible (tens to hundreds of unique guids per
+    // session = a few KB at most).
     // -----------------------------------------------------------------------
     private readonly System.Collections.Generic.HashSet<int> _knownBlacklistedGuids = new();
-
-    // Fix 15: scratch list for the per-tick cleanup pass over
-    // _knownBlacklistedGuids. Reused each tick to avoid per-frame allocation.
-    // Single-threaded use from GoapThread.
-    private readonly System.Collections.Generic.List<int> _expiredBlacklistedGuidsBuffer = new();
 
     // Fix 15: inflation radius applied to each blacklist rect when deciding
     // whether to refresh _knownBlacklistedGuids. 35 y covers typical caster
@@ -416,58 +415,52 @@ public sealed partial class GoapAgent : IDisposable
                 }
             }
 
-            // ── Fix 15: per-tick blacklist memory maintenance ─────────────
+            // ── Fix 15 + Fix 16: per-tick blacklist memory refresh ───────────
             //
-            // Breaks the caster-cycle issue raised in session 49: caster mob
-            // in a blacklist rect → patrol detour with DetourMargin=12 y
-            // brings the bot inside the caster's ~30 y cast range → caster
-            // keeps hitting the bot during evade → 30 s IsIgnored TTL on
-            // wall-clock decays → patrol routes us back near the rect →
-            // next aggro starts a fresh evade cycle, repeat.
+            // Original Fix 15 motivation (caster cycle, session 49): caster mob
+            // in a blacklist rect → patrol detour with DetourMargin=12 y brings
+            // the bot inside the caster's ~30 y cast range → caster keeps
+            // hitting the bot during evade → 30 s IsIgnored TTL on wall-clock
+            // decays → patrol routes us back near the rect → next aggro starts
+            // a fresh evade cycle, repeat.
             //
-            // The fix: as long as the bot is inside any blacklist rect
-            // inflated by BlacklistMemoryBufferYards (35 y, covering most
-            // caster cast ranges), refresh the IsIgnored TTL on every guid
-            // we've blacklisted this session. The TTL only starts decaying
-            // for real once the patrol has carried the bot geographically
-            // clear of every inflated zone. Once a guid's IsIgnored becomes
-            // false (we left the zone and the natural TTL expired), drop it
-            // from the session set so the set stays bounded.
+            // Fix: as long as the bot is inside any blacklist rect inflated by
+            // BlacklistMemoryBufferYards (35 y, covering most caster cast
+            // ranges), refresh the IsIgnored TTL on every guid we've
+            // blacklisted this session. The TTL only starts decaying for real
+            // once the patrol has carried the bot geographically clear of
+            // every inflated zone.
             //
-            // Runs every tick regardless of mode, current goal, evade
-            // window state, or anything else. The refresh action is purely
+            // Runs every tick regardless of mode, current goal, evade window
+            // state, or anything else. The refresh action is purely
             // geographic — "as long as we're near the rect, remember
             // everything we've already learned to avoid."
             //
-            // Two-pass pattern for cleanup: the first foreach iterates
-            // _knownBlacklistedGuids read-only (playerReader.IsIgnored is a
-            // pure read, no callbacks) and records expired guids into the
-            // reusable buffer. The second foreach iterates the buffer and
-            // Removes from _knownBlacklistedGuids — deferring the Removes
-            // until after the read-only enumeration so we never modify the
-            // set during a foreach over itself. Single-threaded use from
-            // GoapThread; same threading assumption as the existing API
-            // observer path (line ~408) that also modifies this set.
-            if (_knownBlacklistedGuids.Count > 0)
-            {
-                _expiredBlacklistedGuidsBuffer.Clear();
-                foreach (int guid in _knownBlacklistedGuids)
-                {
-                    if (!playerReader.IsIgnored(guid))
-                        _expiredBlacklistedGuidsBuffer.Add(guid);
-                }
-                if (_expiredBlacklistedGuidsBuffer.Count > 0)
-                {
-                    foreach (int guid in _expiredBlacklistedGuidsBuffer)
-                    {
-                        _knownBlacklistedGuids.Remove(guid);
-                        logger.LogInformation(
-                            $"[GoapAgent] IsIgnored TTL expired for guid={guid} — " +
-                            "dropping from session blacklist (geographically clear of inflated zone).");
-                    }
-                }
-            }
-
+            // Fix 16 (log-43 22:35:50 onward — repeated 30 s re-detection
+            // cycles of guid=182020): the original Fix 15 also cleaned up
+            // _knownBlacklistedGuids when a guid's IsIgnored TTL had decayed
+            // (bot moved geographically clear). This was incorrect — the same
+            // set is used by the API observer above (line ~410) to dedup
+            // "have we ever seen this guid from the leader's broadcast." When
+            // the cleanup removed a guid, the next API observer pass saw
+            // _knownBlacklistedGuids.Add(guid) return true (because we just
+            // removed it) and treated the guid as freshly arrived, re-firing
+            // EvadeBlacklistEvent AND setting assistStatusProvider.CantFollow
+            // (line ~413) — which propagates as assistrequestreturn=true,
+            // blocking LootGoal, ConsumeCorpseGoal, and FollowFocusGoal (all
+            // require assistrequestreturn=false). Observed: assist stuck in
+            // NO PLAN for ~1.5 minutes at log end after a kill at 22:39:52,
+            // because LeaderNavigationProvider has no per-guid Remove and
+            // the leader broadcasts the GUID forever. Every 30 s the cycle
+            // repeats: cleanup → API re-detect → CantFollow → blocked goals.
+            //
+            // Resolution: drop the cleanup pass entirely. The set is naturally
+            // bounded by unique mobs encountered per session (low: tens to
+            // hundreds, not thousands), so unbounded session growth is a
+            // non-issue. Refresh continues to iterate the set each tick while
+            // in zone — at typical set sizes this is microseconds. The
+            // pre-Fix-15 invariant ("API observer Add returns true only on
+            // first observation per session") is restored.
             bool currentlyInBlacklistMemoryZone =
                 navigation.AreaBlacklist != null &&
                 navigation.AreaBlacklist.TryGetContainingRectInflated(
