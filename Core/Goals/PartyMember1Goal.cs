@@ -50,25 +50,7 @@ public sealed class PartyMember1Goal : GoapGoal
         this.chatReader = chatReader;
 
         AddPrecondition(GoapKey.party1connected, true);
-        AddPrecondition(GoapKey.assistisfollowing, false);
-
-        if (classConfig.Mode == Mode.AssistFocus)
-        {
-            AddPrecondition(GoapKey.partymembercombat, false);
-            AddPrecondition(GoapKey.forcedfollow, false);
-            AddPrecondition(GoapKey.evadeRecovery, false);
-        }
-        else if (classConfig.Mode == Mode.PartyLeader)
-        {
-            AddPrecondition(GoapKey.partyleadercombat, false);
-            AddPrecondition(GoapKey.forcedfollow, false);
-            AddPrecondition(GoapKey.evadeRecovery, false);
-        }
-        else
-        {
-            AddPrecondition(GoapKey.incombat, false);
-            AddPrecondition(GoapKey.forcedfollow, false);
-        }
+        AddPrecondition(GoapKey.forcedfollow, false);
     }
 
     public override float Cost => 3.9f;

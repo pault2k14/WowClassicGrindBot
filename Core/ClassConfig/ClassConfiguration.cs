@@ -91,6 +91,8 @@ public sealed partial class ClassConfiguration
     public KeyActions PartyMember3 { get; } = new();
     public KeyActions PartyMember4 { get; } = new();
     public KeyActions LootActions { get; } = new();
+
+    public KeyActions FollowFocusActions { get; } = new();
     public WaitKeyActions Wait { get; } = new();
     public FormKeyActions Form { get; } = new();
 

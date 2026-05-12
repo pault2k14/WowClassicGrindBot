@@ -174,6 +174,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private readonly Wait wait;
     private readonly ILogger<FollowFocusGoal> logger;
     private readonly RestHandler restHandler;
+    private readonly CastingHandler castingHandler;
+    private readonly IMountHandler mountHandler;
     private readonly ChatReader chatReader;
     private readonly Navigation navigation;
     private readonly AssistStatusProvider assistStatusProvider;
@@ -342,7 +344,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         AssistStatusProvider assistStatusProvider,
         LeaderConnectionStatus leaderConnection,
         LeaderNavigationProvider leaderNavProvider,
-        IOptions<PartyApiConfig> configOptions)
+        IOptions<PartyApiConfig> configOptions,
+        IMountHandler mountHandler,
+        CastingHandler castingHandler)
         : base(nameof(FollowFocusGoal))
     {
         this.input = input;
@@ -356,6 +360,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         this.assistStatusProvider = assistStatusProvider;
         this.leaderConnection = leaderConnection;
         this.leaderNavProvider = leaderNavProvider;
+        this.castingHandler = castingHandler;
+        this.mountHandler = mountHandler;
+        this.Keys = classConfig.FollowFocusActions.Sequence;
 
         if (classConfig.UnitToFollow == "focus")
             AddPrecondition(GoapKey.hasfocus, true);
@@ -473,6 +480,44 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // CantFollow persists across plan cycles so the assist holds position.
     }
 
+    public bool ChangeToTarget(KeyAction keyAction) 
+    {
+        bool validChangeToTarget = false;
+
+        if (!string.IsNullOrEmpty(keyAction.ChangeTargetTo) && keyAction.CanRun())
+        {
+            wait.Update();
+
+            switch (keyAction.ChangeTargetTo)
+            {
+                case "focus":
+                case "party1":
+                    validChangeToTarget = true;
+                    input.PressTargetFocus();
+                    break;
+                case "party2":
+                    validChangeToTarget = true;
+                    input.PressTargetFocusPartyMemberTwo();
+                    break;
+                case "party3":
+                    validChangeToTarget = true;
+                    input.PressTargetFocusPartyMemberThree();
+                    break;
+                case "party4":
+                    validChangeToTarget = true;
+                    input.PressTargetFocusPartyMemberFour();
+                    break;
+                default:
+                    logger.LogWarning("keyAction.ChangeTargetTo not a valid target: " + keyAction.ChangeTargetTo);
+                    break;
+            }
+
+            wait.Update();
+        }
+
+        return validChangeToTarget;
+    }
+
     // -----------------------------------------------------------------------
     // Main update
     // -----------------------------------------------------------------------
@@ -502,6 +547,35 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             while (restHandler.IsResting())
                 wait.Update(1000);
         }
+
+
+        for (int i = 0; i < Keys.Length; i++)
+        {
+            KeyAction keyAction = Keys[i];
+            bool validChangeToTarget = ChangeToTarget(keyAction);
+
+            if (castingHandler.SpellInQueue() && !keyAction.BaseAction)
+                continue;
+
+            if (keyAction.BeforeCastDismount && mountHandler.IsMounted())
+                mountHandler.Dismount();
+
+            if (chatReader.ForcedFollow && !keyAction.UseWithForcedFollow)
+                continue;
+
+            if (castingHandler.CastIfReady(keyAction,
+                keyAction.Interrupts.Count > 0
+                ? keyAction.CanBeInterrupted
+                : bits.Target_Alive))
+                break;
+
+            if (validChangeToTarget)
+            {
+                input.PressLastTarget();
+                wait.Update();
+            }
+        }
+
 
         // ── Evade-recovery hold (REMOVED in session 27) ────────────────────
         // Session 23 added a hold-position gate here that returned early during
