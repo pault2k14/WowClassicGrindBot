@@ -2873,6 +2873,47 @@ public sealed partial class Navigation : IDisposable
         float bestScore = float.MaxValue;
         bool found = false;
 
+        // Fix 20 (log-45 01:32:14:164 → 01:33:21:521, ~67s + still going at
+        // log end): leader stuck at <934.3887, 256.05176> with wpTop
+        // <945.87354, 298.23877>. Path request to the wp returned a route
+        // whose 10-step path contained a node <952.80, 283.2> inside the
+        // blacklist; rejected. TryInsertDetourFromRejectedPath then chose
+        // candidate <934.39343, 259.05078> — geometrically valid (clear of
+        // the rect, segments don't graze the inflated rect), but only 3.0 y
+        // from startW. The waypoint-pop threshold is
+        // ReachedDistance(OutDoorMinDistance) + 0.35 ≈ 3.35 y outdoors,
+        // unmounted. So on the very same tick, before any forward
+        // movement, navigation's "XY reached" check popped the freshly-
+        // inserted detour, reverting wpTop to <945.87, 298.24>. Next tick:
+        // same path, same rejection, same candidate, same no-op
+        // insertion → immediate auto-pop. 214 detour insertions logged in
+        // 67 s while the bot's position never changed.
+        //
+        // HandleBlacklistReject's sameRejectCount safety (would skip the
+        // wpTop after MaxSameRejectBeforeFallback=4 rejects) is defeated
+        // because each insertion returns true ("succeeded"), which resets
+        // sameRejectCount to 0 (line 2814). The counter never reaches 4.
+        // Zero "Rejected same path" log lines in the entire 67 s stall.
+        //
+        // Fix: require candidates to be further from startW than the
+        // waypoint-pop threshold plus a safety margin. The threshold is
+        // computed dynamically via the same ReachedDistance call the pop
+        // logic uses (line 475), so the fix adapts correctly to mounted
+        // and indoor states where the pop threshold differs. Endpoint
+        // separation against endW (MinDetourSeparationYards, 1.0 y) is
+        // unchanged — its purpose (Fix 7: prevent degenerate candidates
+        // exactly at the target winning the score) is different from this
+        // new pop-avoidance check.
+        //
+        // If no candidate is far enough from startW, this function returns
+        // false → caller falls back to HandleBlacklistReject → sameRejectCount
+        // increments correctly → wpTop skipped after 4 rejects (~1 s), and
+        // the leader patrol advances to the next waypoint. Strictly better
+        // than the infinite-loop status quo, which never made any progress.
+        float wpReachThreshold = ReachedDistance(OutDoorMinDistance) + 0.35f;
+        const float DetourFromStartSafetyMarginYards = 1.0f;
+        float minStartSeparation = wpReachThreshold + DetourFromStartSafetyMarginYards;
+
         foreach (var d in BuildDetourCandidates(inflated, m, z))
         {
             if (IsBlacklistedPoint(d)) continue;
@@ -2894,7 +2935,7 @@ public sealed partial class Navigation : IDisposable
             // remain, HandleBlacklistReject's MaxSameRejectBeforeFallback
             // counter takes over and pops the wpTop after 4 rejects.
             if (d.WorldDistanceXYTo(endW) < MinDetourSeparationYards) continue;
-            if (d.WorldDistanceXYTo(startW) < MinDetourSeparationYards) continue;
+            if (d.WorldDistanceXYTo(startW) < minStartSeparation) continue;
 
             if (SegmentBlockedEscapeAware(startW, d)) continue;
             if (SegmentBlockedEscapeAware(d, endW)) continue;
@@ -3346,6 +3387,17 @@ public sealed partial class Navigation : IDisposable
         float bestScore = float.MaxValue;
         bool found = false;
 
+        // Fix 20 (parity with TryInsertDetourFromRejectedPath — see that
+        // function's comment for the log-45 evidence trail). The pre-pather
+        // detour path is symmetric to the post-rejection path in that it
+        // also pushes a candidate onto the wayPoints stack, where the next
+        // navigation update's "XY reached" check (line 475) can immediately
+        // pop it if the candidate is within ReachedDistance(OutDoorMinDistance)
+        // + 0.35 of startW. Apply the same dynamic threshold here.
+        float wpReachThreshold = ReachedDistance(OutDoorMinDistance) + 0.35f;
+        const float DetourFromStartSafetyMarginYards = 1.0f;
+        float minStartSeparation = wpReachThreshold + DetourFromStartSafetyMarginYards;
+
         foreach (var d in BuildDetourCandidates(inflated, m, z))
         {
             if (IsBlacklistedPoint(d)) continue;
@@ -3355,7 +3407,7 @@ public sealed partial class Navigation : IDisposable
             // a candidate sitting at exactly the target position cannot win
             // the score and produce a no-op duplicate detour.
             if (d.WorldDistanceXYTo(targetW) < MinDetourSeparationYards) continue;
-            if (d.WorldDistanceXYTo(startW) < MinDetourSeparationYards) continue;
+            if (d.WorldDistanceXYTo(startW) < minStartSeparation) continue;
 
             if (SegmentBlockedEscapeAware(startW, d)) continue;
             if (SegmentBlockedEscapeAware(d, targetW)) continue;
