@@ -1393,7 +1393,41 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // and the assist's current position, return the assist's position so the
         // SetWaypointLoopGuarded helper detects the no-movement loop and escalates
         // to CantFollow within ~150ms instead of 30s.
-        if (navigation.AreaBlacklist != null && navigation.AreaBlacklist.ContainsWorld(target))
+        // Fix 19 (log-44 00:40:40 → 00:41:14: assist ping-ponging in/out of
+        // blacklist rect at X≈952-955, 6 full oscillations over ~34 s):
+        // the original Fix 4 outer trigger check below used strict
+        // ContainsWorld(target). When the standard target landed even 1 y
+        // outside the rect's strict boundary (e.g. <947.12, 285.62> with
+        // rect MinX≈952.4, target X=947.12 is 5.3 y outside), Fix 4 didn't
+        // fire — the function returned the standard target as-is. FFG then
+        // set this as the wp, the pather built a 7-point route to reach it,
+        // and bot movement execution (auto-run + clockwise turn corrections)
+        // overshot the wp by ~5-15 y of forward inertia, depositing the bot
+        // inside the rect at X≈952.6 within ~3 s. Navigation's escape-first
+        // then fired, drove bot west to X≈937, FFG recomputed the same
+        // (still-outside) target, pather rebuilt route, bot overshot again.
+        //
+        // Fix: change the outer trigger from ContainsWorld (strict) to
+        // TryGetContainingRectInflated (margin=ProjectionSafetyMarginYards
+        // = 6 y). Now ANY target within 6 y of a rect — even technically
+        // outside it — triggers the projection loop. The inflated check
+        // inside the loop (also 6 y) returns candidates that are ≥6 y from
+        // the strict rect, so the wp itself is at least 6 y clear. Bot's
+        // overshoot during route execution is bounded by POP_DIST (3.6 y)
+        // plus a small amount of inertia, well under the 6 y margin.
+        //
+        // 6 y margin chosen for consistency with Fix 12's ExitMargin and
+        // Fix 18's projection-loop check. Both inner and outer checks use
+        // the same margin so the loop always finds a strictly-better
+        // candidate than the standard target if one exists at all.
+        //
+        // If the entire leader→assist line is within 6 y of a rect (loop
+        // finds no safe candidate), control falls through to Fix 12's
+        // assist self-escape logic below — same failure-mode as before.
+        const float ProjectionSafetyMarginYards = 6.0f;
+        if (navigation.AreaBlacklist != null &&
+            navigation.AreaBlacklist.TryGetContainingRectInflated(
+                target, ProjectionSafetyMarginYards, out _))
         {
             const float STEP_YARDS = 2.0f;
             for (float distFromLeader = FollowStopShortYards + STEP_YARDS;
@@ -1405,10 +1439,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     leaderW.Y + dy * invLen * distFromLeader,
                     0f);
 
-                if (!navigation.AreaBlacklist.ContainsWorld(candidate))
+                if (!navigation.AreaBlacklist.TryGetContainingRectInflated(
+                        candidate, ProjectionSafetyMarginYards, out _))
                 {
                     logger.LogWarning(
-                        $"[FFG] Position-chase: standard target {target} is in assist's blacklist; " +
+                        $"[FFG] Position-chase: standard target {target} is within " +
+                        $"{ProjectionSafetyMarginYards:0.0}y of assist's blacklist; " +
                         $"projected toward assist to {candidate} ({distFromLeader:0.0}y from leader, " +
                         $"{lenXY - distFromLeader:0.0}y from assist).");
                     return candidate;

@@ -222,6 +222,51 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool isPartyMode = classConfig.Mode == Mode.PartyLeader
                          || classConfig.Mode == Mode.AssistFocus;
 
+        // Fix 17 (log-44 00:41:12 leader / 00:41:28 assist — Combat ↔ NO PLAN
+        // oscillation for ~70 s while a Deepmoss Venomspitter cast on the
+        // bot uncontested): Fix 13's self-defense override flips the
+        // GoapKey.targetIsIgnored slot to false at the planner level when
+        // the bot is being actively attacked by its own ignored target
+        // outside any blacklist rect with evade elapsed — so the planner
+        // picks Combat. But the case-3 bail check below uses raw
+        // playerReader.IsIgnored without the override, so CombatGoal.Update
+        // bails on its very first frame, presses StopAttack + ClearTarget,
+        // and the loop runs again 0.3-2 s later. Observed in log-44 ~25
+        // oscillations on the leader, ~12 on the assist, neither making
+        // progress nor letting the patrol continue.
+        //
+        // The fix is to mirror Fix 13's conditions here. When the override
+        // would have flipped targetIsIgnored at the planner level, do the
+        // same flip here so the runtime check reaches case 1 (fight the
+        // target) instead of case 3 (bail).
+        //
+        // Conditions identical to GoapAgent.UpdateWorldState Fix 13 block
+        // (line ~840): need a target, in combat, taking damage, target is
+        // actually targeting us (not just Tab-cycled onto), evade window
+        // already elapsed (read via the assistStatusProvider mirror set
+        // in GoapAgent line ~502 for both modes), and bot outside every
+        // blacklist rect. All conjuncts required — any one false and we
+        // fall through to the existing bail behavior.
+        //
+        // assistStatusProvider.EvadeRecoveryActive is set unconditionally
+        // by GoapAgent for both modes (see comment at GoapAgent.cs line
+        // ~499) — the "only AssistFocus uses it" comment refers to the
+        // PartyStatePublisher consumer, not the source assignment. Safe
+        // to read from CombatGoal regardless of mode.
+        if (currentTargetIsIgnored && bits.Target() && bits.Combat()
+            && combatLog.DamageTakenCount() > 0
+            && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
+            && !assistStatusProvider.EvadeRecoveryActive
+            && !navigation.IsInBlacklistArea())
+        {
+            logger.LogInformation(
+                $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +
+                $"is on IsIgnored but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
+                $"playerCombat=true, dmgTaken=true, evadeRecovery=false, insideBlacklistArea=false) — " +
+                $"treating as fightable, falling through to engage rather than bailing.");
+            currentTargetIsIgnored = false;
+        }
+
         if (currentTargetIsIgnored && (focusTargetIsIgnored || !isPartyMode))
         {
             // Case 3: nothing fightable in any party slot.
