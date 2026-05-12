@@ -1415,6 +1415,96 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 }
             }
 
+            // Fix 12 (log-42 17:23:23:280 → 17:24:02:681: assist stuck for 39 s
+            // inside leader's blacklist rect (952.39,277.05)-(999.27,327.20)
+            // after combat ended; assist at <957.40, 299.97> is 5 y east of the
+            // rect's west edge; leader just outside at <951.76, 286.30>; entire
+            // leader→assist line crosses the rect. Old fallback returned assist's
+            // own position → SetWaypoint loop guard → CantFollow → leader fires
+            // AssistReturn → Fix 9 projects rescue target to leader-side edge
+            // <951.81, 288.23> → leader stops there, still 15.5 y from assist —
+            // LeaderArrivedYards=6 y check in UpdateCantFollow never fires →
+            // leader cycles AssistReturn timeouts every 25 s indefinitely; assist
+            // never moves. Geometric deadlock: rect is 47 y × 50 y, far wider
+            // than 2×LeaderArrivedYards=12 y, so Fix 9's projection geometrically
+            // cannot place the leader within 6 y of an assist deep inside the
+            // rect, and Navigation's own Escape-first never runs because
+            // UpdateCantFollow holds active=false (navigation.Stop every tick).
+            //
+            // Fix: when the entire leader→assist line is blacklisted AND the
+            // assist's own position is inside a blacklist rect, escape the rect
+            // first via its closest edge. Return the exit point as the
+            // navigation target; the assist moves OUT of the blacklist by ~6-7 y
+            // (above the 1 y SetWaypoint loop-guard threshold so the loop guard
+            // is naturally reset by real movement), then the next FFG.OnDestinationReached
+            // re-enters ComputeFollowTargetWorldPos with the assist outside the
+            // rect — standard leader→assist offset target now works since the
+            // line no longer crosses the rect from the assist's side.
+            //
+            // Exit margin = 6 y. POP_DIST is 3.6 y, so a bot popping the wp at
+            // 3.6 y short still ends up 2.4 y clear of the rect at worst. Margin
+            // also matches DetourMargin/2=6 — the inflation used elsewhere in
+            // Navigation when computing safety buffers around blacklist rects.
+            //
+            // Score = distFromAssist + 0.5*distFromLeader. The 0.5 weight gives
+            // a mild lean toward exits on the leader's side without overriding
+            // the cheaper close-edge choice when the leader is far.
+            //
+            // If all 4 axis-aligned exits land in another rect (overlapping
+            // blacklist composition), no candidate found → fall through to the
+            // old "return assist position" path. Strictly better than current,
+            // never worse.
+            if (navigation.AreaBlacklist.TryGetContainingRect(assistW, out var containingRect))
+            {
+                const float ExitMargin = 6.0f;
+
+                ReadOnlySpan<Vector3> exitCandidates = stackalloc Vector3[]
+                {
+                    new Vector3(containingRect.MinX - ExitMargin, assistW.Y, 0f), // west exit
+                    new Vector3(containingRect.MaxX + ExitMargin, assistW.Y, 0f), // east exit
+                    new Vector3(assistW.X, containingRect.MinY - ExitMargin, 0f), // south exit
+                    new Vector3(assistW.X, containingRect.MaxY + ExitMargin, 0f), // north exit
+                };
+
+                Vector3 bestExit = default;
+                float bestScore = float.MaxValue;
+                bool foundExit = false;
+
+                for (int i = 0; i < exitCandidates.Length; i++)
+                {
+                    Vector3 c = exitCandidates[i];
+
+                    // Skip candidates that land inside another blacklist rect
+                    // (overlapping-rect composition); the bot would just be
+                    // stuck in a new rect.
+                    if (navigation.AreaBlacklist.ContainsWorld(c))
+                        continue;
+
+                    float distFromAssist = c.WorldDistanceXYTo(assistW);
+                    float distFromLeader = c.WorldDistanceXYTo(leaderW);
+                    float score = distFromAssist + 0.5f * distFromLeader;
+
+                    if (score < bestScore)
+                    {
+                        bestScore = score;
+                        bestExit = c;
+                        foundExit = true;
+                    }
+                }
+
+                if (foundExit)
+                {
+                    logger.LogWarning(
+                        $"[FFG] Position-chase: leader→assist line entirely blacklisted AND assist " +
+                        $"inside rect — escaping rect first via exit point {bestExit} " +
+                        $"(rect=({containingRect.MinX:0.0},{containingRect.MinY:0.0})-" +
+                        $"({containingRect.MaxX:0.0},{containingRect.MaxY:0.0}), assist={assistW}, " +
+                        $"exitDist={bestExit.WorldDistanceXYTo(assistW):0.0}y, " +
+                        $"leaderDist={bestExit.WorldDistanceXYTo(leaderW):0.0}y).");
+                    return bestExit;
+                }
+            }
+
             logger.LogWarning(
                 $"[FFG] Position-chase: leader→assist segment is entirely blacklisted " +
                 $"(leader={leaderW}, assist={assistW}). Returning assist position; " +

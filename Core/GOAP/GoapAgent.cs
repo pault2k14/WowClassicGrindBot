@@ -65,23 +65,60 @@ public sealed partial class GoapAgent : IDisposable
     private bool _evadeLeaderWaiting;
 
     // -----------------------------------------------------------------------
-    // Assist-side blacklist tracking
+    // Session blacklist tracking (used by both PartyLeader and AssistFocus)
     //
-    // Tracks GUIDs already observed in the leader's BlacklistedMobGuids API
-    // field. When a NEW GUID arrives, the agent-level diff in GoapThread
-    // dispatches EvadeBlacklistEvent so the assist's CombatGoal exits via
-    // its evadeRecovery precondition (CombatGoal.cs:191).
+    // Original purpose (assist-side, before Fix 15): tracked GUIDs already
+    // observed in the leader's BlacklistedMobGuids API field. When a NEW
+    // GUID arrived, the agent-level diff in GoapThread dispatched
+    // EvadeBlacklistEvent so the assist's CombatGoal exited via its
+    // evadeRecovery precondition.
     //
-    // Critical: this MUST live on the agent (not on FFG), because Combat is
-    // cost 4 and FFG is cost 19 — Combat preempts FFG. A leader-published
-    // blacklist GUID dispatched during the assist's combat would otherwise
-    // not be seen by the assist until combat ended naturally, by which
-    // point the mob is already dead. Observed in log 22 (assist 18:03:34
-    // through 18:03:46): the assist cast Smite 4 times against the
-    // blacklisted GUID before FFG.OnEnter ran the original FFG-level diff
-    // — 3 seconds AFTER kill credit.
+    // Critical placement (agent, not FFG): Combat is cost 4 and FFG is cost
+    // 19 — Combat preempts FFG. A leader-published blacklist GUID dispatched
+    // during the assist's combat would otherwise not be seen by the assist
+    // until combat ended naturally, by which point the mob is already dead.
+    // Observed in log 22 (assist 18:03:34 through 18:03:46): the assist
+    // cast Smite 4 times against the blacklisted GUID before FFG.OnEnter
+    // ran the original FFG-level diff — 3 seconds AFTER kill credit.
+    //
+    // Fix 15 extension: also populated by the EvadeBlacklistEvent handler
+    // (line ~1019) regardless of mode. This means the leader's own evade
+    // dispatches (from TargetFinder / ATG / PTG) now also record the GUID
+    // here. The per-tick refresh block in GoapThread iterates this set and
+    // keeps every guid's IsIgnored TTL alive as long as the bot is inside
+    // any blacklist rect inflated by BlacklistMemoryBufferYards. Once the
+    // bot is geographically clear of every rect's inflated zone, the next
+    // tick's cleanup observes IsIgnored=false (TTL has decayed naturally)
+    // and drops the guid from this set.
     // -----------------------------------------------------------------------
     private readonly System.Collections.Generic.HashSet<int> _knownBlacklistedGuids = new();
+
+    // Fix 15: scratch list for the per-tick cleanup pass over
+    // _knownBlacklistedGuids. Reused each tick to avoid per-frame allocation.
+    // Single-threaded use from GoapThread.
+    private readonly System.Collections.Generic.List<int> _expiredBlacklistedGuidsBuffer = new();
+
+    // Fix 15: inflation radius applied to each blacklist rect when deciding
+    // whether to refresh _knownBlacklistedGuids. 35 y covers typical caster
+    // cast range in classic WoW (most spells 30 y, some 35 y) and gives a
+    // small safety margin beyond DetourMargin=12 y (the geometric buffer
+    // Navigation uses for path detours). The result: as long as the bot is
+    // anywhere within caster reach of a rect, every guid we've ever
+    // blacklisted during this session stays on IsIgnored — the planner
+    // cannot decide "the 30 s wall-clock TTL has elapsed, this mob is now
+    // fair game" while we're still standing in cast range of the rect.
+    private const float BlacklistMemoryBufferYards = 35f;
+
+    // Fix 15: tracks whether the bot was inside the BlacklistMemoryBuffer-
+    // inflated zone on the previous tick, so we can log entry / exit
+    // transitions once rather than every tick.
+    private bool _previouslyInBlacklistMemoryZone;
+
+    // Fix 13: tracks the GUID currently being overridden by the IsIgnored
+    // self-defense exception in UpdateWorldState. Used purely to debounce the
+    // override log so it fires once per (guid, attack-session) transition
+    // rather than every GOAP tick. Reset to 0 when no override is active.
+    private int _selfDefenseOverrideGuid;
 
     private bool active;
     public bool Active
@@ -379,6 +416,79 @@ public sealed partial class GoapAgent : IDisposable
                 }
             }
 
+            // ── Fix 15: per-tick blacklist memory maintenance ─────────────
+            //
+            // Breaks the caster-cycle issue raised in session 49: caster mob
+            // in a blacklist rect → patrol detour with DetourMargin=12 y
+            // brings the bot inside the caster's ~30 y cast range → caster
+            // keeps hitting the bot during evade → 30 s IsIgnored TTL on
+            // wall-clock decays → patrol routes us back near the rect →
+            // next aggro starts a fresh evade cycle, repeat.
+            //
+            // The fix: as long as the bot is inside any blacklist rect
+            // inflated by BlacklistMemoryBufferYards (35 y, covering most
+            // caster cast ranges), refresh the IsIgnored TTL on every guid
+            // we've blacklisted this session. The TTL only starts decaying
+            // for real once the patrol has carried the bot geographically
+            // clear of every inflated zone. Once a guid's IsIgnored becomes
+            // false (we left the zone and the natural TTL expired), drop it
+            // from the session set so the set stays bounded.
+            //
+            // Runs every tick regardless of mode, current goal, evade
+            // window state, or anything else. The refresh action is purely
+            // geographic — "as long as we're near the rect, remember
+            // everything we've already learned to avoid."
+            //
+            // Two-pass pattern for cleanup: the first foreach iterates
+            // _knownBlacklistedGuids read-only (playerReader.IsIgnored is a
+            // pure read, no callbacks) and records expired guids into the
+            // reusable buffer. The second foreach iterates the buffer and
+            // Removes from _knownBlacklistedGuids — deferring the Removes
+            // until after the read-only enumeration so we never modify the
+            // set during a foreach over itself. Single-threaded use from
+            // GoapThread; same threading assumption as the existing API
+            // observer path (line ~408) that also modifies this set.
+            if (_knownBlacklistedGuids.Count > 0)
+            {
+                _expiredBlacklistedGuidsBuffer.Clear();
+                foreach (int guid in _knownBlacklistedGuids)
+                {
+                    if (!playerReader.IsIgnored(guid))
+                        _expiredBlacklistedGuidsBuffer.Add(guid);
+                }
+                if (_expiredBlacklistedGuidsBuffer.Count > 0)
+                {
+                    foreach (int guid in _expiredBlacklistedGuidsBuffer)
+                    {
+                        _knownBlacklistedGuids.Remove(guid);
+                        logger.LogInformation(
+                            $"[GoapAgent] IsIgnored TTL expired for guid={guid} — " +
+                            "dropping from session blacklist (geographically clear of inflated zone).");
+                    }
+                }
+            }
+
+            bool currentlyInBlacklistMemoryZone =
+                navigation.AreaBlacklist != null &&
+                navigation.AreaBlacklist.TryGetContainingRectInflated(
+                    playerReader.WorldPos, BlacklistMemoryBufferYards, out _);
+
+            if (currentlyInBlacklistMemoryZone != _previouslyInBlacklistMemoryZone)
+            {
+                _previouslyInBlacklistMemoryZone = currentlyInBlacklistMemoryZone;
+                logger.LogInformation(
+                    $"[GoapAgent] Bot {(currentlyInBlacklistMemoryZone ? "entered" : "exited")} " +
+                    $"blacklist-memory zone (inflate={BlacklistMemoryBufferYards}y, " +
+                    $"trackedGuids={_knownBlacklistedGuids.Count}, " +
+                    $"pos={playerReader.WorldPos}).");
+            }
+
+            if (currentlyInBlacklistMemoryZone && _knownBlacklistedGuids.Count > 0)
+            {
+                foreach (int guid in _knownBlacklistedGuids)
+                    playerReader.IgnoreTarget(guid);
+            }
+
             // ── Evade recovery world state ────────────────────────────────
             bool evadeRecoveryActive = DateTime.UtcNow < _evadeRecoveryUntilUtc;
             if (evadeRecoveryActive != previousEvadeRecovery)
@@ -672,6 +782,93 @@ public sealed partial class GoapAgent : IDisposable
         // whether ANY target slot in the party offers something fightable —
         // see GoapKey.allPartyTargetsIsIgnored for the full rationale.
         bool targetIgnored = IsTargetIgnoredOrAbsent(hasTarget, playerReader.TargetGuid);
+
+        // Fix 13 (log-42 17:22:57:134 → 17:23:01:852: 4.7 s NO PLAN gap during
+        // active combat): the IsIgnored TTL is 30 s (PlayerReader.BLACKLIST_IGNORE_SECONDS,
+        // per the comment block at line ~344 of this file) but EvadeRecoveryDurationSec
+        // is 25 s. The 5 s overlap is a dead zone: the evade window has ended
+        // (planner sees evadeRecovery=false) but the blacklisted mob's GUID is
+        // still on IsIgnored → CombatGoal's allPartyTargetsIsIgnored=false
+        // precondition blocks the plan. If the bot is still being hit during
+        // that 5 s, it stands still taking damage (assist GoapKey dump at
+        // 17:22:57:135 in log-42: hastarget=True, damagetaken=True,
+        // targettargetsus=True, incombat=True, evadeRecovery=False, but
+        // New Plan = NO PLAN for the full 4.7 s until IsIgnored self-expires
+        // at the 30 s mark).
+        //
+        // Original design assumption (line ~347 comment): "After ~30 s the
+        // entry self-expires; by that point the leader should have retreated
+        // far enough that the mob is no longer relevant." This holds when the
+        // bot actually moves away during the 25 s evade window. In AssistFocus
+        // mode the assist follows the leader and may stay near the mob; the
+        // leader may also hold position if it's also in evade. The mob is
+        // still relevant when IsIgnored expires.
+        //
+        // Self-defense override design (per user, session 49 follow-up): the
+        // overriding principle is that blacklisted areas are geographic
+        // regions to avoid — fighting inside one defeats the purpose of the
+        // blacklist. Combat must only be re-enabled when the bot has actually
+        // escaped. The user articulated this as two combat-allowed conditions:
+        //   1. Evade window is over AND mob is still in combat with us AND
+        //      we have moved outside the blacklist area.
+        //   2. We have moved outside the blacklist area AND we are fighting
+        //      a non-blacklisted mob.
+        // Case (2) is the normal flow — targetIgnored is already false for a
+        // non-blacklisted target and CombatGoal runs through standard
+        // preconditions; no override needed. Case (1) is the only scenario
+        // this override addresses, and ALL of its conjuncts must hold:
+        //
+        // Required conjuncts (and the log evidence each guards against):
+        //   - targetIgnored                              the slot would otherwise block Combat
+        //   - hasTarget && playerCombat && dmgTaken      really in active combat (not a stale
+        //                                                rolling-window damage echo)
+        //   - TargetTarget is Me or Pet                  the mob is locked onto US, not the
+        //                                                leader (PartyOrPet excluded — the
+        //                                                leader's own GoapAgent runs this
+        //                                                same code path for its own slot)
+        //   - !evadeRecoveryActive                       evade window has already ended;
+        //                                                during evade the bot's job is to
+        //                                                retreat, not to engage
+        //   - !navigation.IsInBlacklistArea()            bot is geographically outside all
+        //                                                blacklist rects — the core principle.
+        //                                                If bot is inside a rect, escape
+        //                                                takes priority (Fix 12 in FFG, or
+        //                                                Navigation's blacklist-aware patrol
+        //                                                in FRG).
+        //
+        // What this override does NOT do: it does not modify the IsIgnored
+        // map itself, the evade window, focusTargetIgnored, or add any
+        // retreat behavior. It only flips one frame's WorldState value when
+        // the bot is geographically safe AND being actively attacked AND the
+        // evade window has elapsed — exactly the scenario in log-42 where
+        // the assist sat outside the blacklist at <942.65, 296.71> taking
+        // hits for 4.7 s after the evade window expired.
+        bool evadeRecoveryActive = DateTime.UtcNow < _evadeRecoveryUntilUtc;
+        bool botInsideBlacklistArea = navigation.IsInBlacklistArea();
+        bool selfDefenseOverride =
+            targetIgnored &&
+            hasTarget && playerCombat && dmgTaken &&
+            playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
+            !evadeRecoveryActive &&
+            !botInsideBlacklistArea;
+        if (selfDefenseOverride)
+        {
+            targetIgnored = false;
+            if (_selfDefenseOverrideGuid != playerReader.TargetGuid)
+            {
+                _selfDefenseOverrideGuid = playerReader.TargetGuid;
+                logger.LogInformation(
+                    $"[GoapAgent] IsIgnored self-defense override: target guid={playerReader.TargetGuid} " +
+                    $"is on IsIgnored map but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
+                    $"playerCombat=true, dmgTaken=true, evadeRecovery=false, insideBlacklistArea=false) — " +
+                    $"treating as not-ignored so Combat plan can engage.");
+            }
+        }
+        else if (_selfDefenseOverrideGuid != 0)
+        {
+            _selfDefenseOverrideGuid = 0;
+        }
+
         bool focusTargetIgnored = IsTargetIgnoredOrAbsent(b.FocusTarget(), playerReader.FocusTargetGuid);
         WorldState[GoapKey.targetIsIgnored]          = targetIgnored;
         WorldState[GoapKey.focusTargetIsIgnored]     = focusTargetIgnored;
@@ -729,7 +926,9 @@ public sealed partial class GoapAgent : IDisposable
         //   3. Normal path — no forced-follow chat command and no recent
         //      damage. This is the steady-state "assist should follow leader
         //      because nothing else is going on."
-        bool evadeRecoveryActive = DateTime.UtcNow < _evadeRecoveryUntilUtc;
+        // Note: evadeRecoveryActive is declared earlier in this method (Fix 13
+        // block, line ~846) and is still in scope here. Reusing it rather
+        // than redeclaring avoids CS0128.
         WorldState[GoapKey.assistshouldfollow] =
             leaderConnection.HasValidLeaderState &&
             !chatReader.ForcedFollow &&
@@ -910,6 +1109,16 @@ public sealed partial class GoapAgent : IDisposable
                 //   23:01:54:894  kill credit on the supposedly-blacklisted mob
                 // Centralizing the call here makes every dispatch path symmetric.
                 playerReader.IgnoreTarget(evade.TargetGuid);
+
+                // Fix 15: record this guid in the session blacklist so the
+                // per-tick refresh in GoapThread keeps its IsIgnored TTL
+                // alive while we remain inside any blacklist rect inflated
+                // by BlacklistMemoryBufferYards. Idempotent (HashSet.Add).
+                // For the assist, this is already added by the API observer
+                // before HandleGoapEvent is called (line ~376), so the Add
+                // here returns false and is a no-op. For the leader, this
+                // is the only path that records the guid.
+                _knownBlacklistedGuids.Add(evade.TargetGuid);
 
                 if (classConfig.Mode == Mode.PartyLeader)
                 {

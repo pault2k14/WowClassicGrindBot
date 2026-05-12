@@ -568,11 +568,84 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     break;
 
                 case GoapKey.partyincombat:
+                    // Fix 14: gate Abort on whether Combat is actually runnable.
+                    //
+                    // FRG.Abort here is a courtesy to CombatGoal — drop the
+                    // patrol so the planner can pick Combat to fight whatever
+                    // mob the party engaged. But CombatGoal in PartyLeader /
+                    // AssistFocus mode has AddPrecondition(allPartyTargetsIsIgnored,
+                    // false) (CombatGoal.cs:90, :98). When every party target
+                    // slot points to a mob on the IsIgnored map, CombatGoal
+                    // cannot be selected by the planner. Aborting the patrol
+                    // in that case accomplishes nothing except halting movement,
+                    // which during an evade window is exactly the opposite of
+                    // the design intent (the patrol IS the retreat from the
+                    // blacklist rect).
+                    //
+                    // Computed inline rather than via broadcast subscription
+                    // because the partyincombat broadcast is itself the trigger
+                    // here — at the moment FRG sees partyincombat=true, the
+                    // GoapAgent has NOT yet run UpdateWorldState for this
+                    // tick (NextGoal runs after the broadcast block in
+                    // GoapThread). A broadcast-based subscription would deliver
+                    // the value one tick late. Inline computation reads the
+                    // current playerReader / bits / IsIgnored state directly,
+                    // which is the same data UpdateWorldState would have used.
+                    //
+                    // Fix 13 self-defense override deliberately not replicated
+                    // here: that override fires only after the evade window
+                    // ends, at which point partyincombat is already true (it
+                    // went true when the mob first attacked, before evade).
+                    // The override's effect on allPartyTargetsIsIgnored never
+                    // coincides with a partyincombat rising-edge, so FRG
+                    // doesn't need to mirror it.
+                    //
+                    // Log-42 motivating sequence:
+                    //   17:22:33 leader's escape-first carries it out of the rect.
+                    //   17:22:37 leader patrol resumes, walking toward next waypoint.
+                    //   17:22:39:377 partyincombat=true broadcast (assist still
+                    //                hit by the blacklisted mob). Before this
+                    //                fix, FRG.Abort fires unconditionally →
+                    //                leader frozen for the remaining ~19 s of
+                    //                evade. With this fix, FRG computes
+                    //                allPartyTargetsIsIgnored=true inline (leader
+                    //                has no target → targetIgnored=true; focus
+                    //                target 163662 is on IsIgnored →
+                    //                focusTargetIgnored=true), skips Abort,
+                    //                retreat patrol continues uninterrupted.
+                    //
+                    // Handles cleanly:
+                    //   - Evade window with blacklisted mob still attacking
+                    //     (allPartyTargetsIsIgnored=true) → no abort, patrol
+                    //     carries us out of the rect.
+                    //   - Mixed combat: blacklisted mob plus a non-blacklisted
+                    //     mob attacks during evade. allPartyTargetsIsIgnored
+                    //     becomes false (the non-blacklisted slot is fightable)
+                    //     → abort fires, CombatGoal engages the fightable mob.
+                    //   - Normal combat outside evade (target not on IsIgnored)
+                    //     → allPartyTargetsIsIgnored=false → abort fires as
+                    //     before. No behavior change for the normal path.
                     if ((classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
                         && (bits.Combat() || bits.Focus_Combat()))
                     {
-                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - Party entered Combat, trying to exit!");
-                        Abort();
+                        bool partyTargetIgnored =
+                            !bits.Target() || playerReader.IsIgnored(playerReader.TargetGuid);
+                        bool partyFocusTargetIgnored =
+                            !bits.FocusTarget() || playerReader.IsIgnored(playerReader.FocusTargetGuid);
+                        bool allPartyTargetsIsIgnored = partyTargetIgnored && partyFocusTargetIgnored;
+
+                        if (!allPartyTargetsIsIgnored)
+                        {
+                            logger.LogInformation("FollowRouteGoal: OnGoapEvent - Party entered Combat, trying to exit!");
+                            Abort();
+                        }
+                        else
+                        {
+                            logger.LogInformation(
+                                $"[FRG] partyincombat=true but allPartyTargetsIsIgnored=true " +
+                                $"(targetIgnored={partyTargetIgnored} focusTargetIgnored={partyFocusTargetIgnored}) — " +
+                                $"Combat cannot run, continuing retreat patrol uninterrupted.");
+                        }
                     }
                     break;
             }
