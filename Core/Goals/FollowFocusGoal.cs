@@ -256,6 +256,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // as stuck and may consider escalating earlier.
     private const float EscapeMinProgressYards = 1.5f;
 
+    // Fix 33 (log-53: 1000 "Position-chase: standard target ... within 6.0y
+    // of assist's blacklist; projected toward assist to ..." log lines in
+    // ~100 s, ~10 Hz steady state and ~60 Hz during CantFollow flap):
+    // dedup the position-chase projection warning. Log only when the
+    // projected candidate moves more than this threshold from the last
+    // logged candidate. Reset on plan transitions (OnEnter) and
+    // CantFollow entry/exit so a fresh CantFollow cycle logs the first
+    // projection. `default` (Vector3.Zero) means "no projection logged
+    // yet in this cycle".
+    private Vector3 _lastWarnedProjectionCandidateW;
+    private const float ProjectionLogChangeYards = 3.0f;
+
     // -----------------------------------------------------------------------
     // Leader position tracking
     // -----------------------------------------------------------------------
@@ -1312,19 +1324,79 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // "reunite" condition — the path-finding obstruction that put us
         // in CantFollow is gone, so resume normal NavigatingToLeader
         // even though we're still > 6 y from the leader.
-        if (leaderFresh && navigation.AreaBlacklist != null
-            && !navigation.AreaBlacklist.TryGetBlockingRect(
-                   playerReader.WorldPos, leader!.WorldPos, out _))
+        //
+        // Fix 33 (log-53 21:22:43:657 → 21:22:47+: assist flapped
+        // CantFollow ↔ NavigatingToLeader every ~300 ms for 4+ seconds at
+        // <945.5, 295> while leader was at <948.4, 289.4> in combat with
+        // a BL mob; 26 SetWaypoint loop-guard escalations, 188 immediate
+        // re-exits): the original Fix 32 condition used TryGetBlockingRect
+        // (STRICT rect crossing only) for segment-clear, but the
+        // position-chase code at line 1903 uses TryGetContainingRectInflated
+        // with a 6 y safety margin. When the leader is near a rect edge,
+        // the segment from assist to leader can be clear of strict
+        // crossing while the standard follow target (3 y short of the
+        // leader along the leader→assist line) lands inside the 6 y
+        // inflated zone — position-chase then projects the target toward
+        // the assist, lands ~1 y from the assist, SetWayPoint loop guard
+        // fires after 10 stationary sets, CantFollow re-fires the next
+        // tick. Cycle every ~300 ms.
+        //
+        // Fix: require BOTH (a) segment to leader doesn't cross a strict
+        // rect AND (b) the standard follow target wouldn't itself trigger
+        // the position-chase projection. Use the same 6 y inflated check
+        // (ProjectionSafetyMarginYards) that position-chase uses, so we
+        // know NavigatingToLeader can run for at least one tick without
+        // immediately re-escalating to CantFollow.
+        if (leaderFresh && navigation.AreaBlacklist != null)
         {
-            float dist = playerReader.WorldPos.WorldDistanceXYTo(leader!.WorldPos);
-            logger.LogInformation(
-                $"[FFG] CantFollow: segment to leader is now clear ({dist:0.0}y, " +
-                $"no BL rect blocks) — resuming navigation.");
-            assistStatusProvider.CantFollow = false;
-            ResetEscapeState();
-            ResetNavState();
-            StartNavigatingToLeader(leader);
-            return;
+            Vector3 assistPos = playerReader.WorldPos;
+            Vector3 leaderPos = leader!.WorldPos;
+            bool segmentClear = !navigation.AreaBlacklist.TryGetBlockingRect(
+                assistPos, leaderPos, out _);
+
+            bool followTargetClear = true;
+            if (segmentClear)
+            {
+                // Compute the natural follow target the same way
+                // ComputeFollowTargetWorldPos does (line 1873-1893):
+                // leader's position shifted FollowStopShortYards toward
+                // the assist. If this point falls within 6 y of any
+                // inflated rect, position-chase will project it on the
+                // very next tick and re-trigger CantFollow.
+                float dx = assistPos.X - leaderPos.X;
+                float dy = assistPos.Y - leaderPos.Y;
+                float lenXY = MathF.Sqrt(dx * dx + dy * dy);
+                Vector3 followTarget;
+                if (lenXY < 0.001f)
+                {
+                    followTarget = new Vector3(leaderPos.X, leaderPos.Y, 0f);
+                }
+                else
+                {
+                    float invLen = 1f / lenXY;
+                    followTarget = new Vector3(
+                        leaderPos.X + dx * invLen * FollowStopShortYards,
+                        leaderPos.Y + dy * invLen * FollowStopShortYards,
+                        0f);
+                }
+
+                const float ProjectionSafetyMarginYards = 6.0f;
+                followTargetClear = !navigation.AreaBlacklist.TryGetContainingRectInflated(
+                    followTarget, ProjectionSafetyMarginYards, out _);
+            }
+
+            if (segmentClear && followTargetClear)
+            {
+                float dist = assistPos.WorldDistanceXYTo(leaderPos);
+                logger.LogInformation(
+                    $"[FFG] CantFollow: segment to leader is now clear ({dist:0.0}y, " +
+                    $"no BL rect blocks, follow target outside inflated zones) — resuming navigation.");
+                assistStatusProvider.CantFollow = false;
+                ResetEscapeState();
+                ResetNavState();
+                StartNavigatingToLeader(leader);
+                return;
+            }
         }
 
         // Existing 120 s timeout — retry navigation in case the leader moved.
@@ -1520,9 +1592,50 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // Fix 33 (log-53: 188 lines of "arrived at LastSafeAnchor target
+        // <X> (displacement 0.0y)" followed by "Projection10 — not inside
+        // any inflated rect" → "LastSafeAnchor → navigating to <same X>",
+        // cycling every ~15 ms): when CantFollow is not actually
+        // BL-driven from the assist's side (assist outside all inflated
+        // rects but follow target landed inside one because the LEADER is
+        // near a rect), LastSafeAnchor was typically set to the assist's
+        // last waypoint, which during steady-state position-chase equals
+        // the assist's current position. Navigating to a co-located
+        // anchor produces zero displacement, the DriveActiveEscapePhase
+        // arrival check (within EscapeArrivalYards = 3.5 y) fires
+        // immediately, restarts Projection10, which falls through to
+        // LastSafeAnchor, repeating every tick. The assist is not stuck
+        // — there is just nowhere to escape TO because the assist is
+        // already in a safe position; the leader is the side that needs
+        // to move.
+        //
+        // Fix: if the anchor is within EscapeArrivalYards of the assist's
+        // current position, skip the navigate-to-anchor step (which would
+        // arrive instantly and trigger the cycle). Try PhysicalUnstuck if
+        // we haven't already, otherwise go to Exhausted to hold position
+        // until the leader-arrived (6 y) or 120 s timeout exit fires.
+        Vector3 currentPos = playerReader.WorldPos;
+        float anchorDist = currentPos.WorldDistanceXYTo(anchor);
+        if (anchorDist <= EscapeArrivalYards)
+        {
+            logger.LogInformation(
+                $"[FFG] CantFollow escape: LastSafeAnchor {anchor} is co-located with " +
+                $"current position ({anchorDist:0.0}y ≤ {EscapeArrivalYards:0.0}y) — " +
+                "no movement would result. " +
+                (_escapeUnstuckUsed
+                    ? "PhysicalUnstuck already used, holding position (Exhausted)."
+                    : "Trying PhysicalUnstuck."));
+            if (_escapeUnstuckUsed)
+                StartEscapePhase(CantFollowEscapePhase.Exhausted);
+            else
+                StartEscapePhase(CantFollowEscapePhase.PhysicalUnstuck);
+            return;
+        }
+
         _escapeTargetW = anchor;
         logger.LogInformation(
-            $"[FFG] CantFollow escape: LastSafeAnchor → navigating to {anchor}.");
+            $"[FFG] CantFollow escape: LastSafeAnchor → navigating to {anchor} " +
+            $"({anchorDist:0.0}y away).");
         navigation.SetSingleWaypoint(anchor);
     }
 
@@ -1574,6 +1687,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _escapePhaseStartPos = default;
         _escapeTargetW = default;
         _escapeUnstuckUsed = false;
+
+        // Fix 33: reset the position-chase projection log dedup so the
+        // next projection in a fresh state cycle (after plan re-entry,
+        // CantFollow exit via segment-clear, leader-arrived exit, or
+        // 120 s timeout) logs once. Same-target repeats during steady
+        // operation are suppressed by the >3 y change threshold.
+        _lastWarnedProjectionCandidateW = default;
     }
 
     /// <summary>
@@ -1917,11 +2037,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 if (!navigation.AreaBlacklist.TryGetContainingRectInflated(
                         candidate, ProjectionSafetyMarginYards, out _))
                 {
-                    logger.LogWarning(
-                        $"[FFG] Position-chase: standard target {target} is within " +
-                        $"{ProjectionSafetyMarginYards:0.0}y of assist's blacklist; " +
-                        $"projected toward assist to {candidate} ({distFromLeader:0.0}y from leader, " +
-                        $"{lenXY - distFromLeader:0.0}y from assist).");
+                    // Fix 33 (log-53: 1000 of these warnings in ~100 s
+                    // during CantFollow flap and stationary position-chase):
+                    // only log when the projected candidate moves more
+                    // than ProjectionLogChangeYards from the last logged
+                    // candidate. Same-target repeats are noise.
+                    if (_lastWarnedProjectionCandidateW == default ||
+                        candidate.WorldDistanceXYTo(_lastWarnedProjectionCandidateW) > ProjectionLogChangeYards)
+                    {
+                        logger.LogWarning(
+                            $"[FFG] Position-chase: standard target {target} is within " +
+                            $"{ProjectionSafetyMarginYards:0.0}y of assist's blacklist; " +
+                            $"projected toward assist to {candidate} ({distFromLeader:0.0}y from leader, " +
+                            $"{lenXY - distFromLeader:0.0}y from assist).");
+                        _lastWarnedProjectionCandidateW = candidate;
+                    }
                     return candidate;
                 }
             }

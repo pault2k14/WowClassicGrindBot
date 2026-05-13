@@ -537,22 +537,33 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     break;
 
                 case GoapKey.assistrequestreturn:
-                    // Fix 32: per user direction the leader no longer
-                    // navigates toward a CantFollow assist. The event still
-                    // fires when the store transitions to AnyAssistCantFollow=true
-                    // — log it for visibility, but take no movement action.
-                    // The same-tick pause-for-assist gate in UpdateActions
-                    // handles pausing patrol (its ShouldLeaderPauseForAssist
-                    // call returns true on any CantFollow assist, regardless
-                    // of distance). The assist resolves its own CantFollow
-                    // via FFG's active-escape state machine.
+                    // The actual AssistReturn navigation is started by
+                    // GoapAgent's diff-loop at GoapAgent.cs:343-346,
+                    // which calls goal.GoToOneWaypoint(MapPosNoZ) on
+                    // every FollowRouteGoal whenever AnyAssistCantFollow
+                    // transitions to true. That code path executes
+                    // *concurrently with* this event handler (the event
+                    // is broadcast from GoapAgent on the same tick), so
+                    // by the time this handler runs the AssistReturn is
+                    // already in flight.
                     //
-                    // Previous behavior: GoToOneWaypoint(cantFollow.MapPosNoZ)
-                    // began an AssistReturn navigation here. Removed: in
-                    // log-52 that produced an 80-second deadlock loop with
-                    // the leader repeatedly navigating to projected points
-                    // ~22 y from the actual assist (geometrically unable to
-                    // satisfy CantFollow's leader-arrived condition).
+                    // This handler is informational only — it logs that
+                    // we observed the transition. The Fix 32 cleanup
+                    // that removed the GoToOneWaypoint call here is
+                    // pending revision: per user direction we are
+                    // restoring leader-returns-to-assist behavior with
+                    // safeguards (A targeting actual assist position,
+                    // B per-CantFollow-event retry bound, C segment-clear
+                    // fast path) in a follow-up change. Until then,
+                    // GoapAgent's direct call is the path that fires.
+                    //
+                    // Fix 33 (log-53 leader line 484-487: "[FRG] OnGoapEvent
+                    // assistrequestreturn ... Leader will hold position
+                    // (no AssistReturn)" was logged 1 ms before
+                    // "[FRG] AssistReturn begin -> <60.3843, 60.5665, 0>"
+                    // — the log lied about the actual behavior): correct
+                    // the log message to describe what GoapAgent does,
+                    // not what Fix 32 intended.
                     if (assistStateStore.AnyAssistCantFollow())
                     {
                         AssistState? cantFollow = assistStateStore.GetCantFollowState();
@@ -561,8 +572,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                             logger.LogInformation(
                                 $"[FRG] OnGoapEvent assistrequestreturn — assist at " +
                                 $"({cantFollow.MapX:0.00},{cantFollow.MapY:0.00}). " +
-                                $"Leader will hold position (no AssistReturn); " +
-                                $"assist runs its own active-escape sequence.");
+                                $"GoapAgent diff-loop (GoapAgent.cs:343) will fire " +
+                                $"GoToOneWaypoint on this same tick.");
                         }
                     }
                     break;
