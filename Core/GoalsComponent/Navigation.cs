@@ -355,6 +355,50 @@ public sealed partial class Navigation : IDisposable
     private int _sameDetourBadPointCount;
     private const int MaxSameDetourBadPointBeforeSkip = 4;
 
+    // Fix H (log-54 22:58:19:404 → 22:58:39:779, leader stuck 20 s at
+    // <951.97, 291.86>, 0.43 y outside std rect west edge X=952.4): Fix 29's
+    // pop-only behavior relies on external events (combat, etc.) to move the
+    // bot. In log-54 no such event fired for the entire 20 s window — Fix 29
+    // detected the cycle 67 times consecutively (counter 4→70), every
+    // iteration popping one waypoint but the bot's physical position never
+    // changing. Local navmesh from <951.97, 291.86> connects to
+    // <954.539, 290.37> (inside rect) as the natural eastern neighbor, so
+    // every pathfinder result routes through that point regardless of which
+    // wpTop is chosen as endW. TryRouteUnstuck/stuckDetector.Update never
+    // reached during the cycle because routeToNextWaypoint is cleared on
+    // each Fix 29 fire and Update()'s stuck-detection branch (line 1281)
+    // requires an active route. After 25 s the evade recovery elapsed, the
+    // mob attacked again, and self-defense override took over — pulling
+    // the bot deeper into BL during combat.
+    //
+    // Fix: when the same-(startW, badPointW) cycle persists beyond
+    // Fix29UnstuckEscalationHits past the last escalation (or initial
+    // detection), and the cooldown has elapsed, escalate to:
+    //   1. TryPhysicalUnstuck — jump + reverse + jump + reverse, ~1.4 s
+    //      blocking. Displaces the bot 1-2 y backward, breaking the
+    //      mesh-stuck node.
+    //   2. Direct away-from-rect route — compute direction from rect center
+    //      to post-unstuck position, push a single routeToNextWaypoint node
+    //      DetourMargin+6 = 18 y in that direction. Bypass the pather since
+    //      the pather has been routing through the rect interior the entire
+    //      cycle. The away-from-center direction guarantees the route
+    //      segment moves away from the rect (geometry: target is on the
+    //      same side as start, further from center → segment doesn't
+    //      cross). Once displaced 10+ y from the rect edge, the local
+    //      mesh offers different connections and normal pathing works.
+    //
+    // Cooldown 5 s prevents spamming TryPhysicalUnstuck (each call blocks
+    // 1.4 s). Threshold 8 gives Fix 29's pop-only mode ~1 s past initial
+    // detection to resolve through normal navigation before forcing
+    // physical intervention. _lastFix29UnstuckHitCount is reset in the
+    // else branch (cycle reset) so a fresh cycle starts at full budget;
+    // the time-based cooldown persists across cycles (don't escalate
+    // faster than 5 s regardless).
+    private int _lastFix29UnstuckHitCount;
+    private DateTime _fix29UnstuckCooldownUntilUtc;
+    private const int Fix29UnstuckEscalationHits = 8;
+    private const double Fix29UnstuckCooldownSec = 5.0;
+
     // Fix 30 (log-51 16:16:42→16:19:22, leader oscillated between two
     // waypoints for 2+ minutes while assist stood still): downstream
     // safety net for queue-duplicate accumulation. Fix 29 closes the
@@ -3117,6 +3161,82 @@ public sealed partial class Navigation : IDisposable
                 // they don't fight each other.
                 blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
 
+                // Fix H — escalation: TryPhysicalUnstuck + direct
+                // away-from-rect route when the cycle persists past the
+                // initial detection by Fix29UnstuckEscalationHits more
+                // hits. See the long explanation at the field
+                // declarations near line 357.
+                if (_sameDetourBadPointCount - _lastFix29UnstuckHitCount >= Fix29UnstuckEscalationHits &&
+                    DateTime.UtcNow >= _fix29UnstuckCooldownUntilUtc)
+                {
+                    logger.LogWarning(
+                        $"[BL] Fix H escalation: Fix 29 cycle persists at " +
+                        $"{_sameDetourBadPointCount}× (last escalation at " +
+                        $"{_lastFix29UnstuckHitCount}×) — bot wedged at {startW}, " +
+                        $"local mesh routes through {badPointW} inside rect. " +
+                        $"Calling TryPhysicalUnstuck + pushing direct away-from-rect route.");
+
+                    // Step 1: physical unstuck (jump + reverse + jump + reverse).
+                    // Blocks ~1.4 s. After it returns, playerReader.WorldPos
+                    // reflects the new position — the bot has moved 1-2 y
+                    // backward from its facing direction.
+                    TryPhysicalUnstuck();
+
+                    // Step 2: compute a target AWAY from the rect's center and
+                    // push directly into routeToNextWaypoint, bypassing the
+                    // pather. The pather has been routing through the rect
+                    // interior the entire cycle — we already know the local
+                    // mesh is unreliable from this position. Direct push
+                    // gives the bot a fixed movement target while it's
+                    // physically clearing the inflated zone.
+                    Vector3 postPos = Nav2D(playerReader.WorldPos);
+                    Vector3 rectCenter = new Vector3(
+                        (rect.MinX + rect.MaxX) * 0.5f,
+                        (rect.MinY + rect.MaxY) * 0.5f,
+                        0f);
+
+                    float dx = postPos.X - rectCenter.X;
+                    float dy = postPos.Y - rectCenter.Y;
+                    float lenXY = MathF.Sqrt(dx * dx + dy * dy);
+
+                    if (lenXY > 0.001f)
+                    {
+                        float invLen = 1f / lenXY;
+                        // 18 y away from rect center — same edgeBuffer used
+                        // elsewhere (DetourMargin=12 + 6). Guarantees the
+                        // target is well clear of the inflated zone.
+                        float escapeDist = DetourMargin + 6f;
+                        Vector3 escapeTarget = new Vector3(
+                            postPos.X + dx * invLen * escapeDist,
+                            postPos.Y + dy * invLen * escapeDist,
+                            0f);
+
+                        logger.LogWarning(
+                            $"[BL] Fix H: direct away-from-rect route " +
+                            $"{postPos} -> {escapeTarget} " +
+                            $"({escapeDist:0.0}y from rect center {rectCenter}). " +
+                            $"Bypassing pather — mesh has been routing through rect interior.");
+
+                        routeToNextWaypoint.Push(Nav2D(escapeTarget));
+                        SyncRouteStateToTop(false);
+                    }
+                    else
+                    {
+                        // Degenerate: post-unstuck position is at rect
+                        // center (shouldn't happen in practice). Skip
+                        // the direct route — TryPhysicalUnstuck alone
+                        // should have displaced the bot enough that the
+                        // next cycle iteration sees different geometry.
+                        logger.LogWarning(
+                            $"[BL] Fix H: postPos {postPos} is at rect center " +
+                            $"(len={lenXY:0.000}); skipping direct route, " +
+                            $"relying on TryPhysicalUnstuck alone.");
+                    }
+
+                    _lastFix29UnstuckHitCount = _sameDetourBadPointCount;
+                    _fix29UnstuckCooldownUntilUtc = DateTime.UtcNow.AddSeconds(Fix29UnstuckCooldownSec);
+                }
+
                 // Intentionally do NOT reset _sameDetourBadPointCount.
                 // While the bot remains at the same startW and the
                 // pathfinder still routes through the same badPointW,
@@ -3132,6 +3252,14 @@ public sealed partial class Navigation : IDisposable
             _sameDetourBadPointCount = 0;
             _lastDetourAttemptStartW = startW;
             _lastDetourAttemptBadPointW = badPointW;
+
+            // Fix H: reset the escalation tracker so a fresh cycle starts
+            // at full budget (next escalation fires at hit count
+            // Fix29UnstuckEscalationHits = 8 from 0). The cooldown
+            // (_fix29UnstuckCooldownUntilUtc) is time-based and intentionally
+            // NOT reset — even if a cycle resolves and a new one starts
+            // 1 s later, we don't want to physical-unstuck again that fast.
+            _lastFix29UnstuckHitCount = 0;
         }
 
         float m = DetourMargin;

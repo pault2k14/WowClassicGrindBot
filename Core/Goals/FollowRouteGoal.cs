@@ -1603,71 +1603,116 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (classConfig.Mode == Mode.PartyLeader && assistStateStore.AnyAssistCantFollow())
         {
-            // Fix 9 (log-39, 5×25 s phantom AssistReturn cycles): if the
-            // CantFollow assist is inside a blacklist (the common case — FFG's
-            // Fix 4/5 escalation specifically fires when leader→assist segment
-            // is entirely blacklisted), the recorded assist position is itself
-            // inside the rect. SetWayPoints below would push a blacklisted
-            // waypoint, SkipBlacklistedWaypoints (Navigation line 776) would
-            // pop it on the next Update tick (leader-outside-blacklist branch,
-            // player-inside early-return at line 3092 doesn't fire), wayPoints
-            // would empty, and OnDestinationReached would fire as a phantom
-            // arrival — leader logs "AssistReturn destination reached" 1 ms
-            // after begin (log-39 11:22:32:626→:627) while still 17.5 y from
-            // the assist.
+            // Fix 33 (log-52 17:38:42 → end-of-log, leader paused 80 s in
+            // _assistWaitingForFollowing state with destination 22 y from
+            // actual assist), user direction A+B+C:
             //
-            // Fix: project the target outward from the assist toward the
-            // leader, stopping just past the rect edge on the leader-side.
-            // For typical small blacklists (~7 y × 7 y in log-39), the
-            // projected point lands ~5-6 y from the assist — close enough for
-            // the assist's UpdateCantFollow exit condition
-            // (FFG line 1053: `dist <= LeaderArrivedYards=6 y`) to fire once
-            // the leader arrives at the projected point, breaking the
-            // stalemate. Idempotent when target is already outside any
-            // blacklist (the non-CantFollow-pair callers).
+            // (A) Target the actual assist position. The previous Fix 9
+            //     projection landed on the leader-side edge of the BL
+            //     rect — geometrically incapable of satisfying the
+            //     assist's CantFollow leader-arrived check (FFG line
+            //     1053: dist <= LeaderArrivedYards=6 y) when the rect is
+            //     wider than ~12 y, because the projection moves AWAY
+            //     from the assist. New rule: if the assist's recorded
+            //     position is inside a BL rect, project to the rect
+            //     boundary CLOSEST TO THE ASSIST (with 0.5 y outward
+            //     margin so SkipBlacklistedWaypoints leaves it alone),
+            //     not toward the leader. For typical rects with the
+            //     assist near an edge this lands within ~5.5 y of the
+            //     assist, triggering the leader-arrived check on
+            //     arrival. For deep-in-large-rect cases the projection
+            //     may still be > 6 y from the assist; (B) handles that
+            //     case via the pause-for-assist fallback after timeout.
             //
-            // Gate the projection on `!leaderInsideBlacklist`. When the
-            // leader is also inside the blacklist (cycle 1 of log-39: both
-            // bots at the corpse-consumption site inside the same rect),
-            // PASS THE ORIGINAL TARGET THROUGH so Navigation.Refill's
-            // Escape-first ROUTE (triggered by `player_inside_blacklist`,
-            // NOT by waypoint contents) can compute an escape on the next
-            // Update tick. Once the leader is outside, the subsequent
-            // pause→GoToOneWaypoint cycle hits the projection branch and
-            // sets a reachable target.
+            // (B) One try per CantFollow event. Already in place via
+            //     Fix 32: GoapAgent.cs:322-360 fires GoToOneWaypoint
+            //     exactly once per previousAssistCantFollow →
+            //     currentAssistCantFollow transition (not per tick
+            //     while the assist persistently CantFollows). When
+            //     AbortAssistReturn fires (TickAssistReturnTimeout at
+            //     25 s, OnPathFailed after one rewind retry, etc.),
+            //     ClearAssistReturnState sets _assistReturnActive=false
+            //     and the next FRG.Update tick enters the pause-for-
+            //     assist branch at line 891 (shouldPause &&
+            //     !_pausedByAssistDistance && !_assistReturnActive) —
+            //     leader holds position until the assist exits
+            //     CantFollow. The old retry-loop failure mode from
+            //     log-52 (80 s of repeated AssistReturn cycles after
+            //     each timeout) cannot recur because nothing here
+            //     re-triggers a fresh GoToOneWaypoint until the assist
+            //     formally exits and re-enters CantFollow.
+            //
+            // (C) Segment-clear visibility. With (A) producing a
+            //     reachable target, the pather handles segment-clear
+            //     and segment-blocked cases uniformly — clear → direct
+            //     route, blocked → detour insertion (Fix 29 + Fix H
+            //     handle persistent failures). No separate code path
+            //     needed. Adding a diagnostic log line so future log
+            //     analysis can distinguish the two cases at a glance.
             Vector3 leaderW = playerReader.WorldPos;
             Vector3 targetW = IsLikelyMapPoint(waypointToGoTo)
                 ? WorldMapAreaDB.ToWorld_FlipXY(waypointToGoTo, playerReader.WorldMapArea)
                 : waypointToGoTo;
 
-            bool leaderInsideBlacklist =
-                navigation.AreaBlacklist?.ContainsWorld(leaderW) == true;
-
-            if (!leaderInsideBlacklist)
+            if (navigation.AreaBlacklist != null
+                && navigation.AreaBlacklist.TryGetContainingRect(targetW, out var rect))
             {
-                Vector3 projectedW = navigation.ProjectOutOfBlacklist(targetW, leaderW);
-                // Only override when projection moved the target meaningfully
-                // AND the projected point is not degenerately at the leader.
-                // The leader-degeneracy guard is defensive — when leader is
-                // outside, ProjectOutOfBlacklist's iteration from target→leader
-                // must cross the rect boundary, so a real outside step is found
-                // before reaching the leader. The guard catches edge cases
-                // (target == leader, dist < 0.001 f) cleanly.
-                if (projectedW.WorldDistanceXYTo(targetW) > 0.01f &&
-                    projectedW.WorldDistanceXYTo(leaderW) > 0.01f)
-                {
-                    logger.LogWarning(
-                        $"[FRG] GoToOneWaypoint: assist target {targetW} inside " +
-                        $"blacklist; projecting to leader-side edge {projectedW} " +
-                        "(Fix 9 — unblocks assist's UpdateCantFollow exit at FFG line 1053).");
-                    waypointToGoTo = projectedW;
-                }
-            }
-            // else: leader inside blacklist — pass original target through.
-            // Refill's Escape-first will fire on the next Update tick based on
-            // player_inside_blacklist regardless of waypoint contents.
+                // Closest rect boundary to assist's actual position. Use
+                // 0.5 y outward margin so ContainsWorld (boundary-
+                // exclusive) reliably treats the projection as outside,
+                // preventing SkipBlacklistedWaypoints from popping it
+                // before the pather computes a route. The Math.Min
+                // chain selects the nearest of {west, east, south,
+                // north} edges; ties (assist on a corner) resolve in
+                // declaration order, which is fine — all four corner
+                // boundary points are equidistant.
+                float distW = targetW.X - rect.MinX;
+                float distE = rect.MaxX - targetW.X;
+                float distS = targetW.Y - rect.MinY;
+                float distN = rect.MaxY - targetW.Y;
+                float minDist = Math.Min(Math.Min(distW, distE), Math.Min(distS, distN));
+                const float outwardMargin = 0.5f;
 
-            BeginAssistReturn(waypointToGoTo);
+                Vector3 projected;
+                if (minDist == distW)
+                    projected = new Vector3(rect.MinX - outwardMargin, targetW.Y, 0f);
+                else if (minDist == distE)
+                    projected = new Vector3(rect.MaxX + outwardMargin, targetW.Y, 0f);
+                else if (minDist == distS)
+                    projected = new Vector3(targetW.X, rect.MinY - outwardMargin, 0f);
+                else
+                    projected = new Vector3(targetW.X, rect.MaxY + outwardMargin, 0f);
+
+                float distToAssist = projected.WorldDistanceXYTo(targetW);
+                logger.LogInformation(
+                    $"[FRG] Fix 33 (A): assist target {targetW} inside rect " +
+                    $"({rect.MinX:0.0},{rect.MinY:0.0})-({rect.MaxX:0.0},{rect.MaxY:0.0}); " +
+                    $"projecting to closest boundary {projected} " +
+                    $"(dist to assist={distToAssist:0.0}y, " +
+                    $"leader-arrived threshold=6.0y).");
+
+                targetW = projected;
+            }
+
+            // Fix 33 (C): diagnostic log for segment-clear vs blocked.
+            bool segmentBlocked = navigation.AreaBlacklist != null
+                && navigation.AreaBlacklist.TryGetBlockingRect(leaderW, targetW, out _);
+            if (segmentBlocked)
+            {
+                logger.LogInformation(
+                    $"[FRG] Fix 33 (C): leader→target segment crosses a BL rect — " +
+                    $"pather will detour around (Fix 29/H handle persistent rejection cycles). " +
+                    $"leader={leaderW} target={targetW}.");
+            }
+            else
+            {
+                logger.LogInformation(
+                    $"[FRG] Fix 33 (C): leader→target segment clear — " +
+                    $"pather can route directly. leader={leaderW} target={targetW}.");
+            }
+
+            BeginAssistReturn(targetW);
+            waypointToGoTo = targetW;
         }
         else
         {
@@ -1681,7 +1726,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     /// <summary>
     /// Matches the heuristic in <see cref="GoalsComponent.Navigation.SetWayPoints"/>
     /// (line 1374) for distinguishing map coords (0..100 in both X and Y) from
-    /// world coords. Local copy so Fix 9's projection can convert map→world before
+    /// world coords. Local copy so Fix 33's projection can convert map→world before
     /// blacklist checks without exposing Navigation.IsMapPoint publicly.
     /// </summary>
     private static bool IsLikelyMapPoint(Vector3 p)
