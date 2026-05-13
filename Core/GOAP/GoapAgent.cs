@@ -1062,7 +1062,7 @@ public sealed partial class GoapAgent : IDisposable
             assistIsFollowing || assistCantFollow || assistNavigating || _evadeLeaderWaiting;
 
         // assistshouldfollow gates FollowFocusGoal on the assist.
-        // Three branches keep FFG selectable:
+        // Four branches keep FFG selectable:
         //   1. evadeRecoveryActive — the authoritative override during the
         //      25 s blacklist-evade window. Throughout this window CombatGoal
         //      is precondition-blocked (evadeRecovery=false fails) and TFT
@@ -1084,15 +1084,35 @@ public sealed partial class GoapAgent : IDisposable
         //   3. Normal path — no forced-follow chat command and no recent
         //      damage. This is the steady-state "assist should follow leader
         //      because nothing else is going on."
+        //   4. Fix K-2 (log-57 09:16:29:147 assist NO PLAN: hastarget=False,
+        //      focusTargetIgnored=True, allPartyTargetsIsIgnored=True,
+        //      damagetaken=True, damagedone=False, evadeRecovery=False —
+        //      all of branches 1/2/3 failed, FFG was un-selectable, plan
+        //      resolved to NO PLAN, assist stood idle 7 s while the leader
+        //      headed off to engage the blacklisted mob via Fix 17): if
+        //      both the assist's own target and the focus's target are
+        //      IsIgnored/absent (= the existing allPartyTargetsIsIgnored
+        //      condition computed at line 1033), then the party has
+        //      nothing fightable and CombatGoal's
+        //      allPartyTargetsIsIgnored precondition is already blocking
+        //      it from firing — FFG is the correct fallback. Branch 3's
+        //      "no recent damage" guard was a proxy for "not actively
+        //      fighting"; the proxy breaks when fresh damage lingers but
+        //      no target exists (e.g., heal cast triggers Combat-flag,
+        //      then no follow-up target acquired). Falling back to FFG
+        //      lets the assist navigate to the leader's new position
+        //      rather than freeze in place.
         // Note: evadeRecoveryActive is declared earlier in this method (Fix 13
         // block, line ~846) and is still in scope here. Reusing it rather
-        // than redeclaring avoids CS0128.
+        // than redeclaring avoids CS0128. targetIgnored (line 895) and
+        // focusTargetIgnored (line 1030) are also already in scope.
         WorldState[GoapKey.assistshouldfollow] =
             leaderConnection.HasValidLeaderState &&
             !chatReader.ForcedFollow &&
             (evadeRecoveryActive ||
              assistStatusProvider.CantFollow ||
-             (!(playerCombat && dmgTaken) && !dmgDone && !dmgTaken));
+             (!(playerCombat && dmgTaken) && !dmgDone && !dmgTaken) ||
+             (targetIgnored && focusTargetIgnored));
 
         WorldState[GoapKey.partymembercombat]  = PartyMemberInCombat();
         WorldState[GoapKey.partyleadercombat]  = PartyLeaderInCombat();

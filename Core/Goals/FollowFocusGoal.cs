@@ -557,6 +557,38 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             logger.LogInformation("[FFG] OnExit: stopping navigation.");
             navigation.Stop();
+
+            // Fix K-1 (log-57 09:16:29:147 → 09:16:36:165 assist held the
+            // forward key for 7 s during NO PLAN, traveling ~54 y SW past
+            // the leader's intended position because FFG.OnExit halted
+            // navigation logic but never released the held Forward key):
+            //
+            // navigation.Stop() (Navigation.cs:1431-1453) clears nav state,
+            // routes, and stuckDetector ownership, but does NOT call
+            // input.StopForward — that's the dedicated StopMovement()
+            // method at Navigation.cs:1455-1458, which Stop() doesn't
+            // invoke. The explicit prior-art comment at
+            // FollowRouteGoal.cs:997-1002 documents this same gotcha:
+            // "PausePathing/Stop suspend navigation and stop steering
+            // (left/right keys) but do NOT release the forward movement
+            // key — without StopMovement() the character keeps running
+            // forward at walking speed into obstacles."
+            //
+            // The existing input.StepBackwards() at line 553 above presses
+            // Backward for 100 ms then releases. In WoW's input model
+            // pressing Backward briefly cancels forward motion, but once
+            // Backward is released the Forward key state is still down and
+            // the bot resumes running. That's why log-57 shows zero
+            // movement-key log lines on the assist between 28:339 and
+            // 36:613 yet the bot moved 54 y — Forward was held
+            // continuously the whole time.
+            //
+            // OnEnter at line 514-515 already defensively releases Forward
+            // on entry. Mirror that here so OnExit is symmetric and the
+            // assist actually halts when navigation ends due to a plan
+            // change (Combat preemption, NO PLAN, etc.).
+            if (input.IsKeyDown(input.ForwardKey))
+                input.StopForward(true);
         }
 
         if (_navState != NavState.CantFollow)
