@@ -1000,6 +1000,69 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 string reason = !_rendezvousConfirmed
                     ? "closing gap to confirm rendezvous"
                     : "not yet Following";
+
+                // Fix O (log-60 12:49:36:227-12:49:36:659 oscillation, ~30ms-per-cycle
+                // Idle ↔ NavigatingToLeader flip escalating to CantFollow in ~150ms via
+                // SetWaypointLoopGuarded):
+                //
+                // When the leader is at the BL rect boundary (within the 6y inflated
+                // zone), ComputeFollowTargetWorldPos's projection (line 2054-2089)
+                // caps the candidate ~6y from the rect's strict edge. In log-60 the
+                // leader was at <950.43, 271.91> — 2y west of MinX=952.39, well
+                // inside the 6y inflated zone — and the projection produced targets
+                // like <946.23, 272.26>, only 3.4y from the assist at <942.40, 272.17>.
+                //
+                // Navigation's wpAlreadyReached threshold (3.55y, just under
+                // POP_DIST=3.60y) pops such a waypoint within ~93ms of being set,
+                // firing OnWayPointReached → co-located branch (line 2790-2838) →
+                // _rendezvousConfirmed=true → NavState=Idle. The very next UpdateIdle
+                // tick clears rendezvous (leader.Status != Patrolling — line 925) and
+                // falls into this dead-band navigate branch, which issues the SAME
+                // SetWaypoint to the same boundary target, popped again, etc.
+                //
+                // The oscillation cannot proceed because the projection target is
+                // geometrically as close as the BL constraint allows. There is nothing
+                // to navigate toward. SetWaypointLoopGuarded eventually escalates to
+                // CantFollow (10 stationary sets, 100ms window), which triggers
+                // PhysicalUnstuck (no-op — assist isn't stuck), Fix I-1 leader-AssistReturn
+                // (leader navigates to the assist's "stuck" position where it's already
+                // standing), and a multi-second recovery cycle.
+                //
+                // Fix: detect the projection-boundary case here, before calling
+                // StartNavigatingToLeader. If the would-be target is within POP_DIST
+                // of the assist, accept the position as a stable boundary — post
+                // Following (parity with OnWayPointReached's co-located branch at
+                // line 2831 which also sets Following) and remain Idle without
+                // setting a waypoint. When the leader later moves further from BL
+                // (or out of the inflated zone entirely), wouldBeDist becomes
+                // > POP_DIST and this guard releases — StartNavigatingToLeader fires
+                // normally.
+                //
+                // Crucially, we do NOT set _rendezvousConfirmed=true here. Setting
+                // it would cause UpdateIdle's "clearing rendezvous" branch (line 925)
+                // to fire on the next tick — same source of oscillation we are
+                // trying to break, just via a different path. With rendezvous staying
+                // false, the next UpdateIdle re-enters this same dead-band branch,
+                // hits the guard again, stays silent (status already Following so the
+                // log is gated).
+                Vector3 wouldBeTarget = GetNavigationTarget(leader);
+                float wouldBeDist = playerReader.WorldPos.WorldDistanceXYTo(wouldBeTarget);
+                if (wouldBeDist < Navigation.POP_DIST)
+                {
+                    if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+                    {
+                        logger.LogInformation(
+                            $"[FFG] Dead-band ({dist:0.0}y): would-be target {wouldBeTarget} " +
+                            $"co-located ({wouldBeDist:0.0}y < {Navigation.POP_DIST}y) — " +
+                            $"projection at BL boundary, posting Following and holding Idle " +
+                            $"to avoid SetWaypoint/pop oscillation. " +
+                            $"Reason was: {reason}.");
+                        assistStatusProvider.CurrentStatus = BotStatus.Following;
+                        assistStatusProvider.CantFollow = false;
+                    }
+                    return;
+                }
+
                 logger.LogInformation(
                     $"[FFG] Dead-band ({dist:0.0}y) — {reason}.");
                 StartNavigatingToLeader(leader);

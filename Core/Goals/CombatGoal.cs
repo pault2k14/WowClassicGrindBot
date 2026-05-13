@@ -513,11 +513,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         //     currentTargetIsIgnored=false at line 325.
         //
         // Detection conditions match GoapAgent Fix L exactly:
-        //   - AssistFocus mode only
+        //   - isPartyMode (PartyLeader OR AssistFocus) — log-60 expansion;
+        //     previously AssistFocus-only, but the leader needs the same
+        //     mirror when the assist is in Fix 17 self-defense
         //   - focusTargetIsIgnored (raw IsIgnored map says yes)
         //   - bits.FocusTarget() (focus has a target)
         //   - bits.FocusTarget_Combat() (focus target is in combat — only
-        //     happens via leader-side Fix 17 for IsIgnored targets)
+        //     happens via partner's Fix 17 for IsIgnored targets)
         //   - FocusTargetGuid != 0 (defensive)
         //   - !assistStatusProvider.EvadeRecoveryActive (preserve the
         //     "retreat during recovery" intent; only activate after
@@ -527,25 +529,25 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         //   - Always flip focusTargetIsIgnored=false when conditions hold,
         //     so Case 2 fires (initial swap) and Case 3 doesn't fire
         //     (subsequent ticks)
-        //   - If assist's current target ALSO equals focus target (post-swap),
-        //     additionally flip currentTargetIsIgnored=false for runtime
-        //     consistency with leader-side Fix 17
+        //   - If this bot's current target ALSO equals focus target
+        //     (post-swap), additionally flip currentTargetIsIgnored=false
+        //     for runtime consistency with Fix 17 (line 325)
         //   - Log once per new GUID activation (_partyAssistMirrorGuid latch)
         //
         // FFG projection NOT changed: CombatGoal uses direct Approach key
         // presses (line ~570 PressApproachOnCooldown) which bypass FFG
-        // entirely. The assist physically walks into BL alongside the
-        // leader while Combat runs. When the mob dies, CombatGoal exits
+        // entirely. The bot physically walks into BL alongside the
+        // partner while Combat runs. When the mob dies, CombatGoal exits
         // naturally, plan returns to FFG, FFG's projection re-engages,
         // and the assist navigates back out of BL.
-        if (classConfig.Mode == Mode.AssistFocus &&
+        if (isPartyMode &&
             focusTargetIsIgnored &&
             bits.FocusTarget() &&
             bits.FocusTarget_Combat() &&
             playerReader.FocusTargetGuid != 0 &&
             !assistStatusProvider.EvadeRecoveryActive)
         {
-            bool assistTargetMatchesFocus =
+            bool thisBotTargetMatchesFocus =
                 bits.Target() &&
                 playerReader.TargetGuid != 0 &&
                 playerReader.TargetGuid == playerReader.FocusTargetGuid;
@@ -556,16 +558,16 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 logger.LogInformation(
                     $"[CombatGoal] Fix L party-assist override (mirror): focus target " +
                     $"guid={playerReader.FocusTargetGuid} is on IsIgnored but the " +
-                    $"leader (focus) is in combat with it. Flipping " +
-                    $"focusTargetIsIgnored=false" +
-                    (assistTargetMatchesFocus
-                        ? $" AND currentTargetIsIgnored=false (assist target matches focus post-swap)"
-                        : $" (assist target guid={playerReader.TargetGuid} doesn't match focus yet — Case 2 swap will fire next)") +
-                    $" so Case 2 can swap and Case 3 won't bail.");
+                    $"partner ({(classConfig.Mode == Mode.PartyLeader ? "assist" : "leader")}) " +
+                    $"is in combat with it. Flipping focusTargetIsIgnored=false" +
+                    (thisBotTargetMatchesFocus
+                        ? $" AND currentTargetIsIgnored=false (this bot's target matches focus post-swap)"
+                        : $" (this bot's target guid={playerReader.TargetGuid} doesn't match focus yet — Case 2 swap will fire next)") +
+                    $" so Case 2 can swap and Case 3 won't bail. (Mode={classConfig.Mode})");
             }
 
             focusTargetIsIgnored = false;
-            if (assistTargetMatchesFocus)
+            if (thisBotTargetMatchesFocus)
             {
                 currentTargetIsIgnored = false;
             }
