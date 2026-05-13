@@ -459,6 +459,80 @@ public sealed partial class GoapAgent : IDisposable
                 }
             }
 
+            // Fix J (log-56 01:32:08:357 leader auto-blacklisted guid=279717
+            // via base-library "AreaBlacklistMob on attack!" path, but
+            // _evadeRecoveryUntilUtc was never set — Fix 17 self-defense
+            // override fired at 01:32:19:719 and the leader engaged the
+            // blacklisted mob; assist's Fix 17 fired at 01:32:28:856 and
+            // assist killed the blacklisted mob at 01:32:38:253; entire
+            // sequence had evadeRecovery=false on both bots): mirror the
+            // assist's diff loop above (line 441-460) on the leader side.
+            //
+            // The leader's blacklist additions come from multiple paths:
+            //   (1) Goal-side dispatch — ApproachTargetGoal.cs (lines 270,
+            //       303, 334, 494, 647) and CombatGoal.cs (lines 441, 470,
+            //       524, 1016) call SendGoapEvent(new EvadeBlacklistEvent(guid))
+            //       BEFORE playerReader.IgnoreTarget — these properly start
+            //       the recovery window.
+            //   (2) Base-library auto-blacklist — Core.BlacklistTarget
+            //       class's "AreaBlacklistMob on attack!" trigger calls
+            //       playerReader.IgnoreTarget directly when the bot is
+            //       attacked by a mob in an area-blacklist rect. NO
+            //       EvadeBlacklistEvent is dispatched. The Adhoc "Blacklist
+            //       Target" plan that follows is a key-press goal (F10 macro
+            //       to broadcast via chat), not an event dispatcher.
+            //
+            // Without (2) being covered: _evadeRecoveryUntilUtc stays at
+            // MinValue, GoapKey.evadeRecovery stays false, Fix 17's
+            // !EvadeRecoveryActive gate never trips, and the bot re-engages
+            // the blacklisted mob the moment it attacks again. The
+            // leaderNavProvider.AddBlacklistedMobGuid call inside
+            // HandleGoapEvent's leader branch (line ~1215) also never
+            // executes, so the assist's API-diff loop (line 444) never sees
+            // the guid — both bots end up engaging.
+            //
+            // Detection: a guid is in playerReader.IsIgnored AND not in
+            // _knownBlacklistedGuids. Path (1) adds the guid to
+            // _knownBlacklistedGuids inside HandleGoapEvent (line ~1205)
+            // BEFORE this diff sees it next tick, so path (1) never triggers
+            // a duplicate dispatch. Path (2) bypasses _knownBlacklistedGuids
+            // entirely — this loop catches that and dispatches the missing
+            // event. Checks target and focusTarget; auto-blacklist most
+            // commonly hits the current target, but focusTarget is also
+            // possible (e.g., the leader's current focus changes to an
+            // area-blacklisted mob).
+            if (classConfig.Mode == Mode.PartyLeader)
+            {
+                int leaderTargetGuid = playerReader.TargetGuid;
+                int leaderFocusTargetGuid = playerReader.FocusTargetGuid;
+
+                if (leaderTargetGuid != 0
+                    && playerReader.IsIgnored(leaderTargetGuid)
+                    && !_knownBlacklistedGuids.Contains(leaderTargetGuid))
+                {
+                    logger.LogInformation(
+                        $"[GoapAgent] Fix J: leader-side auto-blacklist detected — " +
+                        $"target guid={leaderTargetGuid} is in IsIgnored but absent " +
+                        $"from _knownBlacklistedGuids (no prior EvadeBlacklistEvent). " +
+                        $"Dispatching event to start 25s recovery window and " +
+                        $"API-broadcast to assist.");
+                    HandleGoapEvent(new EvadeBlacklistEvent(leaderTargetGuid));
+                }
+
+                if (leaderFocusTargetGuid != 0
+                    && leaderFocusTargetGuid != leaderTargetGuid
+                    && playerReader.IsIgnored(leaderFocusTargetGuid)
+                    && !_knownBlacklistedGuids.Contains(leaderFocusTargetGuid))
+                {
+                    logger.LogInformation(
+                        $"[GoapAgent] Fix J: leader-side auto-blacklist detected — " +
+                        $"focusTarget guid={leaderFocusTargetGuid} is in IsIgnored but " +
+                        $"absent from _knownBlacklistedGuids. Dispatching " +
+                        $"EvadeBlacklistEvent.");
+                    HandleGoapEvent(new EvadeBlacklistEvent(leaderFocusTargetGuid));
+                }
+            }
+
             // ── Fix 15 + Fix 16: per-tick blacklist memory refresh ───────────
             //
             // Original Fix 15 motivation (caster cycle, session 49): caster mob
