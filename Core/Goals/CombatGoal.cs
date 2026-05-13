@@ -68,6 +68,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     // or override conditions no longer hold).
     private int _combatOverrideGuid;
 
+    // Fix L (log-58 10:12:22:148 → 10:12:36:305 leader engaging blacklisted
+    // 311297 alone via Fix 17, assist stood at projection boundary X~946 for
+    // 14 s and did not participate): latch for the party-assist override
+    // mirror, paired with GoapAgent._partyAssistOverrideGuid. Holds the
+    // focus-target GUID currently being engaged via the party-assist path
+    // (= the leader's blacklisted target, as resolved through the focus
+    // chain). Used purely to gate log output to once-per-activation,
+    // matching the existing _combatOverrideGuid / _selfDefenseOverrideGuid
+    // pattern. The two flips (focusTargetIsIgnored, currentTargetIsIgnored
+    // when target matches focus) fire on every tick the override conditions
+    // hold; only the log message is suppressed by this latch.
+    private int _partyAssistMirrorGuid;
+
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
         ClassConfiguration classConfiguration, ClassConfiguration classConfig,
@@ -398,6 +411,112 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 $"playerCombat={bits.Combat()} dmgTaken={combatLog.DamageTakenCount()} " +
                 $"targetTarget={playerReader.TargetTarget} evadeRecovery={assistStatusProvider.EvadeRecoveryActive}.");
             _combatOverrideGuid = 0;
+        }
+
+        // Fix L party-assist runtime mirror (log-58 10:12:22:148 → 10:12:36:305:
+        // leader engaging blacklisted 311297 via Fix 17 from 10:12:22:590 onwards;
+        // assist held at projection boundary <945, 270>, never engaged the mob,
+        // 0 Target Changed events, 0 Fix 17 messages — user observed and asked
+        // "shouldn't the assist also be able to attack the blacklisted mob"):
+        //
+        // Paired with GoapAgent's Fix L block (see line ~1044). GoapAgent's flip
+        // unblocks the planner-level allPartyTargetsIsIgnored precondition so
+        // Combat plan can be selected; this CombatGoal flip unblocks the
+        // runtime-level Case 2 (line ~417) swap-to-focus-target AND Case 3
+        // (line 403) bail. Both are needed:
+        //
+        //   - Without this CombatGoal flip on the FIRST tick: local
+        //     focusTargetIsIgnored=true (raw IsIgnored read at line 236)
+        //     → Case 3 bails immediately on the very first Update tick
+        //     after OnEnter, presses StopAttack+ClearTarget, plan re-
+        //     evaluates, Combat selected again (GoapAgent's Fix L still
+        //     holding), OnEnter again, Case 3 bails again — Combat ↔
+        //     bail oscillation, same failure mode as the original Fix 17
+        //     diagnosed in log-44 / fixed at line 314 above.
+        //
+        //   - On SUBSEQUENT ticks after Case 2 swaps the assist's target
+        //     to the focus's target (= the blacklisted mob): the assist
+        //     now has TargetGuid == FocusTargetGuid, both IsIgnored. If
+        //     we only flip focusTargetIsIgnored but not currentTargetIsIgnored,
+        //     Case 3 (currentTargetIsIgnored && (focusTargetIsIgnored ||
+        //     !isPartyMode)) — after our flip Case 3 evaluates to
+        //     (true && (false || false)) = false → Case 3 doesn't fire,
+        //     fall through to normal combat. BUT Case 1 (the standard
+        //     combat path) checks currentTargetIsIgnored downstream too
+        //     in some sub-paths (e.g. the evade-broadcast at line ~435).
+        //     Flipping currentTargetIsIgnored when target matches focus
+        //     keeps the runtime consistent with "this target is fightable
+        //     via party-assist", parallel to leader-side Fix 17 flipping
+        //     currentTargetIsIgnored=false at line 325.
+        //
+        // Detection conditions match GoapAgent Fix L exactly:
+        //   - AssistFocus mode only
+        //   - focusTargetIsIgnored (raw IsIgnored map says yes)
+        //   - bits.FocusTarget() (focus has a target)
+        //   - bits.FocusTarget_Combat() (focus target is in combat — only
+        //     happens via leader-side Fix 17 for IsIgnored targets)
+        //   - FocusTargetGuid != 0 (defensive)
+        //   - !assistStatusProvider.EvadeRecoveryActive (preserve the
+        //     "retreat during recovery" intent; only activate after
+        //     recovery elapses)
+        //
+        // Behavior:
+        //   - Always flip focusTargetIsIgnored=false when conditions hold,
+        //     so Case 2 fires (initial swap) and Case 3 doesn't fire
+        //     (subsequent ticks)
+        //   - If assist's current target ALSO equals focus target (post-swap),
+        //     additionally flip currentTargetIsIgnored=false for runtime
+        //     consistency with leader-side Fix 17
+        //   - Log once per new GUID activation (_partyAssistMirrorGuid latch)
+        //
+        // FFG projection NOT changed: CombatGoal uses direct Approach key
+        // presses (line ~570 PressApproachOnCooldown) which bypass FFG
+        // entirely. The assist physically walks into BL alongside the
+        // leader while Combat runs. When the mob dies, CombatGoal exits
+        // naturally, plan returns to FFG, FFG's projection re-engages,
+        // and the assist navigates back out of BL.
+        if (classConfig.Mode == Mode.AssistFocus &&
+            focusTargetIsIgnored &&
+            bits.FocusTarget() &&
+            bits.FocusTarget_Combat() &&
+            playerReader.FocusTargetGuid != 0 &&
+            !assistStatusProvider.EvadeRecoveryActive)
+        {
+            bool assistTargetMatchesFocus =
+                bits.Target() &&
+                playerReader.TargetGuid != 0 &&
+                playerReader.TargetGuid == playerReader.FocusTargetGuid;
+
+            if (_partyAssistMirrorGuid != playerReader.FocusTargetGuid)
+            {
+                _partyAssistMirrorGuid = playerReader.FocusTargetGuid;
+                logger.LogInformation(
+                    $"[CombatGoal] Fix L party-assist override (mirror): focus target " +
+                    $"guid={playerReader.FocusTargetGuid} is on IsIgnored but the " +
+                    $"leader (focus) is in combat with it. Flipping " +
+                    $"focusTargetIsIgnored=false" +
+                    (assistTargetMatchesFocus
+                        ? $" AND currentTargetIsIgnored=false (assist target matches focus post-swap)"
+                        : $" (assist target guid={playerReader.TargetGuid} doesn't match focus yet — Case 2 swap will fire next)") +
+                    $" so Case 2 can swap and Case 3 won't bail.");
+            }
+
+            focusTargetIsIgnored = false;
+            if (assistTargetMatchesFocus)
+            {
+                currentTargetIsIgnored = false;
+            }
+        }
+        else if (_partyAssistMirrorGuid != 0)
+        {
+            logger.LogInformation(
+                $"[CombatGoal] Fix L party-assist override mirror cleared (was " +
+                $"guid={_partyAssistMirrorGuid}). Reason: " +
+                $"focusTargetIgnored={focusTargetIsIgnored} " +
+                $"focusHasTarget={bits.FocusTarget()} " +
+                $"focusTargetCombat={bits.FocusTarget_Combat()} " +
+                $"evadeRecovery={assistStatusProvider.EvadeRecoveryActive}.");
+            _partyAssistMirrorGuid = 0;
         }
 
         if (currentTargetIsIgnored && (focusTargetIsIgnored || !isPartyMode))

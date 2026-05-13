@@ -119,6 +119,18 @@ public sealed partial class GoapAgent : IDisposable
     // rather than every GOAP tick. Reset to 0 when no override is active.
     private int _selfDefenseOverrideGuid;
 
+    // Fix L (log-58 10:12:22:148 onwards): latch for the party-assist
+    // override, mirroring _selfDefenseOverrideGuid above. When the focus
+    // (= leader in AssistFocus mode) is engaging an IsIgnored target,
+    // we flip focusTargetIgnored=false at the planner level so the assist's
+    // CombatGoal precondition allPartyTargetsIsIgnored=false is met. The
+    // latch holds the focus-target GUID currently overridden — used purely
+    // to gate the log message so it fires once per activation rather than
+    // every tick. Behavior is the same on every tick the override conditions
+    // hold; the latch only suppresses log spam (matching the existing Fix 17
+    // pattern at line 1014-1023 above).
+    private int _partyAssistOverrideGuid;
+
     private bool active;
     public bool Active
     {
@@ -1028,6 +1040,74 @@ public sealed partial class GoapAgent : IDisposable
         }
 
         bool focusTargetIgnored = IsTargetIgnoredOrAbsent(b.FocusTarget(), playerReader.FocusTargetGuid);
+
+        // Fix L (log-58 10:12:22:148 onwards: leader engaging blacklisted
+        // 311297 via Fix 17 self-defense from 10:12:22:590 onwards, but
+        // assist's CombatGoal blocked by allPartyTargetsIsIgnored=true
+        // precondition; assist stood near the rect edge for 14 s while
+        // leader fought alone — user observed and asked "shouldn't the
+        // assist also be able to attack the blacklisted mob"): party-assist
+        // override at the planner level, mirroring the leader's Fix 17
+        // self-defense (block at line 1006-1037 above) but triggered through
+        // the focus chain rather than the bot's own target.
+        //
+        // Detection (AssistFocus only): the focus's (= leader's) target is
+        // IsIgnored AND in combat. The only path that puts an IsIgnored
+        // target into combat is the leader's Fix 17 self-defense — so this
+        // reliably signals "leader has committed to engaging a blacklisted
+        // mob, retreat has failed".
+        //
+        // Effect: flip focusTargetIgnored=false locally. This makes
+        //   allPartyTargetsIsIgnored = targetIgnored && focusTargetIgnored
+        //                            = (anything) && false = false
+        // CombatGoal's AssistFocus precondition (CombatGoal.cs:106) is then
+        // satisfied, the planner selects Combat, and CombatGoal's Case 2
+        // (line ~417) swaps the assist's target to the leader's via
+        // TargetFocus + TargetOfTarget. From there, the CombatGoal-side
+        // Fix L mirror keeps the assist engaged through Case 3 by also
+        // flipping currentTargetIsIgnored after the swap.
+        //
+        // !evadeRecoveryActive: during the 25 s recovery window, this
+        // override does NOT fire. The design intent during recovery
+        // (CombatGoal.cs:101-106 "FFG continues retreat") is preserved.
+        // Only after recovery elapses — when the leader's own Fix 17 has
+        // already committed to engagement — does the assist join.
+        //
+        // Latched via _partyAssistOverrideGuid for log-once-per-activation
+        // (matching Fix 17's _selfDefenseOverrideGuid pattern at line ~1014).
+        // The flip itself fires every tick the conditions hold; only the
+        // log message is gated.
+        if (classConfig.Mode == Mode.AssistFocus &&
+            focusTargetIgnored &&
+            b.FocusTarget() &&
+            b.FocusTarget_Combat() &&
+            playerReader.FocusTargetGuid != 0 &&
+            !evadeRecoveryActive)
+        {
+            focusTargetIgnored = false;
+            if (_partyAssistOverrideGuid != playerReader.FocusTargetGuid)
+            {
+                _partyAssistOverrideGuid = playerReader.FocusTargetGuid;
+                logger.LogInformation(
+                    $"[GoapAgent] Fix L party-assist override: focus target " +
+                    $"guid={playerReader.FocusTargetGuid} is on IsIgnored map but " +
+                    $"the leader is in combat with it (leader-side Fix 17 active). " +
+                    $"Flipping focusTargetIgnored=false so the assist's CombatGoal " +
+                    $"precondition allPartyTargetsIsIgnored=false is met.");
+            }
+        }
+        else if (_partyAssistOverrideGuid != 0 && classConfig.Mode == Mode.AssistFocus)
+        {
+            logger.LogInformation(
+                $"[GoapAgent] Fix L party-assist override cleared (was " +
+                $"guid={_partyAssistOverrideGuid}). Conditions no longer hold: " +
+                $"focusTargetIgnored={focusTargetIgnored}, " +
+                $"focusHasTarget={b.FocusTarget()}, " +
+                $"focusTargetCombat={b.FocusTarget_Combat()}, " +
+                $"evadeRecovery={evadeRecoveryActive}.");
+            _partyAssistOverrideGuid = 0;
+        }
+
         WorldState[GoapKey.targetIsIgnored]          = targetIgnored;
         WorldState[GoapKey.focusTargetIsIgnored]     = focusTargetIgnored;
         WorldState[GoapKey.allPartyTargetsIsIgnored] = targetIgnored && focusTargetIgnored;
