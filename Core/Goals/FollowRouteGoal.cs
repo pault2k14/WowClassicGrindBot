@@ -537,23 +537,32 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     break;
 
                 case GoapKey.assistrequestreturn:
-                    // Fires when store transitions to AnyAssistCantFollow = true.
+                    // Fix 32: per user direction the leader no longer
+                    // navigates toward a CantFollow assist. The event still
+                    // fires when the store transitions to AnyAssistCantFollow=true
+                    // — log it for visibility, but take no movement action.
+                    // The same-tick pause-for-assist gate in UpdateActions
+                    // handles pausing patrol (its ShouldLeaderPauseForAssist
+                    // call returns true on any CantFollow assist, regardless
+                    // of distance). The assist resolves its own CantFollow
+                    // via FFG's active-escape state machine.
+                    //
+                    // Previous behavior: GoToOneWaypoint(cantFollow.MapPosNoZ)
+                    // began an AssistReturn navigation here. Removed: in
+                    // log-52 that produced an 80-second deadlock loop with
+                    // the leader repeatedly navigating to projected points
+                    // ~22 y from the actual assist (geometrically unable to
+                    // satisfy CantFollow's leader-arrived condition).
                     if (assistStateStore.AnyAssistCantFollow())
                     {
                         AssistState? cantFollow = assistStateStore.GetCantFollowState();
                         if (cantFollow != null)
                         {
                             logger.LogInformation(
-                                $"[FRG] OnGoapEvent assistrequestreturn — navigating to assist at " +
-                                $"({cantFollow.MapX:0.00},{cantFollow.MapY:0.00})");
-
-                            if (_assistReturnActive)
-                            {
-                                logger.LogInformation("[FRG] OnGoapEvent: AssistReturn already active — ignoring.");
-                                break;
-                            }
-
-                            GoToOneWaypoint(cantFollow.MapPosNoZ);
+                                $"[FRG] OnGoapEvent assistrequestreturn — assist at " +
+                                $"({cantFollow.MapX:0.00},{cantFollow.MapY:0.00}). " +
+                                $"Leader will hold position (no AssistReturn); " +
+                                $"assist runs its own active-escape sequence.");
                         }
                     }
                     break;
@@ -917,17 +926,56 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     sideActivityManualReset.Reset();
                     targetFinder.Reset();
 
-                    // If assist is CantFollow, navigate to them.
-                    if (assistCantFollow && !_assistReturnActive)
-                    {
-                        AssistState? cantFollow = assistStateStore.GetCantFollowState();
-                        if (cantFollow != null)
-                        {
-                            logger.LogInformation(
-                                $"[FRG] Assist is CantFollow — navigating to ({cantFollow.MapX:0.00},{cantFollow.MapY:0.00})");
-                            GoToOneWaypoint(cantFollow.MapPosNoZ);
-                        }
-                    }
+                    // Fix 32 (log-52 17:38:42 → end-of-log, redesign per user
+                    // direction): the previous behavior here was to call
+                    // GoToOneWaypoint(cantFollow.MapPosNoZ) — an AssistReturn
+                    // navigation to the assist's position projected to the
+                    // leader-side edge of the BL rect. In log-52 that produced
+                    // an 80-second loop alternating between AssistReturn
+                    // timeouts and immediate retries, with neither bot moving
+                    // toward the other (the projected target was just outside
+                    // the rect but ~22 y from the actual assist, geometrically
+                    // unable to satisfy the CantFollow leader-arrived
+                    // condition).
+                    //
+                    // New design: the leader STAYS PUT when assist is
+                    // CantFollow. Per user: "as long as the leader is not in
+                    // a blacklisted area, they should stay where they are.
+                    // If they are in a blacklisted area they need to move
+                    // out. Under no circumstances should the leader or
+                    // assist 'go on patrol' again before they reunite, if
+                    // they are unable to reunite pausing indefinitely is fine."
+                    //
+                    // Inside-BL escape is already handled — the `shouldPause`
+                    // expression at the start of this block has a
+                    // `!insideBlacklist` clause, so this entire pause-for-
+                    // assist branch is SKIPPED when the leader is inside a
+                    // BL rect. Navigation stays active in that case and
+                    // Navigation.RefillWaypoints's escape-first (the
+                    // TryComputeEscapeOutOfBlacklist call at Navigation.cs:2490)
+                    // fires to walk the leader out of the rect. Once the
+                    // leader is outside, this pause branch fires (assist
+                    // still CantFollow → ShouldLeaderPauseForAssist still
+                    // returns true) and the leader stops.
+                    //
+                    // Combat self-defense continues to work: Fix 17/22/26 in
+                    // CombatGoal/GoapAgent override IsIgnored on any attacker
+                    // hitting the leader, switching the plan to Combat
+                    // regardless of FRG's pause state. After combat, FRG
+                    // re-enters, the same pause condition is re-evaluated,
+                    // and the leader returns to the held position (or close
+                    // enough — combat movement is unavoidable).
+                    //
+                    // The assist resolves CantFollow via FFG's active-escape
+                    // state machine (10y/20y/30y projection away from rect
+                    // center, then LastSafeAnchor, then physical unstuck).
+                    // On success it returns to NavigatingToLeader, status
+                    // eventually flips to Following, and
+                    // ShouldLeaderResumePatrol fires (it already requires
+                    // all assists to be Following before returning true,
+                    // line 176-177 of AssistStateStore). The leader then
+                    // takes the !shouldPause && shouldResume && _pausedByAssistDistance
+                    // branch below and Resume()s patrol normally.
                 }
                 else if (!shouldPause && shouldResume && _pausedByAssistDistance)
                 {
@@ -1202,6 +1250,26 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
 
         if (_pausedByAssistDistance || _syncPauseActive)
+            return;
+
+        // Fix 32 — also gate on AnyAssistCantFollow. The pause-for-assist
+        // block at line ~870 has a `!insideBlacklist` clause on its
+        // shouldPause expression, so when the leader is inside a BL rect
+        // AND an assist is CantFollow, the pause block is skipped:
+        // _pausedByAssistDistance stays false. Without this gate, the
+        // side target-finding thread would resume while the leader is
+        // walking out of the rect via Navigation's escape-first, and
+        // could acquire a target mid-escape — pulling the leader into
+        // combat instead of completing the escape. Per user direction
+        // during rescue mode: "neither should be actively looking for
+        // targets to fight."
+        //
+        // Self-defense remains unaffected: it does not depend on the
+        // side target-finding thread (which is for proactive Tab-target
+        // acquisition). Fix 17/22/26's override path keys off the
+        // already-targeted attacker hitting the bot (TargetTarget=Me),
+        // independent of this thread's state.
+        if (assistStateStore.AnyAssistCantFollow())
             return;
 
         sideActivityManualReset.Set();

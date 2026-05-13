@@ -190,6 +190,73 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private DateTime _navStateEnteredUtc;
 
     // -----------------------------------------------------------------------
+    // Fix 32 — CantFollow active-escape state machine
+    // -----------------------------------------------------------------------
+    // Log-52 17:38:41 → end-of-log: assist entered CantFollow at
+    // <952.14, 293.63> (0.26 y west of std rect edge X=952.4, inside the
+    // 6 y inflated zone where path-finding to the leader fails). The old
+    // CantFollow was a pure hold-state — wait for the leader to arrive
+    // within LeaderArrivedYards (6 y) or for the 120 s CantFollowTimeoutSec
+    // to fire. Both fail in the log-52 geometry: the leader can't get
+    // within 6 y because the segment leader→assist crosses BL interior,
+    // and 120 s of holding doesn't change the assist's position so the
+    // post-timeout retry hits the same loop guard immediately.
+    //
+    // Active escape: when entering CantFollow, the assist runs an
+    // escape sequence to physically move out of the inflated-BL sliver:
+    //   1. Projection10 — set a single waypoint 10 y from current
+    //      position, directed AWAY from the nearest rect's center.
+    //      Navigation drives the assist toward it. 3 s budget per phase.
+    //   2. Projection20, Projection30 — same, larger radii. Used if the
+    //      previous projection's target was itself blacklisted or if the
+    //      assist arrived but is still in the inflated-BL zone.
+    //   3. LastSafeAnchor — navigate to navigation.LastSafeAnchorW (the
+    //      most recent confirmed-outside-BL position), if it's
+    //      currently outside any rect.
+    //   4. PhysicalUnstuck — invoke navigation.TryPhysicalUnstuck()
+    //      (jump + reverse + jump + jump + reverse, ~1.4 s blocking).
+    //      Re-enters Projection10 once after this.
+    //   5. Exhausted — held position. Wait for the existing 120 s
+    //      CantFollowTimeoutSec retry, or for the leader to arrive
+    //      within 6 y. Per user direction: "if they are unable to
+    //      reunite, pausing indefinitely is fine."
+    //
+    // Exit on every tick: if a path from current position to the leader
+    // no longer crosses any BL rect, exit CantFollow and start a normal
+    // NavigatingToLeader. This is the natural reunite condition — the
+    // assist may also exit via the existing leader-within-6 y check or
+    // the 120 s timeout, both unchanged.
+    private enum CantFollowEscapePhase
+    {
+        NotStarted,
+        Projection10,
+        Projection20,
+        Projection30,
+        LastSafeAnchor,
+        PhysicalUnstuck,
+        Exhausted
+    }
+    private CantFollowEscapePhase _escapePhase = CantFollowEscapePhase.NotStarted;
+    private DateTime _escapePhaseStartUtc;
+    private Vector3 _escapePhaseStartPos;
+    private Vector3 _escapeTargetW;
+    private bool _escapeUnstuckUsed;
+    // Per-phase budget. 3 s is enough for navigation to either reach a
+    // 10-30 y target on flat terrain or determine that it's stuck and
+    // we should escalate. LastSafeAnchor gets a larger budget because
+    // it can be at a more-or-less arbitrary distance.
+    private const double EscapeProjectionPhaseSec = 3.0;
+    private const double EscapeAnchorPhaseSec = 8.0;
+    // Considered "arrived" when within this distance of the escape target.
+    // Generous because the target is just a direction-hint waypoint, not
+    // a meaningful endpoint — once the assist moves close, we re-plan.
+    private const float EscapeArrivalYards = 3.5f;
+    // Per phase, minimum displacement to count as "made progress". Below
+    // this, even if the phase timer hasn't elapsed, we treat the phase
+    // as stuck and may consider escalating earlier.
+    private const float EscapeMinProgressYards = 1.5f;
+
+    // -----------------------------------------------------------------------
     // Leader position tracking
     // -----------------------------------------------------------------------
     /// <summary>Last leader world position we navigated toward (for waypoint update threshold).</summary>
@@ -447,6 +514,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // Remain in CantFollow across plan cycles — the assist should not start
             // moving just because another goal briefly preempted us.
             logger.LogInformation("[FFG] OnEnter: resuming CantFollow state.");
+
+            // Fix 31: defensive Stop() — another goal (e.g., CombatGoal)
+            // may have been active during the brief preemption and started
+            // navigation. Per-tick Stop() in UpdateCantFollow was removed
+            // (see comment block there), so this is the only place that
+            // re-asserts the "navigation stopped while CantFollow" invariant
+            // on plan-cycle re-entry. Stop() is idempotent — if navigation
+            // is already stopped, this is a single redundant log line per
+            // re-entry rather than per tick.
+            navigation.Stop();
+
+            // Fix 32 — reset the escape state machine. Whatever escape
+            // phase we were in before the preemption, the post-preemption
+            // position may be different (Combat moved us, etc.), so the
+            // old target waypoint is stale. Restart from Projection10 to
+            // pick a fresh direction from the current position.
+            ResetEscapeState();
         }
     }
 
@@ -1175,37 +1259,81 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     }
 
     // -----------------------------------------------------------------------
-    // State: CantFollow — hold position, wait for leader to arrive
+    // State: CantFollow — actively try to escape via 10y/20y/30y projection
+    // away from rect center, then LastSafeAnchor, then physical unstuck.
+    // See the CantFollowEscapePhase enum block (~line 195) for the full
+    // design rationale.
     // -----------------------------------------------------------------------
     private void UpdateCantFollow()
     {
         assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
-        navigation.Stop();
+
+        // Fix 31 (log-52 17:38:41 → end-of-log): the previous code called
+        // navigation.Stop() unconditionally on every UpdateCantFollow tick.
+        // Stop() always emits a NAV-DIAG LogInformation line, so once the
+        // assist entered CantFollow the log filled with ~60 Stop() lines
+        // per second. Navigation is stopped on entry to CantFollow (see
+        // EnterCantFollow ~line 1739) and the OnEnter CantFollow re-entry
+        // branch (~line 445) defensively Stops if another goal had it
+        // active. Per-tick Stop() removed.
+        //
+        // Fix 32 — CantFollow is no longer pure hold; the escape state
+        // machine actively drives navigation toward 10/20/30 y projection
+        // targets away from the rect center, falls back to
+        // LastSafeAnchor, then a physical jump+reverse unstuck. The
+        // existing leader-arrived-within-6 y exit (below) and the 120 s
+        // CantFollowTimeoutSec retry are both preserved; the escape just
+        // adds a more active recovery path during the wait period.
 
         LeaderState? leader = leaderConnection.LastLeaderState;
+        bool leaderFresh = leader != null && leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs;
 
         double cantFollowSec = (DateTime.UtcNow - _cantFollowEnteredUtc).TotalSeconds;
 
-        if (leader != null && leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs)
+        // Existing exit: leader arrived within 6 y.
+        if (leaderFresh)
         {
-            float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+            float dist = playerReader.WorldPos.WorldDistanceXYTo(leader!.WorldPos);
 
             if (dist <= LeaderArrivedYards)
             {
                 logger.LogInformation(
                     $"[FFG] CantFollow: leader arrived ({dist:0.0}y) — resuming navigation.");
                 assistStatusProvider.CantFollow = false;
+                ResetEscapeState();
                 ResetNavState();
                 StartNavigatingToLeader(leader);
                 return;
             }
         }
 
+        // Fix 32 — new exit: segment from assist's current position to
+        // the leader no longer crosses any BL rect. This is the natural
+        // "reunite" condition — the path-finding obstruction that put us
+        // in CantFollow is gone, so resume normal NavigatingToLeader
+        // even though we're still > 6 y from the leader.
+        if (leaderFresh && navigation.AreaBlacklist != null
+            && !navigation.AreaBlacklist.TryGetBlockingRect(
+                   playerReader.WorldPos, leader!.WorldPos, out _))
+        {
+            float dist = playerReader.WorldPos.WorldDistanceXYTo(leader!.WorldPos);
+            logger.LogInformation(
+                $"[FFG] CantFollow: segment to leader is now clear ({dist:0.0}y, " +
+                $"no BL rect blocks) — resuming navigation.");
+            assistStatusProvider.CantFollow = false;
+            ResetEscapeState();
+            ResetNavState();
+            StartNavigatingToLeader(leader);
+            return;
+        }
+
+        // Existing 120 s timeout — retry navigation in case the leader moved.
         if (cantFollowSec >= CantFollowTimeoutSec)
         {
             logger.LogWarning(
                 $"[FFG] CantFollow timed out after {cantFollowSec:0.0}s — " +
                 "retrying navigation in case leader moved.");
+            ResetEscapeState();
             if (leader != null)
                 StartNavigatingToLeader(leader);
             else
@@ -1213,7 +1341,288 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // Fix 32 — drive the active-escape state machine.
+        DriveCantFollowEscape();
+
         wait.Update();
+    }
+
+    private void DriveCantFollowEscape()
+    {
+        switch (_escapePhase)
+        {
+            case CantFollowEscapePhase.NotStarted:
+                StartEscapePhase(CantFollowEscapePhase.Projection10);
+                break;
+
+            case CantFollowEscapePhase.Projection10:
+            case CantFollowEscapePhase.Projection20:
+            case CantFollowEscapePhase.Projection30:
+            case CantFollowEscapePhase.LastSafeAnchor:
+                DriveActiveEscapePhase();
+                break;
+
+            case CantFollowEscapePhase.PhysicalUnstuck:
+                // PhysicalUnstuck executes inline in StartEscapePhase and
+                // immediately transitions onward — we should not normally
+                // observe this state outside that call. Defensive: if we
+                // do see it here, advance to the post-unstuck retry.
+                _escapeUnstuckUsed = true;
+                StartEscapePhase(CantFollowEscapePhase.Projection10);
+                break;
+
+            case CantFollowEscapePhase.Exhausted:
+                // Hold position — nothing left to try. The leader-arrived
+                // and 120 s timeout exits above remain the only paths out.
+                break;
+        }
+    }
+
+    private void DriveActiveEscapePhase()
+    {
+        Vector3 currentPos = playerReader.WorldPos;
+        float displacement = currentPos.WorldDistanceXYTo(_escapePhaseStartPos);
+        double phaseSec = (DateTime.UtcNow - _escapePhaseStartUtc).TotalSeconds;
+
+        bool isProjectionPhase =
+            _escapePhase == CantFollowEscapePhase.Projection10 ||
+            _escapePhase == CantFollowEscapePhase.Projection20 ||
+            _escapePhase == CantFollowEscapePhase.Projection30;
+
+        double budgetSec = isProjectionPhase ? EscapeProjectionPhaseSec : EscapeAnchorPhaseSec;
+
+        // Arrived check — within EscapeArrivalYards of the target, the
+        // movement is essentially complete. Re-plan: pick a fresh
+        // projection from the new position. (Don't escalate phase — if
+        // 10 y got us somewhere, try another 10 y from here before
+        // jumping to 20 y.)
+        if (_escapeTargetW != default &&
+            currentPos.WorldDistanceXYTo(_escapeTargetW) <= EscapeArrivalYards)
+        {
+            logger.LogInformation(
+                $"[FFG] CantFollow escape: arrived at {_escapePhase} target {_escapeTargetW} " +
+                $"(displacement {displacement:0.0}y). Re-planning from new position.");
+            StartEscapePhase(CantFollowEscapePhase.Projection10);
+            return;
+        }
+
+        // Phase timeout — escalate. If we made meaningful progress
+        // (>= EscapeMinProgressYards) during this phase, restart from
+        // Projection10 at the new position rather than escalating —
+        // we're moving, just didn't reach the precise target.
+        if (phaseSec >= budgetSec)
+        {
+            if (displacement >= EscapeMinProgressYards && isProjectionPhase)
+            {
+                logger.LogInformation(
+                    $"[FFG] CantFollow escape: {_escapePhase} budget elapsed " +
+                    $"({phaseSec:0.0}s) but made {displacement:0.0}y progress — " +
+                    $"re-planning from new position.");
+                StartEscapePhase(CantFollowEscapePhase.Projection10);
+                return;
+            }
+
+            logger.LogWarning(
+                $"[FFG] CantFollow escape: {_escapePhase} budget elapsed " +
+                $"({phaseSec:0.0}s) with only {displacement:0.0}y displacement — escalating.");
+            EscalateEscapePhase();
+        }
+    }
+
+    private void StartEscapePhase(CantFollowEscapePhase phase)
+    {
+        _escapePhase = phase;
+        _escapePhaseStartUtc = DateTime.UtcNow;
+        _escapePhaseStartPos = playerReader.WorldPos;
+        _escapeTargetW = default;
+
+        switch (phase)
+        {
+            case CantFollowEscapePhase.Projection10:
+                StartProjectionPhase(10f);
+                break;
+
+            case CantFollowEscapePhase.Projection20:
+                StartProjectionPhase(20f);
+                break;
+
+            case CantFollowEscapePhase.Projection30:
+                StartProjectionPhase(30f);
+                break;
+
+            case CantFollowEscapePhase.LastSafeAnchor:
+                StartLastSafeAnchorPhase();
+                break;
+
+            case CantFollowEscapePhase.PhysicalUnstuck:
+                StartPhysicalUnstuckPhase();
+                break;
+
+            case CantFollowEscapePhase.Exhausted:
+                logger.LogWarning(
+                    "[FFG] CantFollow escape: all phases exhausted — holding position " +
+                    "until leader arrives or 120 s timeout fires.");
+                navigation.Stop();
+                break;
+        }
+    }
+
+    private void StartProjectionPhase(float yards)
+    {
+        Vector3 target = ComputeAwayFromRectWaypoint(yards);
+        if (target == default)
+        {
+            // We're not near any rect — the CantFollow shouldn't be
+            // BL-driven. Fall through to LastSafeAnchor as the next
+            // reasonable thing to try.
+            logger.LogInformation(
+                $"[FFG] CantFollow escape: Projection{yards:0} — not inside any inflated " +
+                "rect; CantFollow may not be BL-driven. Falling through to LastSafeAnchor.");
+            StartEscapePhase(CantFollowEscapePhase.LastSafeAnchor);
+            return;
+        }
+
+        // Don't bother navigating to a target that's itself inside a
+        // standard rect (we'd just relocate the problem).
+        if (navigation.AreaBlacklist != null && navigation.AreaBlacklist.ContainsWorld(target))
+        {
+            logger.LogInformation(
+                $"[FFG] CantFollow escape: Projection{yards:0} target {target} is " +
+                "itself inside a rect — escalating.");
+            EscalateEscapePhase();
+            return;
+        }
+
+        _escapeTargetW = target;
+        logger.LogInformation(
+            $"[FFG] CantFollow escape: Projection{yards:0} → navigating to {target} " +
+            $"(from {playerReader.WorldPos}, away from rect center).");
+        navigation.SetSingleWaypoint(target);
+    }
+
+    private void StartLastSafeAnchorPhase()
+    {
+        if (!navigation.HasLastSafeAnchor)
+        {
+            logger.LogInformation(
+                "[FFG] CantFollow escape: LastSafeAnchor — no anchor recorded. Escalating.");
+            EscalateEscapePhase();
+            return;
+        }
+
+        Vector3 anchor = navigation.LastSafeAnchorW;
+        if (navigation.AreaBlacklist != null && navigation.AreaBlacklist.ContainsWorld(anchor))
+        {
+            logger.LogInformation(
+                $"[FFG] CantFollow escape: LastSafeAnchor {anchor} is itself inside a " +
+                "rect — escalating.");
+            EscalateEscapePhase();
+            return;
+        }
+
+        _escapeTargetW = anchor;
+        logger.LogInformation(
+            $"[FFG] CantFollow escape: LastSafeAnchor → navigating to {anchor}.");
+        navigation.SetSingleWaypoint(anchor);
+    }
+
+    private void StartPhysicalUnstuckPhase()
+    {
+        logger.LogWarning(
+            "[FFG] CantFollow escape: PhysicalUnstuck — jump + reverse + jump + reverse.");
+        navigation.Stop();
+        navigation.TryPhysicalUnstuck();
+        _escapeUnstuckUsed = true;
+        // Transition immediately back to Projection10 to retry from the
+        // post-unstuck position. Don't recurse via StartEscapePhase here
+        // — the next UpdateCantFollow tick will pick up Projection10.
+        _escapePhase = CantFollowEscapePhase.Projection10;
+        _escapePhaseStartUtc = DateTime.UtcNow;
+        _escapePhaseStartPos = playerReader.WorldPos;
+        _escapeTargetW = default;
+    }
+
+    private void EscalateEscapePhase()
+    {
+        switch (_escapePhase)
+        {
+            case CantFollowEscapePhase.Projection10:
+                StartEscapePhase(CantFollowEscapePhase.Projection20);
+                break;
+            case CantFollowEscapePhase.Projection20:
+                StartEscapePhase(CantFollowEscapePhase.Projection30);
+                break;
+            case CantFollowEscapePhase.Projection30:
+                StartEscapePhase(CantFollowEscapePhase.LastSafeAnchor);
+                break;
+            case CantFollowEscapePhase.LastSafeAnchor:
+                if (_escapeUnstuckUsed)
+                    StartEscapePhase(CantFollowEscapePhase.Exhausted);
+                else
+                    StartEscapePhase(CantFollowEscapePhase.PhysicalUnstuck);
+                break;
+            default:
+                StartEscapePhase(CantFollowEscapePhase.Exhausted);
+                break;
+        }
+    }
+
+    private void ResetEscapeState()
+    {
+        _escapePhase = CantFollowEscapePhase.NotStarted;
+        _escapePhaseStartUtc = default;
+        _escapePhaseStartPos = default;
+        _escapeTargetW = default;
+        _escapeUnstuckUsed = false;
+    }
+
+    /// <summary>
+    /// Computes an escape waypoint <paramref name="yards"/> away from the
+    /// nearest blacklist rect's center, projected through the assist's
+    /// current position. Returns <see cref="Vector3.Zero"/> if no rect
+    /// contains the assist within the standard inflation margin.
+    /// </summary>
+    private Vector3 ComputeAwayFromRectWaypoint(float yards)
+    {
+        if (navigation.AreaBlacklist == null)
+            return default;
+
+        Vector3 pos = playerReader.WorldPos;
+
+        // Inflate the containment check by the same margin the rest of
+        // Navigation uses for detour candidates (DetourMargin * 0.5).
+        // This catches the log-52 sliver case where the assist is just
+        // outside the strict rect but inside the 6 y safety zone — the
+        // pathing problem is the same, and the escape direction should
+        // be the same.
+        float searchInflation = navigation.DetourMargin * 0.5f;
+        if (!navigation.AreaBlacklist.TryGetContainingRectInflated(pos, searchInflation, out var rect))
+            return default;
+
+        float centerX = (rect.MinX + rect.MaxX) * 0.5f;
+        float centerY = (rect.MinY + rect.MaxY) * 0.5f;
+
+        float dx = pos.X - centerX;
+        float dy = pos.Y - centerY;
+        float magSq = dx * dx + dy * dy;
+        float mag = MathF.Sqrt(magSq);
+
+        if (mag < 0.001f)
+        {
+            // Degenerate: assist is exactly at the rect center. Pick an
+            // arbitrary positive-X direction — any escape direction will
+            // do, and the next projection cycle will recompute from a
+            // non-degenerate position.
+            dx = 1f;
+            dy = 0f;
+            mag = 1f;
+        }
+
+        float invMag = 1f / mag;
+        return new Vector3(
+            pos.X + dx * invMag * yards,
+            pos.Y + dy * invMag * yards,
+            pos.Z);
     }
 
     // -----------------------------------------------------------------------
@@ -1734,12 +2143,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     {
         logger.LogWarning(
             $"[FFG] Navigation exhausted — entering CantFollow. " +
-            "Assist will hold position until leader arrives within " +
-            $"{LeaderArrivedYards}y.");
+            "Assist will attempt active escape (10/20/30y projection away from " +
+            "rect center, LastSafeAnchor, physical unstuck) and also exit when " +
+            $"the leader arrives within {LeaderArrivedYards}y or the segment " +
+            "to the leader clears any blacklist.");
         navigation.Stop();
         assistStatusProvider.CantFollow = true;
         _cantFollowEnteredUtc = DateTime.UtcNow;
         assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
+        // Fix 32 — reset the escape state machine so it starts fresh from
+        // NotStarted on the first UpdateCantFollow tick. Without this,
+        // a previous CantFollow cycle's state (e.g., Exhausted) could
+        // persist into a new cycle and the assist would never even try
+        // its first projection.
+        ResetEscapeState();
         EnterState(NavState.CantFollow);
     }
 

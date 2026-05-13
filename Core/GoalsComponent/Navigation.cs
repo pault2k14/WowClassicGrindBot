@@ -1973,15 +1973,7 @@ public sealed partial class Navigation : IDisposable
                 if (physicallyTrapped)
                 {
                     logger.LogWarning("[NAV] RouteEscape: physically trapped — injecting jump + reverse to escape.");
-                    input.StopForward(false);
-                    input.PressJump();
-                    System.Threading.Thread.Sleep(400);
-                    input.StartBackward(false);
-                    input.PressJump();
-                    System.Threading.Thread.Sleep(600);
-                    input.PressJump();
-                    System.Threading.Thread.Sleep(400);
-                    input.StopBackward(false);
+                    TryPhysicalUnstuck();
                 }
 
                 return false;
@@ -2056,6 +2048,35 @@ public sealed partial class Navigation : IDisposable
         _routeEscapeStartPos = default;
         _routeEscapeLastProgressPos = default;
         _routeEscapeLastProgressUtc = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Fix 32 — exposes the jump+reverse "physically trapped" sequence as a public
+    /// method so other goals can use it as a last-resort unstuck after their own
+    /// projection-based escape attempts fail. Originally extracted from the inline
+    /// physically-trapped block in <see cref="TryRouteUnstuck"/>.
+    ///
+    /// Sequence: stop forward, jump, wait 400 ms, start backward, jump, wait 600 ms,
+    /// jump, wait 400 ms, stop backward. Total ~1.4 seconds of blocking input. The
+    /// sleeps are necessary — the game client needs at least a frame to register each
+    /// input edge before the next one. Caller should be prepared for this to block
+    /// the current Update tick.
+    ///
+    /// Used by <see cref="FollowFocusGoal"/>'s CantFollow escape sequence at the
+    /// PhysicalUnstuck phase (after 10y/20y/30y projection and LastSafeAnchor
+    /// fallback have all failed to produce displacement).
+    /// </summary>
+    public void TryPhysicalUnstuck()
+    {
+        input.StopForward(false);
+        input.PressJump();
+        System.Threading.Thread.Sleep(400);
+        input.StartBackward(false);
+        input.PressJump();
+        System.Threading.Thread.Sleep(600);
+        input.PressJump();
+        System.Threading.Thread.Sleep(400);
+        input.StopBackward(false);
     }
 
     /// <summary>
