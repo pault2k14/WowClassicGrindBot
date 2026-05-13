@@ -251,6 +251,69 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool isPartyMode = classConfig.Mode == Mode.PartyLeader
                          || classConfig.Mode == Mode.AssistFocus;
 
+        // Fix M (log-59 11:44:54:457 → 11:45:40: leader engaged
+        // non-blacklisted 316781 then 316729 entirely inside the BL rect;
+        // chase via Approach-key presses carried leader from
+        // <923.99, 266.94> at 11:44:48:947 (outside) → <962.92, 283.89>
+        // at 11:44:58:068 (inside); NO blacklist event ever fired, both
+        // mobs killed inside BL; user observed "blacklist areas are just
+        // being ignored with combat happening normally"):
+        //
+        // ATG (line 294-315) and PTG (line 288-311) both have bot-inside-BL
+        // bail-outs that dispatch EvadeBlacklistEvent + IgnoreTarget. Both
+        // gate by !bits.Combat() — once the Combat plan is selected and
+        // CombatGoal is running, neither fires. CombatGoal had no equivalent
+        // check.
+        //
+        // If a chase (Approach key presses follow the target's position)
+        // carries the bot across a BL rect boundary DURING combat, the bot
+        // continues fighting normally inside BL: no 25 s recovery, no
+        // retreat, no API broadcast to the assist. The entire BL mechanism
+        // is bypassed for non-IsIgnored targets engaged from outside the rect.
+        //
+        // Fix: mirror ATG/PTG's BL bail-out inside CombatGoal with the
+        // INVERSE combat gate (this fires DURING combat). Skip when target
+        // is already IsIgnored — that's Fix 17 self-defense territory,
+        // intentionally allowed to operate inside BL per Fix 22B's explicit
+        // !IsInBlacklistArea() removal (see comment at line ~287 below).
+        //
+        // Pattern matches the existing CombatGoal evade-mob bail at
+        // line ~555-568: PartyLeader-only EvadeBlacklistEvent dispatch
+        // (assist receives via API broadcast), IgnoreTarget for both modes,
+        // ClearStuckRects (defensive — same as line 562), StopAttack +
+        // ClearTarget + stopMoving.Stop, return. Insertion point chosen so
+        // this safety check fires before Fix 17's IsIgnored handling and
+        // before Case 2/3 — if we're in BL with a regular target, bail
+        // before any other logic runs.
+        //
+        // !navigation.IsApproachEscapeActive guard: defensive — don't
+        // interrupt an in-progress approach escape. CombatGoal doesn't
+        // run during ATG escape, but the cheap check provides robustness.
+        if (navigation.IsInBlacklistArea() &&
+            !navigation.IsApproachEscapeActive &&
+            bits.Target() &&
+            playerReader.TargetGuid != 0 &&
+            !playerReader.IsIgnored(playerReader.TargetGuid))
+        {
+            logger.LogWarning(
+                $"[CombatGoal] Fix M BL-during-combat bail-out: bot inside " +
+                $"blacklist area while engaging non-IsIgnored target " +
+                $"guid={playerReader.TargetGuid}. Blacklisting target and " +
+                $"exiting combat to trigger evade-retreat behavior. " +
+                $"(Mode={classConfig.Mode})");
+
+            if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
+            playerReader.IgnoreTarget(playerReader.TargetGuid);
+            navigation.ClearStuckRects();
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.Stop();
+            return;
+        }
+
         // Fix 17 (log-44 00:41:12 leader / 00:41:28 assist — Combat ↔ NO PLAN
         // oscillation for ~70 s while a Deepmoss Venomspitter cast on the
         // bot uncontested): Fix 13's self-defense override flips the
