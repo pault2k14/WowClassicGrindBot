@@ -319,6 +319,86 @@ public sealed partial class Navigation : IDisposable
     private int sameRejectCount;
     private const int MaxSameRejectBeforeFallback = 4;
 
+    // Fix 29 (log-51 16:15:25→16:15:48, leader stuck 22 s at BL west edge):
+    // The detour-from-rejected-path machinery has a blind spot when startW
+    // sits right on a BL rect boundary and the navmesh routes every western
+    // target through the same interior bad point. TryInsertDetour finds
+    // geometrically-valid candidates (clear of rect, segments don't graze
+    // inflated rect, far enough from start), but the pathfinder's actual
+    // route to those candidates STILL passes through the same bad point.
+    // Each successful detour insertion resets sameRejectCount (caller line
+    // ~2792), so HandleBlacklistReject's existing skip-waypoint safety
+    // never accumulates the 4 same-(startW, endW) hits it needs — endW
+    // cycles between the candidates while startW stays fixed.
+    //
+    // Log-51 evidence: 58 path rejections in 17 s, badPoint always
+    // <954.539, 290.3721, 0>, detours alternating <934.39343, 286.5877>
+    // and <934.39343, 302.12463>, wp count growing 12 → 60+ as each
+    // cycle iteration pushed another detour onto the stack. The leader's
+    // physical position never changed; only Combat preemption at
+    // 16:15:49 broke the loop by moving the character.
+    //
+    // Fix: track same-(startW, badPointW) instead. Once the same start +
+    // same bad point appears MaxSameDetourBadPointBeforeSkip times in a
+    // row — meaning the navmesh keeps routing us through the same BL
+    // interior point regardless of which detour we picked — pop wpTop
+    // directly, clear the route, set a 250 ms cooldown, and return true
+    // so the caller short-circuits the rest of its detour/reject pipeline.
+    // Once detected, the cycle counter is intentionally NOT reset after
+    // each pop so subsequent same-(startW, badPointW) hits keep popping
+    // at ~250 ms intervals until the queue drains or the bot is moved
+    // by some other mechanism (combat preemption, Refill fire of a
+    // different waypoint, etc.). Pop is gated on Peek matching endW so
+    // we never pop the wrong waypoint if other code has changed the top.
+    private Vector3 _lastDetourAttemptStartW;
+    private Vector3 _lastDetourAttemptBadPointW;
+    private int _sameDetourBadPointCount;
+    private const int MaxSameDetourBadPointBeforeSkip = 4;
+
+    // Fix 30 (log-51 16:16:42→16:19:22, leader oscillated between two
+    // waypoints for 2+ minutes while assist stood still): downstream
+    // safety net for queue-duplicate accumulation. Fix 29 closes the
+    // upstream path (TryInsertDetourFromRejectedPath no longer pushes
+    // unbounded duplicates), but if duplicates ever land in wayPoints
+    // via some other code path or pre-existing accumulation, the bot
+    // will pop them one at a time and physically traverse between
+    // them — visually "running around" while the assist correctly
+    // stays in FFG dead-band (since both endpoints are ≤14 y away).
+    //
+    // Log-51 evidence trail:
+    //   16:15:25-16:15:48 — 68 rejections during the earlier stuck
+    //                      phase pushed ~68 detour duplicates onto
+    //                      the queue (the Fix 29 phenomenon).
+    //   16:16:42 — patrol resumes with wp=68, almost entirely two
+    //              coordinates: <934.39, 286.5877> and <934.39,
+    //              302.12463> (15.5 y apart).
+    //   16:16:42 → 16:19:22 — leader pops one every ~4-5 s,
+    //              bouncing back and forth. 36 pops over 2.5 min,
+    //              only 3 unique coordinates ever observed.
+    //   The assist sees both endpoints at 5-9 y, well inside
+    //   FollowingMaxYards→NavigatingMinYards dead-band; correctly
+    //   stays Idle. User perceives the leader running circles
+    //   around a stationary assist.
+    //
+    // Detection: track the coordinates of the last N popped waypoints.
+    // If the set of unique coords (within OscillationToleranceYards
+    // tolerance) collapses to ≤ MaxUniqueCoordsForOscillation, the
+    // bot is bouncing — drain any consecutive top entries that fall
+    // in that small set, then clear the tracking so the next batch
+    // of pops gets a fresh window. The drain is gated on Peek
+    // membership in the small set, so legitimate non-duplicate
+    // waypoints below the duplicate run are preserved.
+    //
+    // Conservative thresholds so legitimate tight patrols (e.g.,
+    // small circular paths) don't trigger: a true circular patrol
+    // with > 2 distinct waypoints in 6 pops will not match the
+    // "≤ 2 unique" gate. Only genuinely degenerate "ping-pong
+    // between 1-2 points" patterns fire.
+    private readonly Queue<Vector3> _recentPopHistory = new();
+    private const int OscillationDetectionWindow = 6;
+    private const float OscillationToleranceYards = 1.0f;
+    private const int MaxUniqueCoordsForOscillation = 2;
+
     private long _navDebugNextTick;
     private const int NavDebugEveryMs = 250;
 
@@ -487,6 +567,12 @@ public sealed partial class Navigation : IDisposable
         routeToNextWaypoint.Clear();
         SyncRouteStateToTop();
 
+        // Fix 30: track this pop and drain any duplicate-set oscillation.
+        // See field comment block near line ~353. Safe to call here because
+        // SyncRouteStateToTop has already run; any drain inside the helper
+        // updates routes accordingly.
+        TrackPopAndDedupIfOscillating(completed);
+
         OnWayPointReached?.Invoke();
 
         if (wayPoints.Count == 0)
@@ -495,6 +581,89 @@ public sealed partial class Navigation : IDisposable
         }
 
         return true;
+    }
+
+    // Fix 30 helper — see the long comment at the field declarations
+    // (line ~353). Tracks the last OscillationDetectionWindow popped
+    // waypoint coordinates and, if those collapse to ≤
+    // MaxUniqueCoordsForOscillation unique points (within
+    // OscillationToleranceYards), drains any consecutive top entries
+    // that fall within that small set so the next non-duplicate
+    // waypoint becomes the active target.
+    private void TrackPopAndDedupIfOscillating(Vector3 popped)
+    {
+        _recentPopHistory.Enqueue(popped);
+        while (_recentPopHistory.Count > OscillationDetectionWindow)
+            _recentPopHistory.Dequeue();
+
+        if (_recentPopHistory.Count < OscillationDetectionWindow)
+            return;
+
+        // Build unique-coord set under the tolerance. Small N (= 6),
+        // so the O(N²) build is fine.
+        Span<Vector3> uniques = stackalloc Vector3[OscillationDetectionWindow];
+        int uniqueCount = 0;
+        foreach (var p in _recentPopHistory)
+        {
+            bool matched = false;
+            for (int i = 0; i < uniqueCount; i++)
+            {
+                if (uniques[i].WorldDistanceXYTo(p) < OscillationToleranceYards)
+                {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched)
+            {
+                if (uniqueCount >= uniques.Length)
+                {
+                    // More uniques than the window can hold — definitely
+                    // not the degenerate ping-pong case. Bail.
+                    return;
+                }
+                uniques[uniqueCount++] = p;
+            }
+        }
+
+        if (uniqueCount > MaxUniqueCoordsForOscillation)
+            return;
+
+        // Oscillation: drain consecutive top entries that are in the
+        // small set. Stop the moment we see a waypoint outside the set
+        // — that's the next legitimate target and must be preserved.
+        int drained = 0;
+        while (wayPoints.Count > 0)
+        {
+            Vector3 top = Nav2D(wayPoints.Peek());
+            bool topInSet = false;
+            for (int i = 0; i < uniqueCount; i++)
+            {
+                if (uniques[i].WorldDistanceXYTo(top) < OscillationToleranceYards)
+                {
+                    topInSet = true;
+                    break;
+                }
+            }
+            if (!topInSet)
+                break;
+
+            wayPoints.Pop();
+            drained++;
+        }
+
+        if (drained > 0)
+        {
+            logger.LogError(
+                $"[NAV] Fix 30: oscillation detected — {uniqueCount} unique coord(s) " +
+                $"in last {OscillationDetectionWindow} pops (tolerance {OscillationToleranceYards:0.0}y). " +
+                $"Drained {drained} consecutive top entries to break the cycle. " +
+                $"wpCount-after={wayPoints.Count}");
+
+            routeToNextWaypoint.Clear();
+            SyncRouteStateToTop();
+            _recentPopHistory.Clear();
+        }
     }
 
     private bool TryRefillRouteNow(CancellationToken token, DateTime now)
@@ -2400,6 +2569,12 @@ public sealed partial class Navigation : IDisposable
                 routeToNextWaypoint.Clear();
                 SyncRouteStateToTop();
 
+                // Fix 30 — same oscillation-detection hook as
+                // TryConsumeReachedWaypoint. Both pop sites need to feed
+                // the history; otherwise this Refill-internal path skips
+                // tracking and lets the duplicate run continue.
+                TrackPopAndDedupIfOscillating(Nav2D(completed));
+
                 OnWayPointReached?.Invoke();
 
                 if (wayPoints.Count == 0)
@@ -2874,6 +3049,69 @@ public sealed partial class Navigation : IDisposable
 
         if (!AreaBlacklist.TryGetContainingRect(Nav2D(badPointW), out var rect))
             return false;
+
+        // Fix 29 — same-(startW, badPointW) cycle detection. See the long
+        // explanation at the field declarations near line 317. When this
+        // function is called repeatedly with the same start position and
+        // the same bad point but different endW values (because each
+        // iteration's detour gets pushed and then becomes the next call's
+        // endW), the pathfinder is signaling that NO detour around the
+        // current rect helps from this start position. The previous code
+        // would happily insert a fresh geometrically-valid detour every
+        // call, succeed (returning true), reset sameRejectCount on the
+        // caller, and never trigger any skip — observed as 58 rejections
+        // in 17 s and wp count growing 12 → 60+ in log-51.
+        bool sameAttempt =
+            startW.WorldDistanceXYTo(_lastDetourAttemptStartW) < 0.1f &&
+            badPointW.WorldDistanceXYTo(_lastDetourAttemptBadPointW) < 0.1f;
+
+        if (sameAttempt)
+        {
+            _sameDetourBadPointCount++;
+
+            if (_sameDetourBadPointCount >= MaxSameDetourBadPointBeforeSkip)
+            {
+                logger.LogError(
+                    $"[BL] Fix 29: detour cycle detected — same startW={startW} + " +
+                    $"badPointW={badPointW} hit {_sameDetourBadPointCount}× consecutively. " +
+                    $"Popping wpTop {endW} to break deadlock. " +
+                    $"(rect=({rect.MinX:0.0},{rect.MinY:0.0})-({rect.MaxX:0.0},{rect.MaxY:0.0}) " +
+                    $"wpCount-before={wayPoints.Count})");
+
+                // Pop the rejected target only if it's still the current
+                // top — another path can have changed the queue between
+                // calls, and we must not pop the wrong waypoint.
+                if (wayPoints.Count > 0 && wayPoints.Peek().WorldDistanceXYTo(endW) < 0.1f)
+                {
+                    wayPoints.Pop();
+                }
+
+                routeToNextWaypoint.Clear();
+                SyncRouteStateToTop();
+
+                // 250 ms cooldown — short enough to let the next Refill
+                // tick try a new wpTop quickly, long enough to keep this
+                // from being a tight loop. The caller's own cooldown set
+                // on return value true is also 250 ms (line ~2796), so
+                // they don't fight each other.
+                blacklistRejectCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(250);
+
+                // Intentionally do NOT reset _sameDetourBadPointCount.
+                // While the bot remains at the same startW and the
+                // pathfinder still routes through the same badPointW,
+                // subsequent calls will keep matching sameAttempt and
+                // pop one waypoint per call. As soon as either changes
+                // (bot moved, or a different rect is encountered), the
+                // else branch below resets to 0.
+                return true;
+            }
+        }
+        else
+        {
+            _sameDetourBadPointCount = 0;
+            _lastDetourAttemptStartW = startW;
+            _lastDetourAttemptBadPointW = badPointW;
+        }
 
         float m = DetourMargin;
         float z = 0f;
