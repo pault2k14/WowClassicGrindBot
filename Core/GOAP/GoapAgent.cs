@@ -274,6 +274,7 @@ public sealed partial class GoapAgent : IDisposable
         bool wasEmpty = false;
         bool previousAssistIsFollowing = false;
         bool previousAssistCantFollow  = false;
+        bool previousAssistStatusCantFollow = false;
         bool previousInCombat = false;
         bool previousPartyInCombat = false;
         bool previousEvadeRecovery = false;
@@ -327,30 +328,40 @@ public sealed partial class GoapAgent : IDisposable
                         AssistRequestReturn();
                         previousAssistCantFollow = true;
 
-                        // Only log "navigating to assist position" when we will
-                        // actually issue a GoToOneWaypoint call. AnyAssistCantFollow()
-                        // returns true on either Status==BotStatus.CantFollow OR a
-                        // bare CantFollow flag (AssistStateStore.cs:109), but
-                        // GetCantFollowState() requires Status==BotStatus.CantFollow
-                        // (line 139). The agent-level blacklist diff on the assist
-                        // (GoapAgent.cs:352) sets only the flag, not the status —
-                        // so most evade-driven CantFollow transitions go through
-                        // the flag-only path and have no navigable target.
+                        // Log whether the union-diff transition is flag-only or
+                        // status-backed at the time it fires. The actual
+                        // GoToOneWaypoint call is now driven by the separate
+                        // status-CantFollow diff below (Fix I-1, log-55), so
+                        // this branch is broadcast-only — it always fires
+                        // AssistRequestReturn (the request-to-return GoapEvent
+                        // that goals like ConsumeCorpse/Loot listen for) and
+                        // never directly issues a GoToOneWaypoint. The
+                        // GoToOneWaypoint trigger was moved out because the
+                        // flag-only path (leader's own mob-blacklist diff at
+                        // GoapAgent.cs:352) latches previousAssistCantFollow=true
+                        // before the assist's status formally flips to
+                        // BotStatus.CantFollow — leaving the union diff with
+                        // no transition to detect when status actually arrives.
+                        // Log-55 evidence: flag set at 00:12:47:326, status
+                        // flip at 00:12:46:830 (visible to leader at ~00:12:47:710);
+                        // union diff fired once on the flag transition, never
+                        // again on the status transition; GoToOneWaypoint never
+                        // executed; leader stranded.
                         AssistState? cantFollowForLog = assistStateStore.GetCantFollowState();
                         if (cantFollowForLog != null)
                         {
                             logger.LogInformation(
-                                $"[GoapAgent] Assist CantFollow — navigating to assist " +
-                                $"position ({cantFollowForLog.MapX:0.00},{cantFollowForLog.MapY:0.00}).");
-                            foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
-                                goal.GoToOneWaypoint(cantFollowForLog.MapPosNoZ);
+                                $"[GoapAgent] AnyAssistCantFollow rising edge — status=CantFollow " +
+                                $"available ({cantFollowForLog.MapX:0.00},{cantFollowForLog.MapY:0.00}). " +
+                                $"AssistRequestReturn broadcast. GoToOneWaypoint will be issued by " +
+                                $"the status-diff handler below.");
                         }
                         else
                         {
                             logger.LogInformation(
-                                "[GoapAgent] Assist CantFollow flag set (status not " +
-                                "BotStatus.CantFollow) — broadcasting AssistRequestReturn " +
-                                "without navigating.");
+                                "[GoapAgent] AnyAssistCantFollow rising edge — flag only " +
+                                "(status not BotStatus.CantFollow yet). AssistRequestReturn " +
+                                "broadcast. GoToOneWaypoint deferred until status transitions.");
                         }
                     }
                     else
@@ -358,6 +369,39 @@ public sealed partial class GoapAgent : IDisposable
                         AssistNotRequestReturn();
                         previousAssistCantFollow = false;
                     }
+                }
+
+                // Fix I-1 (log-55 00:12:47:710 leader, assist 00:12:46:830:
+                // GoToOneWaypoint never fired despite assist's status formally
+                // becoming CantFollow): status-specific diff. The union diff
+                // above latches previousAssistCantFollow=true on the FLAG-only
+                // path (leader's own mob-blacklist diff at line ~440 below
+                // sets only the flag, not the status). When the assist's
+                // actual status later transitions to BotStatus.CantFollow,
+                // the union diff sees no change (already true) and never
+                // fires the GoToOneWaypoint that Fix 33 (A+B+C) was supposed
+                // to handle. By tracking GetCantFollowState() != null
+                // separately, we fire GoToOneWaypoint on every status-
+                // CantFollow rising edge regardless of flag state.
+                // Idempotent: if status transitions before flag (no prior
+                // mob-blacklist event), the union diff and the status diff
+                // both detect the rising edge — the status diff fires
+                // GoToOneWaypoint exactly once on the rising edge of its
+                // own tracker.
+                AssistState? statusCantFollowState = assistStateStore.GetCantFollowState();
+                bool currentAssistStatusCantFollow = statusCantFollowState != null;
+                if (currentAssistStatusCantFollow != previousAssistStatusCantFollow)
+                {
+                    if (currentAssistStatusCantFollow)
+                    {
+                        logger.LogInformation(
+                            $"[GoapAgent] Fix I-1: Assist status -> BotStatus.CantFollow — " +
+                            $"navigating leader to assist position " +
+                            $"({statusCantFollowState!.MapX:0.00},{statusCantFollowState.MapY:0.00}).");
+                        foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                            goal.GoToOneWaypoint(statusCantFollowState.MapPosNoZ);
+                    }
+                    previousAssistStatusCantFollow = currentAssistStatusCantFollow;
                 }
             }
 

@@ -493,9 +493,49 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 case GoapKey.assistisfollowing:
                     if (!assistStateStore.AnyAssistIsFollowing() && !assistStateStore.AnyAssistNavigating())
                     {
-                        // Assist is genuinely unavailable — not following and not navigating toward us.
-                        logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist truly unavailable (not following, not navigating) — aborting.");
-                        Abort();
+                        // Fix I-2 (log-55 00:12:47:710, leader inside BL with
+                        // active Escape-first ROUTE got Abort()-ed by this
+                        // handler firing on the assist's NavigatingToLeader
+                        // → CantFollow transition): when the leader is
+                        // inside a BL rect, the escape route is in flight
+                        // and Abort() would call PausePathing() — killing
+                        // navigation while it's mid-escape. Worse, Abort
+                        // doesn't set _pausedByAssistDistance, so the
+                        // pause-for-assist gate at line 891 can't pick up
+                        // the pause and the "Distance gate suppressed"
+                        // branch at line 836 can't resume (it requires
+                        // _pausedByAssistDistance=true). Result: nav
+                        // paused indefinitely until something else
+                        // (combat, plan change) re-activates it. In
+                        // log-55 the leader sat at <950.88, 296.46>
+                        // (0.45 y west of rect) for 24 s until a mob
+                        // attack forced Combat.
+                        //
+                        // Fix: skip Abort when inside BL. The escape
+                        // will complete normally, then pause-for-assist
+                        // (with Fix I-3's near-edge buffer) will hold
+                        // the leader once it's meaningfully clear of
+                        // the rect. The status-CantFollow diff in
+                        // GoapAgent (Fix I-1) will have separately
+                        // fired GoToOneWaypoint on this same tick if
+                        // the status is actually CantFollow, so the
+                        // leader will navigate toward the assist after
+                        // escape completes.
+                        bool insideBlacklist =
+                            navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true;
+                        if (insideBlacklist)
+                        {
+                            logger.LogInformation(
+                                "FollowRouteGoal: OnGoapEvent - assist unavailable but leader " +
+                                "inside blacklist — skipping Abort to let escape complete. " +
+                                "Pause-for-assist will handle the wait once leader is meaningfully clear.");
+                        }
+                        else
+                        {
+                            // Assist is genuinely unavailable — not following and not navigating toward us.
+                            logger.LogInformation("FollowRouteGoal: OnGoapEvent - assist truly unavailable (not following, not navigating) — aborting.");
+                            Abort();
+                        }
                     }
                     else
                     {
@@ -833,10 +873,42 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 bool insideBlacklist =
                     navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true;
 
-                if (insideBlacklist && _pausedByAssistDistance)
+                // Fix I-3 (log-55 00:13:27:802, leader paused at <952.34, 292.33>
+                // 0.05 y west of rect MinX=952.39 while still inside the
+                // mesh-edge-to-interior connection zone): the strict
+                // insideBlacklist check above is boundary-exclusive — the
+                // moment the leader exits the rect by any amount,
+                // insideBlacklist flips false and the pause fires below.
+                // But at sub-yard distances the navmesh from the leader's
+                // position still routes through interior nodes (log-54
+                // failure mode: leader at 0.43 y outside rect, all paths
+                // through <954.539, 290.37> inside rect). Pausing here
+                // strands the leader at the boundary because subsequent
+                // patrol attempts re-trigger the same wedge.
+                //
+                // Fix: extend "suppress pause" to include the inflated
+                // zone (6 y buffer) around any BL rect. The leader keeps
+                // moving until clear of the navmesh-edge connections,
+                // then pauses at a position where the next pather call
+                // can route freely. 6 y is chosen to match
+                // LeaderArrivedYards (the natural "near" threshold) and
+                // typical navmesh resolution, smaller than the 18 y
+                // DetourMargin+6 used by Navigation's escape-continuation
+                // logic (which holds an existing escape, vs this
+                // suppressing new pauses).
+                const float NearBLEdgeBufferYards = 6f;
+                bool nearBlacklistEdge = !insideBlacklist
+                    && navigation.AreaBlacklist != null
+                    && navigation.AreaBlacklist.TryGetContainingRectInflated(
+                        playerReader.WorldPos, NearBLEdgeBufferYards, out _);
+
+                bool inOrNearBlacklist = insideBlacklist || nearBlacklistEdge;
+
+                if (inOrNearBlacklist && _pausedByAssistDistance)
                 {
+                    string locationDesc = insideBlacklist ? "inside" : $"within {NearBLEdgeBufferYards:0}y of";
                     logger.LogWarning(
-                        $"[FRG] Distance gate suppressed: leader is inside a blacklist at " +
+                        $"[FRG] Distance gate suppressed: leader is {locationDesc} a blacklist at " +
                         $"<{playerReader.WorldPos.X:F2},{playerReader.WorldPos.Y:F2},{playerReader.WorldPos.Z:F2}> " +
                         "— resuming pathing so the escape route can fire. " +
                         "Distance gate will re-evaluate after escape on the next tick.");
@@ -844,12 +916,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     navigation.Resume();
                 }
 
-                // When inside a blacklist, force shouldPause=false so the
-                // pause-entry branch below cannot re-enter the pause we just
-                // cleared. _pausedByAssistDistance is already false (either we
-                // just cleared it above, or the leader was never paused), so
-                // the resume-exit branch (`else if`) also cannot fire.
-                bool shouldPause = !insideBlacklist && assistStateStore.ShouldLeaderPauseForAssist(
+                // When inside-or-near a blacklist, force shouldPause=false so
+                // the pause-entry branch below cannot re-enter the pause we
+                // just cleared. _pausedByAssistDistance is already false
+                // (either we just cleared it above, or the leader was never
+                // paused), so the resume-exit branch (`else if`) also cannot
+                // fire.
+                bool shouldPause = !inOrNearBlacklist && assistStateStore.ShouldLeaderPauseForAssist(
                     playerReader.WorldPos, LeaderPauseYards);
 
                 bool shouldResume = assistStateStore.ShouldLeaderResumePatrol(
