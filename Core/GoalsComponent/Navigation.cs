@@ -63,6 +63,24 @@ public sealed partial class Navigation : IDisposable
     public event Action? OnAnyPointReached;
     public event Action? OnNoPathFound;
     public event Action<Vector3, Vector3>? OnPathFailed; // (startW, endW)
+
+    /// <summary>
+    /// Fired when the top waypoint changes due to a non-pop operation such as
+    /// detour insertion (<see cref="TryInsertDetour"/>) — i.e., a push that
+    /// changes wpTop without the bot having reached anything.
+    /// <para>
+    /// Fix S (log-63 19:46:56:993): pop-based events (OnWayPointReached) cover
+    /// the reach-and-advance case, but detour insertion silently swaps wpTop
+    /// from the original target to the detour without firing any signal. In
+    /// PartyLeader mode that breaks waypoint broadcasting: FRG re-publishes
+    /// on OnWayPointReached but not on detour insertion, so the assist sees
+    /// a stale waypoint that the leader is no longer actually heading to,
+    /// computes paths through the (now-bypassed) blacklist, fails, and
+    /// gets stuck for the entire duration of the leader's detour traversal.
+    /// </para>
+    /// <para>Subscribers should re-read TopPublishableWaypointW and rebroadcast.</para>
+    /// </summary>
+    public event Action? OnTopWaypointChanged;
     public bool SimplifyRouteToWaypoint { get; set; } = true;
 
     private bool active;
@@ -3368,6 +3386,13 @@ public sealed partial class Navigation : IDisposable
         SyncRouteStateToTop();
 
         logger.LogWarning($"[BL] Inserted detour after rejection: detour={best} target={endW} badPoint={badPointW}");
+
+        // Fix S (log-63 19:46:56:993): notify subscribers (FRG in PartyLeader
+        // mode) that wpTop just changed without a pop, so it can rebroadcast
+        // TopPublishableWaypointW to the assist. Without this, the assist
+        // continues navigating to the original (now-buried) target through
+        // the blacklist and stays stuck against the rect boundary.
+        OnTopWaypointChanged?.Invoke();
         return true;
     }
 

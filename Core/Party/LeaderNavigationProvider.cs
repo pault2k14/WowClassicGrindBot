@@ -113,6 +113,44 @@ public sealed class LeaderNavigationProvider
     }
 
     // -----------------------------------------------------------------------
+    // Pause-for-assist flag
+    // -----------------------------------------------------------------------
+
+    private volatile bool _isPausedForAssist;
+
+    /// <summary>
+    /// True when <see cref="Goals.FollowRouteGoal"/> is actively pausing in
+    /// the pause-for-assist branch (assist too far / Stuck / CantFollow).
+    /// <para>
+    /// Fix T (log-63 19:47:02 → 19:48:21): without this signal,
+    /// <see cref="LeaderStateService.DetermineStatus"/> reports
+    /// <see cref="BotStatus.Patrolling"/> while the leader is actually
+    /// standing still waiting for the assist (because the leader's current
+    /// goal is still FRG by name). The assist's FFG keys
+    /// waypoint-sharing-vs-position-chase off <c>leader.Status == Patrolling</c>,
+    /// so it stays in waypoint-sharing mode with the leader's last-published
+    /// waypoint as the nav target — even when that waypoint is unreachable
+    /// (e.g., blocked by blacklist). Switching the reported status to
+    /// <see cref="BotStatus.Waiting"/> during a pause-for-assist breaks the
+    /// waypoint-sharing branch and lets the assist target the leader's
+    /// actual body via position-chase, which is what's actually wanted while
+    /// the leader is stationary.
+    /// </para>
+    /// <para>Thread-safe via <see langword="volatile"/>; written on the GOAP
+    /// thread by FRG, read on the HTTP thread by LeaderStateService.</para>
+    /// </summary>
+    public bool IsPausedForAssist => _isPausedForAssist;
+
+    /// <summary>
+    /// Called by <see cref="Goals.FollowRouteGoal"/> when it enters or exits the
+    /// pause-for-assist branch. See <see cref="IsPausedForAssist"/> for rationale.
+    /// </summary>
+    public void SetPausedForAssist(bool value)
+    {
+        _isPausedForAssist = value;
+    }
+
+    // -----------------------------------------------------------------------
     // Mob blacklist sharing
     // -----------------------------------------------------------------------
 

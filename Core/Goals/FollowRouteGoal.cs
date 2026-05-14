@@ -186,6 +186,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         navigation.OnWayPointReached  += Navigation_OnWayPointReached;
         navigation.OnPathFailed       += Navigation_OnPathFailed;
 
+        // Fix S (log-63): TryInsertDetour pushes a new waypoint without firing
+        // OnWayPointReached (which only fires on pop). In PartyLeader mode the
+        // assist needs to know about the new wpTop so it doesn't keep trying
+        // to path through the now-bypassed blacklist. See OnTopWaypointChanged
+        // declaration in Navigation.cs for the full rationale.
+        navigation.OnTopWaypointChanged += Navigation_OnTopWaypointChanged;
+
         if (classConfig.Mode == Mode.PartyLeader)
         {
             AddPrecondition(GoapKey.assistrequestreturnorisfollowing, true);
@@ -243,6 +250,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             navigation.OnDestinationReached -= Navigation_OnDestinationReached;
             navigation.OnWayPointReached  -= Navigation_OnWayPointReached;
             navigation.OnPathFailed       -= Navigation_OnPathFailed;
+            navigation.OnTopWaypointChanged -= Navigation_OnTopWaypointChanged;
             if (classConfig.Mode == Mode.AttendedGather)
                 navigation.OnAnyPointReached -= Navigation_OnWayPointReached;
 
@@ -913,6 +921,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         "— resuming pathing so the escape route can fire. " +
                         "Distance gate will re-evaluate after escape on the next tick.");
                     _pausedByAssistDistance = false;
+                    leaderNavProvider.SetPausedForAssist(false); // Fix T
                     navigation.Resume();
                 }
 
@@ -994,6 +1003,18 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     }
 
                     _pausedByAssistDistance = true;
+                    // Fix T (log-63 19:47:02 → 19:48:21): broadcast pause-for-assist
+                    // state to the assist via LeaderNavigationProvider. Without this,
+                    // LeaderStateService.DetermineStatus reports Patrolling (because
+                    // the active goal is still FRG by name), the assist's FFG stays in
+                    // waypoint-sharing mode targeting the leader's last-published
+                    // waypoint, and if that waypoint can't be reached (e.g., the
+                    // leader has just inserted a detour through blacklist territory
+                    // — see Fix S) the assist gets stuck and can't recover. Switching
+                    // status to Waiting during pause-for-assist forces the assist's
+                    // FFG into position-chase against the leader's actual body, which
+                    // is the correct behaviour while the leader is stationary.
+                    leaderNavProvider.SetPausedForAssist(true);
                     // StopMovement must be called before PausePathing.
                     // PausePathing() suspends navigation and stops steering (left/right keys)
                     // but does NOT release the forward movement key — without StopMovement()
@@ -1086,6 +1107,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     }
 
                     _pausedByAssistDistance = false;
+                    leaderNavProvider.SetPausedForAssist(false); // Fix T
 
                     // Fix 8 (log-38 ping-pong, cycles 4-7): preserve runtime
                     // waypoint state on resume from pause-for-assist. The
@@ -1605,6 +1627,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         _assistRewindActive = false;
         _assistWaitingForFollowing = false;
         _pausedByAssistDistance = false;
+        leaderNavProvider.SetPausedForAssist(false); // Fix T: keep flag in sync with field
         _assistAttempt = 0;
         _assistReturnTargetW = default;
         _assistRewindAnchorW = default;
@@ -1726,6 +1749,33 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
         MountIfPossible();
+    }
+
+    /// <summary>
+    /// Fix S (log-63 19:46:56:993): handler for the non-pop wpTop change event,
+    /// currently fired only from <see cref="GoalsComponent.Navigation.TryInsertDetour"/>.
+    /// Re-publishes <c>TopPublishableWaypointW</c> so the assist's
+    /// waypoint-sharing target tracks the actual top after a detour has been
+    /// pushed onto the stack, not the original (now-buried) target that the
+    /// detour was inserted to bypass.
+    /// <para>
+    /// Same publish logic as <see cref="Navigation_OnWayPointReached"/> minus
+    /// <c>MountIfPossible()</c> — a detour insertion is not "I reached a
+    /// waypoint", it's "I just rerouted around an obstacle", and mounting at
+    /// that moment would be incorrect (the bot is mid-recovery, not at a
+    /// natural pause).
+    /// </para>
+    /// </summary>
+    private void Navigation_OnTopWaypointChanged()
+    {
+        if (classConfig.Mode == Mode.PartyLeader && !_assistReturnActive)
+        {
+            Vector3 nextWp = navigation.TopPublishableWaypointW;
+            if (nextWp != default)
+                leaderNavProvider.SetTargetWaypoint(nextWp);
+            else
+                leaderNavProvider.ClearTargetWaypoint();
+        }
     }
 
     public void ClearWaypoints()

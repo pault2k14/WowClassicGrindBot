@@ -94,6 +94,24 @@ public sealed class LeaderStateService
         if (!botController.IsBotActive)
             return BotStatus.Waiting;
 
+        // Fix T (log-63 19:47:02 → 19:48:21): when FRG is actively paused waiting
+        // for the assist (too far / Stuck / CantFollow), the bot is functionally
+        // stationary even though its current goal is still FollowRouteGoal by
+        // name. The previous goal-name → BotStatus mapping below reported
+        // Patrolling in this state, which kept the assist's FFG in waypoint-
+        // sharing mode targeting the leader's last-published waypoint. If that
+        // waypoint had become unreachable (e.g., the leader just inserted a
+        // detour around a blacklist rect — see Fix S), the assist's pathfinder
+        // failed on every retry and the bots stayed separated until something
+        // external (here, the bot stopping at 19:48:21:068) flipped status off
+        // Patrolling. Reporting Waiting during pause-for-assist short-circuits
+        // FFG's waypoint-sharing branch (which gates on
+        // `leader.Status == Patrolling`) and routes the assist to the leader's
+        // actual body via position-chase, which is the correct target while
+        // the leader is stationary.
+        if (leaderNavProvider.IsPausedForAssist)
+            return BotStatus.Waiting;
+
         // GoapAgent.CurrentGoal is GoapGoal? — use .Name to derive status.
         string? goalName = botController.GoapAgent?.CurrentGoal?.Name;
         return goalName switch
