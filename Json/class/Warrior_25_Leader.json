@@ -25,15 +25,33 @@
         "Name": "Thrown",
         "Key": "9",
         "WhenUsable": true,
+        "BeforeCastFaceTarget": true,
         "BeforeCastStop": true,
         "BeforeCastDelay": 500,
         "AfterCastWaitMeleeRange": true,
-        "AfterCastDelay": 500,
+        "AfterCastDelay": 2500,
         "Requirements": [
           "HasRangedWeapon && !Items Broken",
           "!InMeleeRange",
           "MaxRange < 26",
-          "MinRange > 9"
+          "MinRange > 9",
+          "!InCombat"
+        ]
+      },
+      {
+        "Name": "Thrown",
+        "Key": "9",
+        "WhenUsable": true,
+        "BeforeCastStop": true,
+        "BeforeCastDelay": 500,
+        "AfterCastWaitMeleeRange": true,
+        "AfterCastDelay": 2500,
+        "Requirements": [
+          "HasRangedWeapon && !Items Broken",
+          "!InMeleeRange",
+          "MaxRange < 26",
+          "MinRange > 9",
+          "!InCombat"
         ]
       }
     ]
@@ -194,6 +212,7 @@
       {
         "Name": "Food",
         "Key": "F12",
+        "Cooldown":  24000,
         "Requirement": "Health% < 40",
         "Cost": 3
       },
