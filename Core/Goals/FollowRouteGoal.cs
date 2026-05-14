@@ -1424,6 +1424,70 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 }
                 else if (bits.Target() && (targetBlacklist.Is() || playerReader.IsIgnored(playerReader.TargetGuid)))
                 {
+                    // Fix R (log-62 18:20:27:604 onwards): WoW UI TargetTarget
+                    // propagation lag race. When the side thread's Tab acquires
+                    // a hostile IsIgnored mob that's actively attacking the bot,
+                    // bits.TargetTarget_PlayerOrPet() may not yet reflect Me/Pet
+                    // within the same tick (UnitTargetOfUnit lags Tab by 30-100+
+                    // ms, sometimes longer). Path 1 above (line ~1416) requires
+                    // it, so we fall here, ClearTarget runs, hasTarget→false,
+                    // and Fix 17 self-defense in GoapAgent/CombatGoal (which
+                    // require hasTarget=true) cannot fire. The mob keeps hitting,
+                    // auto-target re-acquires, Tab finds it again, same loop.
+                    //
+                    // Observed in log-62: leader's evade recovery elapsed at
+                    // 18:20:27:386, 340309 (the previously-blacklisted Deepmoss
+                    // Venomspitter) reappeared and started attacking at
+                    // 18:20:27:604. Three "Blacklist Target" plans fired in
+                    // succession (27:605, 28:056, 29:331), each one Tab-ing
+                    // 340309 and ClearTarget-ing via this Path 2. Fix 17 didn't
+                    // engage until 18:20:32:022 — 4.4 seconds of damage exposure
+                    // during which the leader took hits with no ability to
+                    // defend. The kill eventually happened (inside BL, via
+                    // Fix 17 self-defense at 18:20:43:406), but the delay is
+                    // unsafe in scenarios with higher mob damage, multiple
+                    // attackers, or lower starting HP.
+                    //
+                    // Fix: in party mode, when in combat AND the target is on
+                    // IsIgnored (but not also on permanent targetBlacklist —
+                    // permanent blacklist still wins, no Fix 17 path for it),
+                    // wait up to 200ms for TargetTarget to propagate. 200ms is
+                    // 6-12 frames at 30-60 fps — generous enough for UI state
+                    // propagation. If TargetTarget becomes PlayerOrPet within
+                    // that window, fall through to Path 1's behavior (pause
+                    // nav, let Combat plan fire so Fix 17 engages). If it
+                    // doesn't, clear as before — preserves original "drive-by
+                    // clear" semantics for genuine non-attacking BL mobs the
+                    // bot stumbles past while patrolling.
+                    //
+                    // Standalone Grind mode unaffected (isPartyMode short-
+                    // circuits). targetBlacklist.Is() case unaffected (we only
+                    // defer when IsIgnored is the trigger and permanent
+                    // blacklist is NOT active — if both, blacklist wins via
+                    // the !targetBlacklist.Is() conjunct).
+                    bool isPartyMode = classConfig.Mode == Mode.PartyLeader
+                                    || classConfig.Mode == Mode.AssistFocus;
+                    if (isPartyMode
+                        && bits.Combat()
+                        && playerReader.IsIgnored(playerReader.TargetGuid)
+                        && !targetBlacklist.Is())
+                    {
+                        wait.Till(200, () => bits.TargetTarget_PlayerOrPet());
+                        if (bits.TargetTarget_PlayerOrPet())
+                        {
+                            Log("Fix R: Blacklisted target attacking us in combat (detected after TargetTarget propagation) — pausing nav so Fix 17 self-defense can fire.");
+                            sideActivityManualReset.Reset();
+                            targetFinder.Reset();
+                            Interlocked.Exchange(ref _pauseNavRequested, 1);
+                            continue;
+                        }
+                        // Fall through to clear if TargetTarget never propagated
+                        // to PlayerOrPet within 200ms — genuine "BL mob nearby,
+                        // not attacking us" scenario, original Path 2 behavior
+                        // is correct.
+                        Log("Fix R: Blacklisted target found in combat but TargetTarget did not propagate to PlayerOrPet within 200ms — falling through to clear (not a self-defense scenario).");
+                    }
+
                     Log("Blacklisted target found, clearing target");
                     SuppressCurrentTargetBriefly();
                     input.PressClearTarget();

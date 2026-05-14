@@ -555,15 +555,34 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if (_partyAssistMirrorGuid != playerReader.FocusTargetGuid)
             {
                 _partyAssistMirrorGuid = playerReader.FocusTargetGuid;
+                // Fix R companion (log-62 18:20:37:673): the original message
+                // unconditionally said "Case 2 swap will fire next" whenever
+                // this bot's target didn't match focus, but Case 2 (line ~601)
+                // also requires currentTargetIsIgnored=true. When the bot has
+                // a fightable non-IsIgnored target of its own (e.g., add-mob
+                // 340571 aggro'd onto the assist in log-62), Case 2 doesn't
+                // fire — this bot stays on its own target. Reflect the actual
+                // currentTargetIsIgnored state so the log isn't misleading.
+                string caseClause;
+                if (thisBotTargetMatchesFocus)
+                {
+                    caseClause = " AND currentTargetIsIgnored=false (this bot's target matches focus post-swap)";
+                }
+                else if (currentTargetIsIgnored)
+                {
+                    caseClause = $" (this bot's target guid={playerReader.TargetGuid} is on IsIgnored and doesn't match focus — Case 2 swap will fire next)";
+                }
+                else
+                {
+                    caseClause = $" (this bot's target guid={playerReader.TargetGuid} is NOT on IsIgnored — Case 2 won't swap; this bot will keep engaging its own target while planner-level focusTargetIsIgnored=false lets Combat plan run for it)";
+                }
                 logger.LogInformation(
                     $"[CombatGoal] Fix L party-assist override (mirror): focus target " +
                     $"guid={playerReader.FocusTargetGuid} is on IsIgnored but the " +
                     $"partner ({(classConfig.Mode == Mode.PartyLeader ? "assist" : "leader")}) " +
                     $"is in combat with it. Flipping focusTargetIsIgnored=false" +
-                    (thisBotTargetMatchesFocus
-                        ? $" AND currentTargetIsIgnored=false (this bot's target matches focus post-swap)"
-                        : $" (this bot's target guid={playerReader.TargetGuid} doesn't match focus yet — Case 2 swap will fire next)") +
-                    $" so Case 2 can swap and Case 3 won't bail. (Mode={classConfig.Mode})");
+                    caseClause +
+                    $" so Case 3 won't bail. (Mode={classConfig.Mode})");
             }
 
             focusTargetIsIgnored = false;
