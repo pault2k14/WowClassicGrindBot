@@ -1193,6 +1193,63 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 || playerReader.IsIgnored(playerReader.TargetGuid))
             {
                 int evadingGuid = playerReader.TargetGuid;
+
+                // Fix Q (log-61 16:37:32:478): suppress the evade re-fire when
+                // the partner (focus) is in combat. The standalone Grind-mode
+                // semantics of this block — "I stumbled onto a previously-
+                // blacklisted mob, start a 25s retreat" — collide with the
+                // party-assist scenario in a destructive way:
+                //
+                // 1. Fix L fires for guid X (partner engaging X via Fix 17).
+                // 2. Bot's target = X (via Case 2 swap on TargetFocus +
+                //    TargetOfTarget).
+                // 3. A few seconds later, Fix L transiently clears — typically
+                //    because playerReader.FocusTargetGuid is stale (WoW focus
+                //    chain hadn't caught up with the partner's target update
+                //    after a prior mob in the partner's target slot died).
+                //    In log-61 the leader's FocusTargetGuid was still 334093
+                //    (a dead non-IsIgnored mob) instead of 334431 (the actual
+                //    mob the assist was fighting via Fix 17).
+                // 4. Case 2 fires again with stale FocusTargetGuid → swap to
+                //    a dead mob → Lost target → FindPossibleThreats fires.
+                // 5. Tab acquires the nearest hostile — which is X (still alive,
+                //    being fought by the partner near the bot).
+                // 6. Without this gate: IsIgnored(X)=true → SendGoapEvent
+                //    (EvadeBlacklistEvent(X)) → new 25s recovery window →
+                //    BLOCKS Fix L from re-firing for the remaining ~19s of
+                //    the partner's combat. User observed: "the leader stood
+                //    there and did nothing" while the assist killed X alone.
+                //
+                // With the gate: when partner is in combat, we recognise that
+                // this code path is mis-interpreting the situation and
+                // suppress the EvadeBlacklistEvent dispatch. ClearTarget still
+                // fires (we don't want to engage an IsIgnored target without
+                // Fix L's explicit authorization), TargetGuid drops to 0,
+                // Combat plan's precondition fails on next tick, plan re-
+                // evaluates. If the focus chain has caught up and Fix L
+                // conditions hold, Fix L re-fires for X via the normal path.
+                // If not, the bot returns to Follow Route / FFG without the
+                // 25s lockout.
+                //
+                // Mode gate uses the same isPartyMode predicate the rest of
+                // the CombatGoal uses (Update() line 251). Standalone Grind
+                // mode is unaffected: bits.Focus() returns false (no focus
+                // set) so the gate short-circuits and the original behavior
+                // is preserved exactly.
+                bool isPartyMode = classConfig.Mode == Mode.PartyLeader
+                                || classConfig.Mode == Mode.AssistFocus;
+                if (isPartyMode && bits.Focus() && bits.Focus_Combat())
+                {
+                    logger.LogInformation(
+                        $"[CombatGoal] FindPossibleThreats: NearestTarget guid={evadingGuid} " +
+                        $"is evading/ignored AND partner (focus) is in combat — suppressing " +
+                        $"EvadeBlacklistEvent re-fire so Fix L party-assist can re-fire when " +
+                        $"focus chain catches up. Clearing target only. (Mode={classConfig.Mode})");
+                    input.PressClearTarget();
+                    wait.Update();
+                    return;
+                }
+
                 logger.LogInformation($"[CombatGoal] FindPossibleThreats: NearestTarget guid={evadingGuid} is evading/ignored — re-firing evade escape.");
                 input.PressClearTarget();
                 wait.Update();
