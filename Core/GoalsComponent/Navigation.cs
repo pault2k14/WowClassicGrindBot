@@ -3089,6 +3089,71 @@ public sealed partial class Navigation : IDisposable
 
         const float MIN_FIRST_STEP_DIST = 1.0f;
 
+        // Fix AA (log-67b 01:20:39:321, assist visibly rotates ~180° then continues
+        // in the same direction it was already going): the pather (PPather /
+        // RemotePathingAPIV3) returns a path whose path[0] is the navmesh node
+        // NEAREST the requested start position. Navmesh nodes are grid-snapped
+        // (~0.4-0.6 y spacing in this map), so when the bot's startW falls between
+        // grid nodes, path[0] can lie BEHIND the bot's intended direction of travel
+        // by 1-2 yards.
+        //
+        // The MIN_FIRST_STEP_DIST=1.0 filter above catches the "we're already at
+        // path[0]" case but not this navmesh-snap case: a 1.46-yard backward node
+        // passes that filter. Once accepted, this node becomes the routeTop, the
+        // Update loop computes heading=DirectionCalculator.CalculateMapHeading
+        // (player, routeTop), and AdjustHeading → playerDirection.SetDirection
+        // rotates the bot to face the routeTop — i.e., backward. After ~1-2 s of
+        // rotation and ~1.5 y of backward walking, the node pops (POP_DIST=3.6 y),
+        // the next routeTop comes into view (forward), and the bot rotates ~180°
+        // again to continue. The user sees this as "rotate around and continue in
+        // the same direction."
+        //
+        // Log-67b req=242 evidence:
+        //   request start=<2495.02, -2700.84>  end=<2511, -2697.30>  (dist 16.4 y east)
+        //   path returned: pathLen=25 (heavily grid-snapped), routeCount-after-simplify=4
+        //   routeTop=<2493.6, -2701.20>  — 1.46 y SOUTHWEST of bot
+        //   forward direction (end-start) is +16.0 east, +3.5 north
+        //   to-routeTop direction is -1.42 west, -0.36 south
+        //   dot product = (16.0)(-1.42) + (3.5)(-0.36) = -25.96  (deeply negative)
+        //   bot pressed RightArrow 993 ms + RightArrow 966 ms = ~2 s of right rotation
+        //
+        // 4 of 12 path requests in log-67b produced rear-pointing routeTops:
+        //   req=236 (dot=-5.2), req=240 (dot=-8.6), req=242 (dot=-25.6), req=243 (dot=-1.7).
+        // All 4 had visible rotation artifacts. The other 8 requests had positive dot
+        // (forward or sideways path curves) and no rotation issues.
+        //
+        // Fix: in the per-node filter loop, additionally drop nodes that are BOTH
+        //   (a) in the rear half-plane relative to the path's intended forward
+        //       direction (forward · to_node <= 0), AND
+        //   (b) within REAR_NODE_DROP_YARDS (3 y) of the start.
+        //
+        // The (b) bound prevents accidentally dropping deliberately-backward nodes
+        // in pathological obstacle-bypass routes — the pather doesn't typically
+        // issue such routes, but defensiveness against future cases is cheap. A
+        // 3 y cap catches the navmesh-snap case (1-2 y typical) with margin.
+        //
+        // Why not simply raise MIN_FIRST_STEP_DIST? Raising to 2.0 y would also drop
+        // legitimate sideways curves at 1.0-1.5 y from start (observed in log-67b
+        // req=241 dist=1.01 y dot=+9.0, req=243 dist=1.02 y dot=-1.7 — same distance,
+        // opposite directions). Only the dot-product test discriminates them.
+        //
+        // Edge cases:
+        //   - All nodes filtered: the existing "if Count==0 && wayPoints.Count>0 →
+        //     push wpTop" fallback handles this. Bot heads straight to wpTop.
+        //   - Single-node path (path[0] = endpoint): forward · to_node is large
+        //     positive by construction. Always kept.
+        //   - Bot exactly on grid: path[0] coincident with start, dropped by the
+        //     existing distance filter. No interaction with this fix.
+        //   - Degenerate forward vector (endpoint == start): forwardLenSq < eps,
+        //     dot test is skipped, behavior matches pre-fix. Bot wouldn't be
+        //     navigating in this case anyway.
+        const float REAR_NODE_DROP_YARDS = 3.0f;
+        Vector3 forward = new Vector3(
+            result.EndW.X - result.StartW.X,
+            result.EndW.Y - result.StartW.Y,
+            0f);
+        float forwardLenSq = forward.X * forward.X + forward.Y * forward.Y;
+
         routeToNextWaypoint.Clear();
 
         Vector3 start2D = Nav2D(result.StartW);
@@ -3099,6 +3164,27 @@ public sealed partial class Navigation : IDisposable
 
             if (p.WorldDistanceXYTo(start2D) < MIN_FIRST_STEP_DIST)
                 continue;
+
+            // Fix AA: rear-half-plane filter.
+            if (forwardLenSq > 0.0001f)
+            {
+                float toNodeX = p.X - start2D.X;
+                float toNodeY = p.Y - start2D.Y;
+                float toNodeLenSq = toNodeX * toNodeX + toNodeY * toNodeY;
+                if (toNodeLenSq < REAR_NODE_DROP_YARDS * REAR_NODE_DROP_YARDS)
+                {
+                    float dot = forward.X * toNodeX + forward.Y * toNodeY;
+                    if (dot <= 0f)
+                    {
+                        logger.LogInformation(
+                            $"[NAV] Fix AA: dropping rear-pointing path node {p} " +
+                            $"(dist={MathF.Sqrt(toNodeLenSq):0.00}y from start, " +
+                            $"dot={dot:0.00} <= 0 against path forward direction). " +
+                            $"Would have caused a U-turn rotation toward a navmesh-snap node behind the bot.");
+                        continue;
+                    }
+                }
+            }
 
             routeToNextWaypoint.Push(Nav2D(p));
         }
