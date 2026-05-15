@@ -629,6 +629,39 @@ public sealed partial class Navigation : IDisposable
         routeToNextWaypoint.Clear();
         SyncRouteStateToTop();
 
+        // Fix X (log-66 23:06:17:122): when a RouteEscape target is reached via
+        // pop, the escape has succeeded — clear escape state so the subsequent
+        // navigation (typically FFG/FRG refreshing a new target toward the
+        // leader / next waypoint) is not still tracked by CheckRouteEscapeUnreachable.
+        //
+        // Without this, _routeEscapeActive stays true after the escape target
+        // is consumed. The watchdog continues to measure displacement from the
+        // *original* _routeEscapeStartPos (set when the escape began, 12+
+        // seconds ago), not from the new path's start. If the new path goes
+        // back through the area near the escape's start (e.g., escape went
+        // north up a hill, new path comes back south past the same X to reach
+        // the leader), the watchdog sees ~0 net displacement from the anchor
+        // and falsely declares the new path "unreachable", clearing valid
+        // progress.
+        //
+        // Observed in log-66: assist's 20y escape at +120° (Fix W's rotated
+        // attempt) successfully reached <2000.93, -2136.52> NORTH of the
+        // tree. FFG refreshed target to <1977.52, -2168.84> SOUTH (toward
+        // leader). Bot navigated SW productively for 9 seconds, covering 17y
+        // of valid progress. At 12s after escape *start* the watchdog fired:
+        // "RouteEscape unreachable: displacement=0.34y < 2y" — measuring
+        // from the old anchor at <1994, -2155>, even though the bot was
+        // genuinely making forward progress on a different path. The
+        // resulting waypoint clear forced a second full escape cycle,
+        // adding ~25 seconds to the stuck duration.
+        if (_routeEscapeActive)
+        {
+            logger.LogInformation(
+                $"[NAV] RouteEscape: escape target reached via TryConsumeReachedWaypoint " +
+                $"(completed={completed}) — clearing escape state.");
+            ResetRouteEscape();
+        }
+
         // Fix 30: track this pop and drain any duplicate-set oscillation.
         // See field comment block near line ~353. Safe to call here because
         // SyncRouteStateToTop has already run; any drain inside the helper
@@ -2709,6 +2742,32 @@ public sealed partial class Navigation : IDisposable
 
                 routeToNextWaypoint.Clear();
                 SyncRouteStateToTop();
+
+                // Fix X (log-66 23:06:17:122): same rationale as the symmetric
+                // clear in TryConsumeReachedWaypoint — clear RouteEscape state
+                // when the escape target is reached. This pop site is the one
+                // that actually fired in log-66 (the assist's 20y north escape
+                // landed within wpPopThreshold of the target so refill popped
+                // it here rather than via TryConsumeReachedWaypoint's XY
+                // check). Without this clear, _routeEscapeActive stays true,
+                // FFG's polling fallback at FollowFocusGoal.cs:1325 refreshes
+                // the waypoint to a new target, and CheckRouteEscapeUnreachable
+                // keeps measuring displacement from the now-stale _routeEscapeStartPos.
+                // 12s later it falsely declares the new path "unreachable" and
+                // throws away ~17y of valid SW progress toward the leader,
+                // forcing a second full escape cycle.
+                //
+                // This path also exits via RefillExit("wpAlreadyReached_pop_noWpLeft")
+                // rather than calling CompleteDestinationReached, so even a
+                // hypothetical fix in StopAndResetAtDestination wouldn't help
+                // here. The clear must live at the pop site itself.
+                if (_routeEscapeActive)
+                {
+                    logger.LogInformation(
+                        $"[NAV] RouteEscape: escape target reached via Refill wpAlreadyReached " +
+                        $"(completed={completed}) — clearing escape state.");
+                    ResetRouteEscape();
+                }
 
                 // Fix 30 — same oscillation-detection hook as
                 // TryConsumeReachedWaypoint. Both pop sites need to feed

@@ -1964,6 +1964,77 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             leader.Status == BotStatus.Patrolling &&
             leader.HasTargetWaypoint)
         {
+            // Fix Y (log-66 23:05:39 → 23:06:42): distance gate.
+            //
+            // WaypointSharing's semantic is "the bots are close enough to
+            // converge on the same destination together." Once
+            // _rendezvousConfirmed is set, there has been no automatic exit
+            // when the bots drift apart — only the blacklist guard below,
+            // and the outer condition for non-Patrolling status. If the
+            // assist falls behind, it continued targeting the leader's
+            // *next* waypoint rather than the leader's body, even when the
+            // bots are 20+ yards apart.
+            //
+            // The failure mode (log-66): the leader pops a corridor-routing
+            // waypoint with up to ~3.5y of slack in wpPopThreshold, then
+            // immediately broadcasts the *next* waypoint (which may be past
+            // the corridor or in a different direction). If the assist is
+            // upstream of that corridor — i.e., still on the wrong side of
+            // an obstacle the popped waypoint was placed to thread — the
+            // assist's path request to the new waypoint goes from its
+            // upstream position to the far waypoint, and the pathfinder
+            // returns a detour around the obstacle.
+            //
+            // Observed in log-66: leader popped <1975.68,-2173.66> at
+            // 23:05:39:711 while still 3.3y north of it; at 23:05:40:699
+            // the new wp <1975.53,-2187.30> was broadcast; the assist at
+            // <1981.85,-2150.15> was 21.7y from the leader and ~5y east of
+            // the corridor; the path to the new wp curved around a tree;
+            // the bot got stuck; RouteEscape (with Fix W rotation) + Fix X
+            // recovery took ~25s.
+            //
+            // Threshold matches NavigatingMinYards (14y) — FFG's own
+            // definition of "the bots are no longer together enough" used
+            // for the dead-band entry that triggers navigation from Idle.
+            // Above this distance, ComputeFollowTargetWorldPos (which
+            // returns the leader's body with FollowStopShortYards offset)
+            // is the right target — it anchors the path-find at the
+            // leader's actual progressed position rather than the leader's
+            // forward broadcast. The path is shorter, the assist isn't
+            // pulled past obstacles it hasn't yet crossed, and once it
+            // closes back inside NavigatingMinYards the broadcast resumes
+            // automatically.
+            //
+            // _rendezvousConfirmed is NOT cleared — matches the blacklist-
+            // guard pattern just below: the bots WERE together, they
+            // drifted, they're catching back up. When dist returns to
+            // <= NavigatingMinYards on a later tick, the entire outer
+            // condition is satisfied again and WaypointSharing resumes
+            // without needing a fresh full rendezvous co-location.
+            //
+            // No hysteresis on the threshold: oscillation around 14y would
+            // require the bots to be moving in lockstep at exactly that
+            // separation, which doesn't match observed leader/assist
+            // dynamics. If logs later show mode-flip thrash here, lower
+            // the re-entry threshold to NavigatingExitYards (10y) the same
+            // way FFG already hystereses Following↔NavigatingToLeader.
+            float distToLeader = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+            if (distToLeader > NavigatingMinYards)
+            {
+                if (_currentNavTargetMode != NavTargetMode.PositionChase)
+                {
+                    logger.LogInformation(
+                        $"[FFG] Waypoint-sharing: assist {distToLeader:0.0}y from leader " +
+                        $"(> NavigatingMinYards={NavigatingMinYards:0}y) — falling back to " +
+                        "position-chase to avoid pathing past the leader through obstacles " +
+                        "the assist hasn't yet crossed " +
+                        "(rendezvous remains confirmed; resumes sharing when dist returns within range).");
+                }
+
+                _currentNavTargetMode = NavTargetMode.PositionChase;
+                return ComputeFollowTargetWorldPos(leader);
+            }
+
             Vector3 sharedWp = new(leader.TargetWaypointWorldX, leader.TargetWaypointWorldY, 0f);
 
             // Defensive blacklist guard (log-35 14:08:16:226 → 14:08:16:894+):
