@@ -2130,14 +2130,99 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (lenXY < 0.001f)
             return new Vector3(leaderW.X, leaderW.Y, 0f); // co-located — navigate to exact position
 
-        // Target = leader's world position shifted FollowStopShortYards toward the
-        // assist. Z is zeroed to match the format of every other path returned by
-        // GetNavigationTarget (anchor, shared waypoint) — Navigation only uses XY.
         float invLen = 1f / lenXY;
-        Vector3 target = new Vector3(
-            leaderW.X + dx * invLen * FollowStopShortYards,
-            leaderW.Y + dy * invLen * FollowStopShortYards,
-            0f);
+
+        // Fix Z (log-67 00:37:11:228 → 00:37:24:551, assist detour 25y east
+        // of corridor over ~13 s): cap the path target distance from the
+        // assist when the bots are far apart.
+        //
+        // The failure mode (log-67): leader walked north through the
+        // two-tree corridor from Y=-2174 to Y=-2149. Once Fix Y switched
+        // the assist to PositionChase (because dist > NavigatingMinYards),
+        // the assist's path target became the leader's body offset —
+        // <1976.92,-2152.16>, NORTH of the trees. The straight-line
+        // distance from the assist at <1974.43,-2162.89> to that target
+        // is 11y, but the trees create a constrained passage between
+        // them; the pathfinder returned a 14-node curve that started
+        // SW (routeTop=<1974.00,-2164.80> — south of the assist!) and
+        // wrapped around to the north. Bot followed the curve, was
+        // interrupted mid-path by an Adhoc plan (Inner Fire cast), and
+        // on FFG re-entry was at <1978.84,-2168.65> — 4.4 y east of its
+        // original position. The next path from this drifted start
+        // produced a 15-node curve, and the bot ended up at
+        // <2003.49,-2161.80> — 25 y east of the corridor.
+        //
+        // Compare path #1 in the same log: assist at <1978.21,-2174.27>,
+        // target <1976.82,-2161.59> (IN the trees' Y zone, not past
+        // them). 4-node straight path. No detour.
+        //
+        // The difference is purely the target's position relative to the
+        // obstacles. When the target sits PAST the trees (Y < -2155),
+        // the pathfinder plans a route through or around them, and any
+        // route the simplifier returns is a curve the bot has to follow.
+        // When the target sits IN OR BEFORE the trees zone, the path is
+        // short and straight.
+        //
+        // Fix Z's solution: when lenXY > NavigatingMinYards, cap the
+        // target's distance from the assist at FarTargetMaxYards (7y)
+        // along the assist→leader line. For the log-67 scenario:
+        // instead of <1976.92,-2152.16> (11y from assist, past trees),
+        // the new target is <1976.02,-2156.06> — 7 y from assist,
+        // INSIDE the corridor at Y=-2156 (between trees at roughly
+        // Y=-2160 south and Y=-2150 north). The pathfinder is asked
+        // for a short path to a target inside the corridor, gets a
+        // short straight route, the bot walks 7 y north without
+        // crossing the constrained passage, and on the next tick the
+        // distance drops below NavigatingMinYards and the standard
+        // close-target branch resumes.
+        //
+        // Geometry note: dx, dy is (assist - leader), so (dx, dy)/lenXY
+        // is the unit vector pointing FROM leader TOWARD assist. To go
+        // FROM assist TOWARD leader, subtract that vector from assistW.
+        //
+        // 7y matches FollowingMaxYards — the "naturally close" distance
+        // already used elsewhere in FFG. When the bot reaches the Fix Z
+        // target, dist to leader is ~ (lenXY - 7), which for lenXY
+        // slightly above 14y puts the bot right in the Following band.
+        //
+        // No hysteresis on the threshold: small oscillation around 14 y
+        // would just mean a 4-y target jump per crossing, which path-
+        // preservation suppression absorbs in most cases. If logs show
+        // path-discard thrash here, add a re-entry threshold (e.g.,
+        // 10y = NavigatingExitYards).
+        //
+        // Intersection with the blacklist projection-safety loop below:
+        // both Fix Z and Fix 19 modify `target`. Fix Z runs first, then
+        // the BL loop. If Fix Z's target falls in/near a BL rect, the
+        // BL loop will search for a non-BL alternative starting at
+        // distFromLeader=5y and stepping toward the assist. Candidates
+        // closer to the leader than Fix Z's distance constraint may be
+        // chosen if they're non-BL — i.e., the BL correctness guarantee
+        // takes precedence over Fix Z's performance optimization in
+        // that rare intersection.
+        const float FarTargetMaxYards = 7f;
+        Vector3 target;
+        if (lenXY > NavigatingMinYards)
+        {
+            // Far branch: target sits FarTargetMaxYards from assist along
+            // the assist→leader line. Subtract because (dx, dy)/lenXY
+            // points leader→assist.
+            target = new Vector3(
+                assistW.X - dx * invLen * FarTargetMaxYards,
+                assistW.Y - dy * invLen * FarTargetMaxYards,
+                0f);
+        }
+        else
+        {
+            // Standard (near) branch: leader's world position shifted
+            // FollowStopShortYards toward the assist. Z is zeroed to match
+            // the format of every other path returned by GetNavigationTarget
+            // (anchor, shared waypoint) — Navigation only uses XY.
+            target = new Vector3(
+                leaderW.X + dx * invLen * FollowStopShortYards,
+                leaderW.Y + dy * invLen * FollowStopShortYards,
+                0f);
+        }
 
         // log-36 02:52:51:236 → 02:53:21:263: when the leader is inside a blacklist
         // (e.g., killed/looted a mob inside a blacklisted area), the standard target
