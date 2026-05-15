@@ -1545,6 +1545,72 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Fix 32 — drive the active-escape state machine.
         DriveCantFollowEscape();
 
+        // Fix AF (log-72 16:09:15:518 → 16:09:35:198+, assist held in
+        // CantFollow at <-699.85, -4170.15> for 20+ seconds during a leader
+        // fight; user described "it didn't appear the assist was actually
+        // stuck, plenty of free movement space on almost all sides"):
+        //
+        // Evidence from log-72:
+        //   16:09:15:518  SetWayPoints(count=1) for Projection10 target
+        //                 <-705.69, -4178.27>. Navigation.active flipped True.
+        //   16:09:15:519 → 16:09:18:526   ZERO NAV-DBG, NAV-EMPTY, NAV-REFILL,
+        //                                 NAV-DBG ENQUEUE PATH, or
+        //                                 PathCalculatedCallback entries.
+        //                                 Navigation was simply never ticked.
+        //   16:09:18:526  Projection10 elapsed 3.0s with 0.0y displacement.
+        //   (same pattern repeated for Projection20, Projection30, then
+        //   after PhysicalUnstuck moved the bot 2.4y via direct keyboard
+        //   input, a fresh Projection10 from the new position again
+        //   produced 0.0y over the next 3s window.)
+        //
+        // Root cause: navigation.Update() is called from FFG only inside
+        // UpdateNavigatingToLeader (line ~1142 and ~1349). When _navState
+        // is CantFollow, UpdateCantFollow drives the escape state machine
+        // via StartProjectionPhase → navigation.SetSingleWaypoint(target),
+        // which clears the route and flips active=True — but Navigation is
+        // never given a tick to process that change. No path request is
+        // enqueued, no MOVE event fires, no input key is pressed. The bot
+        // sits at the projection's start position for the entire 3 s phase
+        // budget, "0.0y displacement" is observed, and the state machine
+        // escalates to the next phase, where the cycle repeats.
+        //
+        // Why this only surfaced after Fix AE: before Fix AE, the spurious
+        // CantFollow entries caused by Fix AC false-positives were short
+        // (assist re-rescued by leader within ~5-10s), so the broken
+        // projection escape rarely got a chance to matter. Fix AE
+        // eliminated the false-positive entries; the CantFollow entries
+        // that remain are legitimate, the leader is typically engaged in
+        // combat and not returning quickly, and the projection escape
+        // actually needs to do its job. It can't.
+        //
+        // Fix: tick Navigation on every UpdateCantFollow call, after the
+        // escape state machine has had a chance to install a new waypoint.
+        //   - During Projection10/20/30 and LastSafeAnchor phases, active
+        //     is True (set by SetSingleWaypoint via SetWayPoints). Update
+        //     processes the route, refills via path request, drives the
+        //     bot toward the route top via input keys.
+        //   - During PhysicalUnstuck and Exhausted phases, both
+        //     StartPhysicalUnstuckPhase (~line 1775) and the Exhausted
+        //     branch in StartEscapePhase (~line 1666) call
+        //     navigation.Stop(), which sets active=False. Navigation.Update
+        //     has `if (!active) return;` at its top (~line 1137), so this
+        //     call is a safe no-op during those phases.
+        //   - The leader-arrived exit and the BL-segment-clear exit at the
+        //     top of UpdateCantFollow both `return` before reaching here,
+        //     so this call doesn't fire on transition-out ticks.
+        //   - All Navigation event handlers in FFG that could fire from
+        //     this Update (Navigation_OnPathFailed,
+        //     Navigation_OnDestinationReached, Navigation_OnWayPointReached,
+        //     and the Option B policy handlers Navigation_OnPathResultInspected,
+        //     Navigation_OnStaleEmptyPathMatchesActive,
+        //     Navigation_OnRepeatedNoPathDirectRouteDecision) guard on
+        //     `_navState != NavState.NavigatingToLeader` and no-op during
+        //     CantFollow. This is correct: a "rear-curving" projection
+        //     path means the pather found a route back toward the leader,
+        //     which is *useful* during an escape — Fix AC+AE must not
+        //     reject it.
+        navigation.Update(CancellationToken.None);
+
         wait.Update();
     }
 
