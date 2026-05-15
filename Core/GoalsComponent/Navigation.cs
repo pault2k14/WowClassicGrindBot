@@ -2060,10 +2060,68 @@ public sealed partial class Navigation : IDisposable
         }
 
         float facing = playerReader.Direction;
+
+        // Fix W (log-65 20:57:13 → 20:58:56, ~93s stuck): rotate the escape
+        // projection direction on each escalation so successive attempts
+        // probe different cardinal sectors rather than all landing in the
+        // same direction.
+        //
+        // The original code projected every attempt in raw facing direction.
+        // When a bot gets stuck against a physical obstacle (a tree, a rock,
+        // a wall), its facing is whatever direction it was last trying to
+        // walk in — which is precisely INTO the obstacle. The 10y, 20y, and
+        // 30y attempts then all project the same vector deeper into / past
+        // the same blocker. The failed-targets cache (Fix C) catches the
+        // duplicate at the same-direction step and skips, but only after
+        // RouteEscapeUnreachableTimeoutSec (12s) has marked the previous
+        // attempt as unreachable. With three attempts all in one direction,
+        // the bot wastes ~32s minimum (8s + 12s + 12s) before exhausting
+        // and falling through to TryPhysicalUnstuck — and even then,
+        // physical unstuck just turns the bot a small amount; if the route
+        // re-enters with the same facing on the next stuck cycle, the
+        // pattern repeats.
+        //
+        // Observed in log-65: the assist's path through a tree had a curved
+        // 14-node route that bent NE-then-S around the obstacle. The bot
+        // walked it, got stuck on the east side facing SE. All three
+        // RouteEscape attempts (10y/20y/30y) projected SE — further around
+        // the tree, even further from the leader (which was SW). Total
+        // wasted time: ~93s across three cycles, with StuckDetector's
+        // physical turn+move eventually rotating the bot enough that the
+        // third 30y attempt found a clear angle. Until then the leader was
+        // paused for assist and could not advance.
+        //
+        // Strategy: keep first attempt at facing (preserves the "just push
+        // through" recovery for transient stalls — bot stopped against a
+        // bump it can resolve by trying harder forward), but rotate
+        // subsequent attempts so the sweep covers ~240° around the bot.
+        // 120° steps are wide enough that the failed-targets cache (5y
+        // clearance) won't suppress them as duplicates of the previous
+        // attempt, and any single direction that's clear gets tried within
+        // three attempts.
+        //
+        //   Attempt 1 (10y):  facing                  (push forward)
+        //   Attempt 2 (20y):  facing + 120°           (NW-ish if E)
+        //   Attempt 3 (30y):  facing - 120°           (SW-ish if E)
+        //
+        // _routeEscapeCurrentYards uniquely identifies the attempt index
+        // (10/20/30) since it was incremented just above and the escalation
+        // ceiling bail-out at line 2055-2060 catches values > 30. No
+        // additional state needed.
+        const float RotateOffset = PI * 2f / 3f; // 120° in radians
+        float angleOffset;
+        if (_routeEscapeCurrentYards <= RouteEscapeStartYards + 0.5f)       // 10y
+            angleOffset = 0f;
+        else if (_routeEscapeCurrentYards <= RouteEscapeStartYards + 10.5f) // 20y
+            angleOffset = RotateOffset;
+        else                                                                 // 30y
+            angleOffset = -RotateOffset;
+        float escapeAngle = facing + angleOffset;
+
         Vector3 playerW = Nav2D(playerReader.WorldPos);
         Vector3 escapeW = new Vector3(
-            playerW.X + Cos(facing) * _routeEscapeCurrentYards,
-            playerW.Y + Sin(facing) * _routeEscapeCurrentYards,
+            playerW.X + Cos(escapeAngle) * _routeEscapeCurrentYards,
+            playerW.Y + Sin(escapeAngle) * _routeEscapeCurrentYards,
             0f);
 
         // Fix C: skip projection if it falls onto a known-unreachable target the
@@ -2090,7 +2148,7 @@ public sealed partial class Navigation : IDisposable
             }
         }
 
-        logger.LogInformation($"[NAV] RouteEscape: attempt {_routeEscapeCurrentYards:0}y -> {escapeW}");
+        logger.LogInformation($"[NAV] RouteEscape: attempt {_routeEscapeCurrentYards:0}y -> {escapeW} (facing={facing:0.00}rad, offset={angleOffset * 180f / PI:+0.0;-0.0;0}°)");
 
         SetSingleWaypoint(escapeW);
         _routeEscapeActive = true;

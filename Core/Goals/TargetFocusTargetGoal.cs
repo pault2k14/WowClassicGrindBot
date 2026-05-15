@@ -1,5 +1,7 @@
 using Core.GOAP;
+using Core.Party;
 using Microsoft.Extensions.Logging;
+using SharedLib.Extensions;
 
 namespace Core.Goals;
 
@@ -13,6 +15,7 @@ public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
     private readonly AddonBits bits;
     private readonly Wait wait;
     private readonly ChatReader chatReader;
+    private readonly LeaderConnectionStatus leaderConnection;
 
     // Set by OnGoapEvent when GoapAgent broadcasts evadeRecovery=true/false.
     // While true, CanRun() returns false so the planner cannot select this goal.
@@ -25,7 +28,8 @@ public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
 
     public TargetFocusTargetGoal(ConfigurableInput input, PlayerReader playerReader,
         AddonBits bits, ClassConfiguration classConfig, Wait wait,
-        ILogger<TargetFocusTargetGoal> logger, ChatReader chatReader)
+        ILogger<TargetFocusTargetGoal> logger, ChatReader chatReader,
+        LeaderConnectionStatus leaderConnection)
         : base(nameof(TargetFocusTargetGoal))
     {
         this.input = input;
@@ -33,6 +37,7 @@ public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
         this.bits = bits;
         this.wait = wait;
         this.chatReader = chatReader;
+        this.leaderConnection = leaderConnection;
 
         /* This was preventing AssistFocus mode from returning to combat 
          *  when combat is temporarily left for other plans. Seen when 2 or 3
@@ -94,6 +99,50 @@ public sealed class TargetFocusTargetGoal : GoapGoal, IGoapEventListener
         // and avoids that race.
         if (playerReader.FocusTargetGuid != 0 && playerReader.IsIgnored(playerReader.FocusTargetGuid))
             return false;
+
+        // Fix V (log-64 19:19:38:415 → 19:19:53:914 and 19:20:00:066 → 19:20:08:504):
+        // when the assist is far from the leader and not already in combat,
+        // prefer FFG (navigate) over TFT (target chain). TFT only changes the
+        // assist's target — it does NOT move the bot. Pressing TargetFocus and
+        // TargetOfTarget from 18.9y away while the leader is in combat does
+        // nothing useful: the assist can't engage from that range, the keys
+        // just spam every ~150ms.
+        //
+        // Without this gate the planner systematically prefers TFT (cost=10)
+        // over FFG (cost=19) whenever the leader is in combat with a hostile
+        // target, even though FFG is the goal that actually closes the gap.
+        // FFG.OnExit fires with dist >= FollowingMaxYards (7y) and publishes
+        // CurrentStatus=Waiting (FFG line ~669). On the leader side,
+        // PullTargetGoal's gate at line 315 requires the assist to be
+        // following or navigating — neither matches Waiting — so PTG bails
+        // every tick with "Not pulling — assist is not following or
+        // navigating." The leader oscillates Pull/Combat for 10+ cycles
+        // while the mob walks past it, unable to start a real pull. Observed
+        // twice in log-64 (15 s and ~8 s of dead-time before the deadlock
+        // broke on its own when the leader's plan finally fell out of
+        // Combat).
+        //
+        // Threshold 7y matches FFG.OnExit's FollowingMaxYards constant so
+        // that, once the assist is within follow range, the very next
+        // FFG.OnExit will publish Following (not Waiting) and the leader's
+        // PTG gate stays satisfied while TFT runs.
+        //
+        // Combat short-circuit: if bits.Combat() is true the assist is
+        // already engaged, the distance check is moot, and TFT should run
+        // to keep targets aligned with whatever the leader switches to.
+        // Pre-Fix-V behaviour preserved for the "assist genuinely in combat"
+        // path.
+        //
+        // leaderConnection.LastLeaderState can be null in standalone or
+        // PartyLeader modes, or transiently when the assist hasn't received
+        // any leader-state poll yet. In those cases skip the gate —
+        // pre-Fix-V behaviour preserved.
+        if (!bits.Combat() && leaderConnection.LastLeaderState is { } leader)
+        {
+            float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+            if (dist >= FollowFocusGoal.FollowingMaxYards)
+                return false;
+        }
 
         return
             (bits.FocusTarget_Hostile() && bits.FocusTarget_Combat()) ||
