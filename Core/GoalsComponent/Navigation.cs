@@ -3321,6 +3321,114 @@ public sealed partial class Navigation : IDisposable
         if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
             routeToNextWaypoint.Push(Nav2D(wayPoints.Peek()));
 
+        // Fix AC (log-69 12:00:19:399 reqId=23, assist at <-508.93, -4447.33>
+        // chasing target <-501.98, -4448.21> 7y east through a Durotar
+        // corridor between a hill and a tree):
+        //
+        // PPather returned pathLen=146 — a heavily-curved wrap-around
+        // route to detour around a tree obstacle. Fix AA correctly dropped
+        // 2 individual rear-pointing path nodes within REAR_NODE_DROP_YARDS
+        // (3y) of the start, but PathSimplify then reduced 144 remaining
+        // nodes to 17, and the simplified routeTop landed at
+        // <-512.4, -4444.8> — dist=4.3y from start, dot=-26.3 against the
+        // forward (end-start) direction. That node is REAR-POINTING but
+        // just outside Fix AA's 3y bound, so Fix AA didn't catch it.
+        //
+        // The bot then turned ~180° (LeftArrow pressed for 891+335 ms)
+        // and ran NW toward the rear routeTop. Each subsequent path
+        // request from the new (westward-drifted) position generated
+        // another rear-curving wrap (reqId=24 pathLen=147, simplified
+        // routeTop <-514.8, -4444.8> dist=3.3y dot≈-22). Within 4
+        // seconds the bot was pulled from <-508.93> west to <-517.45>
+        // and then south to <-4450.98> — a navmesh dead zone where
+        // PPather cannot find paths in ANY direction (confirmed by
+        // 6 subsequent Projection10/20/30 attempts in CantFollow's
+        // escape, all 0.0y displacement).
+        //
+        // The fix: after Fix AA filtering AND PathSimplify, examine the
+        // FINAL simplified routeTop (the node the bot will actually walk
+        // to first). If it's > REAR_TOP_REJECT_MIN_YARDS from start AND
+        // its projection on the forward direction is <= 0 (rear half-
+        // plane), reject the entire path. Clear the route, fire
+        // OnPathFailed (so FFG can rewind to LastSafeAnchor or escalate
+        // to CantFollow within ~5-10s instead of waiting 30s for
+        // TickNavActiveTimeout), and set a 500ms noPathCooldown to
+        // prevent immediate re-spam.
+        //
+        // Why REAR_TOP_REJECT_MIN_YARDS=2.0y:
+        //   - Lower bound (2y) — micro-rear-noise (0-2y) is left alone;
+        //     either Fix AA caught it (within 3y of start) or it's a
+        //     near-collinear simplification artifact that won't cause
+        //     visible misbehaviour.
+        //   - No upper bound — even if the rear routeTop is 10y away,
+        //     the bot will walk toward it and reach a worse position.
+        //     Distance doesn't make rear-pointing OK.
+        //
+        // Why dot <= 0 (strict rear half-plane):
+        //   - dot = 0: perpendicular — bot moves sideways, not toward
+        //     or away from goal. Rejecting is conservative; allowing
+        //     would let bot orbit the start. Rejection is safer.
+        //   - dot > 0: forward half-plane — bot moves at least slightly
+        //     toward the goal. Don't reject; ordinary navigation handles.
+        //
+        // Recovery path (FFG.Navigation_OnPathFailed):
+        //   1st OnPathFailed: _navAttempt=0 → rewind to LastSafeAnchor
+        //                     (most-recent successful route-pop position;
+        //                     in log-69 this would be ~<-509, -4447>).
+        //   2nd OnPathFailed: _navAttempt=1 → EnterCantFollow. From
+        //                     LastSafeAnchor's position (still navigable),
+        //                     CantFollow's escape with Fix AB-2 directional
+        //                     fallback has a real chance of finding a
+        //                     clearance direction (10y west of <-509>
+        //                     should be open terrain).
+        //
+        // False-positive risk: a path that legitimately needs to wrap
+        // (e.g., bot must navigate around a small obstacle, and the only
+        // efficient first node is genuinely backward). Cost in that case:
+        // ~5-10s to escalate to CantFollow + leader rescue via
+        // AssistRequestReturn. Acceptable tradeoff vs the alternative
+        // (30s timeout AND ending in a worse position). The log-67b
+        // navmesh-snap case is unaffected because Fix AA filters those
+        // within 3y BEFORE the path reaches this Fix AC check; the
+        // simplified routeTop in those cases will already be the next
+        // legitimate forward node.
+        //
+        // Why post-simplification (not pre-): PathSimplify can remove
+        // a forward node between start and a rear node if collinear
+        // with later forward nodes; the post-simplify routeTop is the
+        // node the bot actually walks to, which is what matters for
+        // heading and rotation decisions in the Update loop.
+        if (routeToNextWaypoint.Count > 0 && forwardLenSq > 0.0001f)
+        {
+            Vector3 simplifiedTop = Nav2D(routeToNextWaypoint.Peek());
+            float toTopX = simplifiedTop.X - start2D.X;
+            float toTopY = simplifiedTop.Y - start2D.Y;
+            float toTopDistSq = toTopX * toTopX + toTopY * toTopY;
+            const float REAR_TOP_REJECT_MIN_YARDS = 2.0f;
+
+            if (toTopDistSq > REAR_TOP_REJECT_MIN_YARDS * REAR_TOP_REJECT_MIN_YARDS)
+            {
+                float dot = forward.X * toTopX + forward.Y * toTopY;
+                if (dot <= 0f)
+                {
+                    logger.LogError(
+                        $"[NAV] Fix AC: rejecting heavily-rear-curving path. " +
+                        $"Simplified routeTop {simplifiedTop} is " +
+                        $"{MathF.Sqrt(toTopDistSq):0.00}y from start with dot={dot:0.00} " +
+                        $"<= 0 against forward direction. Bot would walk away from goal " +
+                        $"(corridor wrap-around past Fix AA's 3y bound — would pull assist " +
+                        $"into navmesh dead zone). start={result.StartW} end={result.EndW} " +
+                        $"pathLen={result.Path.Length} routeCount-after-simplify={routeToNextWaypoint.Count}. " +
+                        $"Clearing route, firing OnPathFailed for FFG to rewind/escalate.");
+                    routeToNextWaypoint.Clear();
+                    SyncRouteStateToTop();
+                    noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
+                    OnPathFailed?.Invoke(result.StartW, result.EndW);
+                    return;
+                }
+            }
+        }
+
         logger.LogDebug(
             $"[NAV-DBG] ROUTESET reqId={requestId} routeCount={routeToNextWaypoint.Count} " +
             $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +
