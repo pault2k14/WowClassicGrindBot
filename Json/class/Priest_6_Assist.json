@@ -5,12 +5,11 @@
   "Skin": true,
   "KeyboardOnly": true,
   "UnitToFollow": "party1",
-  "PathFilename": "5_Gnome.json",
-  "PathThereAndBack": true,
+  "PathFilename": "_pack/1-20/Troll.Orc/05-08_Durotar_big v2.json",
+  "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AssistPull": false,
-  "AssistApproach": false,
-  // Diamond 3
+  //"AssistApproach": false,
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
@@ -31,8 +30,9 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
+          "PartyMember1Health% > 1",
           "Mana > 45",
-          "TargetAlive"
+          "PartyMember1SpellInRange:8"
         ]
       },
       {
@@ -42,12 +42,13 @@
         "Cooldown": 1000,
         "Requirements": [
           "!P1_Fortitude",
+          "Mana% > 80",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:6",
           "!InCombat",
           "!FocusCombat",
-          "Mana% > 80",
           "!Food",
-          "!Drink",
-          "TargetAlive"
+          "!Drink"
         ]
       },
       {
@@ -58,12 +59,13 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "PartyMember1Health% < 20",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:7",
           "Mana > 45",
           "InCombat",
           "!P1_Shield",
           "!Food",
-          "!Drink",
-          "TargetAlive"
+          "!Drink"
         ]
       }
     ]
@@ -117,8 +119,9 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
-          "Mana > 45",
-          "TargetAlive"
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:8",
+          "Mana > 45"
         ]
       },
       {
@@ -165,11 +168,11 @@
       {
         "Name": "Approach",
         "Requirements": [
-          "!InMeleeRange",
-          "!Casting"
+          //"!InMeleeRange",
+          "!Casting",
           //"OutOfCombatRange"
           //"MaxRange > 27"
-          //"!SpellInRange:1"
+          "!SpellInRange:1"
         ],
         "Log": true
       }
@@ -258,6 +261,7 @@
         "Name": "Food",
         "Key": "F12",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 12000,
         "Requirements": [
           "Health% < 50",
           "!InCombat",
@@ -268,6 +272,7 @@
         "Name": "Drink",
         "Key": "F11",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 12000,
         "Requirements": [
           "Mana% < 40",
           "!InCombat",

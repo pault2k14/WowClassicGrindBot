@@ -5,23 +5,17 @@
   "Skin": true,
   "KeyboardOnly": true,
   "UnitToFollow": "party1",
-  "PathFilename": "_pack/1-20/Troll.Orc/14-19_The Barrens_northern big v2.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/05-08_Durotar_big v2.json",
   "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AssistPull": false,
-  "AssistApproach": false,
-  "Blacklist": [
-    "Kolkar Wrangler",
-    "Kolkar Stormer",
-    "Kolkar Invader",
-    "Kolkar Stormseer"
-  ],
+  //"AssistApproach": false,
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
     "MIN_MANA_PW_FORTITUDE%": 50,
-    "MIN_MANA_OFFENSIVE%": 45,
-    "MIN_TARGET_HP%": 10,
+    "MIN_MANA_OFFENSIVE%": 35,
+    "MIN_TARGET_HP%": 20,
     "Debuff_POISON": 136067
   },
   "PartyMember1": {
@@ -37,23 +31,8 @@
         "Requirements": [
           "PartyMember1Health% < 65",
           "PartyMember1Health% > 1",
-          "Mana > 75",
+          "Mana > 45",
           "PartyMember1SpellInRange:8"
-        ]
-      },
-      {
-        "Name": "Renew",
-        "Key": "6",
-        "Cost": 3,
-        "Cooldown": 10000,
-        "HasCastBar": false,
-        "UseWithForcedFollow": true,
-        "Requirements": [
-          "!P1_Renew",
-          "PartyMember1Health% < 45",
-          "PartyMember1Health% > 1",
-          "Mana > 65 ",
-          "PartyMember1SpellInRange:10"
         ]
       },
       {
@@ -63,14 +42,13 @@
         "Cooldown": 1000,
         "Requirements": [
           "!P1_Fortitude",
+          "Mana% > 80",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:6",
           "!InCombat",
           "!FocusCombat",
-          "PartyMember1Health% > 1",
-          "Mana% > 80",
           "!Food",
-          "!Drink",
-          "PartyMember1SpellInRange:6"
-
+          "!Drink"
         ]
       },
       {
@@ -82,12 +60,12 @@
         "Requirements": [
           "PartyMember1Health% < 20",
           "PartyMember1Health% > 1",
-          "Mana > 80",
+          "PartyMember1SpellInRange:7",
+          "Mana > 45",
           "InCombat",
           "!P1_Shield",
           "!Food",
-          "!Drink",
-          "PartyMember1SpellInRange:7"
+          "!Drink"
         ]
       }
     ]
@@ -109,7 +87,7 @@
         "WhenUsable": true,
         "AfterCastWaitBuff": true,
         "Requirements": [
-          "Mana% > MIN_MANA_OFFENSIVE%",
+          "MIN_MANA_OFFENSIVE% < Mana%",
           "!Shield"
         ]
       },
@@ -118,7 +96,7 @@
         "Key": "5",
         "BeforeCastFaceTarget": true,
         "Requirements": [
-          "Mana% > MIN_MANA_OFFENSIVE%"
+          "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       }
     ]
@@ -142,34 +120,8 @@
         "Requirements": [
           "PartyMember1Health% < 65",
           "PartyMember1Health% > 1",
-          "Mana > 75",
-          "PartyMember1SpellInRange:8"
-        ]
-      },
-      {
-        "Name": "Renew Party1",
-        "Key": "6",
-        "Cost": 3,
-        "Cooldown": 10000,
-        "HasCastBar": false,
-        "UseWithForcedFollow": true,
-        "ChangeTargetTo": "party1",
-        "Requirements": [
-          "!P1_Renew",
-          "PartyMember1Health% < 45",
-          "PartyMember1Health% > 1",
-          "Mana > 65",
-          "PartyMember1SpellInRange:10"
-        ]
-      },
-      {
-        "Name": "Fade",
-        "Key": "7",
-        "WhenUsable": true,
-        "Cooldown": 30000,
-        "Requirements": [
-          "Health% < 70",
-          "Mana > 40"
+          "PartyMember1SpellInRange:8",
+          "Mana > 45"
         ]
       },
       {
@@ -180,20 +132,18 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 75"
+          "Mana > 45"
         ]
       },
       {
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 3000,
+        "Cooldown": 12000,
         "Requirements": [
-          "!Shadow Word: Pain",
-          "Mana% > MIN_MANA_OFFENSIVE%"
+          "MIN_MANA_OFFENSIVE% < Mana%"
         ]
       },
-
       {
         "Name": "Power Word: Shield",
         "Key": "9",
@@ -201,7 +151,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 80",
+          "Mana > 45",
           "!Shield"
         ]
       },
@@ -211,8 +161,8 @@
         "HasCastBar": true,
         "Requirements": [
           "MaxRange < 27",
-          "Mana% > MIN_MANA_OFFENSIVE%",
-          "TargetHealth% > MIN_TARGET_HP%"
+          "TargetHealth% > MIN_TARGET_HP%",
+          "Mana% > 50"
         ]
       },
       {
@@ -229,10 +179,10 @@
       {
         "Name": "Approach",
         "Requirements": [
-          //"!InMeleeRange"
-          //"OutOfCombatRange"
-          //"MaxRange > 27",
+          //"!InMeleeRange",
           "!Casting",
+          //"OutOfCombatRange"
+          //"MaxRange > 27"
           "!SpellInRange:1"
         ],
         "Log": true
@@ -247,43 +197,8 @@
         "WhenUsable": true,
         "AfterCastWaitBuff": true,
         "Requirements": [
-          "Mana > 80",
+          "Mana > 45",
           "!Shield"
-        ]
-      },
-      {
-        "Name": "Renew",
-        "Key": "6",
-        "Cost": 3,
-        "Cooldown": 15000,
-        "HasCastBar": false,
-        "UseWithForcedFollow": true,
-        "Requirements": [
-          "!Renew",
-          "Mana > 65",
-          "TargetAlive"
-        ]
-      },
-      {
-        "Name": "Fade",
-        "Key": "7",
-        "WhenUsable": true,
-        "Cooldown": 30000,
-        "Requirements": [
-          "Health% < 70",
-          "Mana > 40"
-        ]
-      },
-      {
-        "Name": "Inner Fire",
-        "Key": "8",
-        "Cooldown": 1000,
-        "HasCastBar": false,
-        "Requirements": [
-          "Mana% > 20",
-          "!Inner Fire",
-          "!Food",
-          "!Drink"
         ]
       },
       {
@@ -315,24 +230,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 65",
-          "Mana > 75",
-          "!Food",
-          "!Drink"
-        ]
-      },
-      {
-        "Name": "Renew",
-        "Key": "6",
-        "Cost": 3,
-        "Cooldown": 10000,
-        "HasCastBar": false,
-        "UseWithForcedFollow": true,
-        "Requirements": [
-          "!Renew",
-          "Health% < 30",
-          "Mana > 65",
-          "TargetAlive",
-          "!InCombat",
+          "Mana > 45",
           "!Food",
           "!Drink"
         ]
@@ -345,7 +243,7 @@
         "Cooldown": 500,
         "Requirements": [
           "Health% < 70",
-          "Mana > 80",
+          "Mana > 45",
           "!Shield",
           "InCombat",
           "!Food",
@@ -365,18 +263,6 @@
           "!Food",
           "!Drink"
         ]
-      },
-      {
-        "Name": "Inner Fire",
-        "Key": "8",
-        "Cooldown": 1000,
-        "HasCastBar": false,
-        "Requirements": [
-          "Mana% > 20",
-          "!Inner Fire",
-          "!Food",
-          "!Drink"
-        ]
       }
     ]
   },
@@ -386,6 +272,7 @@
         "Name": "Food",
         "Key": "F12",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 12000,
         "Requirements": [
           "Health% < 50",
           "!InCombat",
@@ -396,8 +283,9 @@
         "Name": "Drink",
         "Key": "F11",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 12000,
         "Requirements": [
-          "Mana% < 30",
+          "Mana% < 40",
           "!InCombat",
           "!FocusCombat"
         ]
