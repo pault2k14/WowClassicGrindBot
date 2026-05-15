@@ -521,6 +521,51 @@ public sealed partial class Navigation : IDisposable
     private int sameNoPathCount;
     private const int MaxSameNoPathBeforeFallback = 3;
 
+    // Fix AB-1 (log-68 11:03:43:081 → 11:04:12:949 — assist stuck for 30s in
+    // Durotar corridor at <-517.30, -4448.72> with target <-510.42, -4449.06>
+    // only 6.9y east. PPather's navmesh ends on a hillside; every search
+    // returned "closest spot <-508.80, -4441.2, Z=67.11>" with "Closest spot
+    // is too far from target. 9.2>5", taking ~10s per attempt to fail):
+    //
+    // When pather (PPather/RemotePathingAPIV3) takes longer than the
+    // 3-second waitingForPathResult watchdog (line 1062) to return a
+    // failure, the result arrives AFTER a new request for the same (start,
+    // end) has been enqueued and made the previous one stale. The
+    // PathCalculatedCallback stale-result branch (line 3034) drops the
+    // result without informing HandleRepeatedNoPath or OnPathFailed
+    // subscribers. The same-(start, end) failure pattern that
+    // HandleRepeatedNoPath would have detected after 3 hits NEVER
+    // accumulates — each failure is silently stale-dropped.
+    //
+    // Log-68 evidence: 10 successive ENQUEUE events with identical
+    // start=<-517.30, -4448.72> end=<-510.42, -4449.06> dist=6.89y over the
+    // 30-second window, with the original reqId=328 callback arriving at
+    // 11:03:53:416 reporting "Ignoring stale path result reqId=328
+    // waitingReqId=331 activeReqId=331" — the failure information was
+    // discarded. FFG was left to time out at the 30s TickNavActiveTimeout
+    // wall before escalating to CantFollow.
+    //
+    // Fix: when a stale empty-path result arrives AND its (start, end)
+    // matches the currently-in-flight request's (start, end), count it
+    // toward a dedicated stale-no-path counter. After
+    // StaleEmptyResultsBeforeOnPathFailed (3) such matches, fire
+    // OnPathFailed and set a longer noPathCooldown so FFG's
+    // Navigation_OnPathFailed handler can escalate to CantFollow within
+    // ~9 s (3 × ~3 s per stale-result arrival pulse from PPather's
+    // 10s timeout cadence with the 3s wait-watchdog interleaving)
+    // instead of waiting 30 s for TickNavActiveTimeout.
+    //
+    // Intentionally NOT routed through HandleRepeatedNoPath because that
+    // function's wpCount==1 branch builds a DIRECT route to the
+    // unreachable target after 2 hits (line ~2986). For the log-68
+    // corridor that would walk the bot straight into the hill geometry.
+    // The stale-counter path here uses ONLY the OnPathFailed escalation,
+    // which is safe regardless of why the pather couldn't find a route.
+    private int _staleEmptySameCount;
+    private Vector3 _staleEmptyLastStartW;
+    private Vector3 _staleEmptyLastEndW;
+    private const int StaleEmptyResultsBeforeOnPathFailed = 3;
+
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
         PlayerDirection playerDirection,
@@ -3035,6 +3080,77 @@ public sealed partial class Navigation : IDisposable
         {
             logger.LogInformation(
                 $"[NAV] Ignoring stale path result reqId={requestId} waitingReqId={waitingId} activeReqId={activeId}");
+
+            // Fix AB-1: account for stale empty-path results that match the
+            // CURRENTLY in-flight request's (start, end). See the long comment
+            // at the field declarations (~line 388) for the full rationale.
+            //
+            // We compare the stale result's (start, end) against the
+            // last-issued path request's (start, end) (lastRequestStart /
+            // lastRequestEnd, set in TryBeginPathRequest). When they match,
+            // the pather has just confirmed that the path FFG is still asking
+            // for is unreachable. After StaleEmptyResultsBeforeOnPathFailed
+            // such confirmations, fire OnPathFailed so FFG's existing
+            // handler can escalate to CantFollow without waiting for the
+            // 30s TickNavActiveTimeout wall.
+            //
+            // 1y tolerance (not 0.1y) because lastRequestStart updates each
+            // time a new request is issued — by the time a 10s-stale result
+            // arrives, the player may have drifted a fraction of a yard, but
+            // the requested start position will have shifted with the bot.
+            // The result's recorded start is from when its request was queued.
+            if (result.Path.Length == 0)
+            {
+                bool matchesActiveRequest =
+                    result.StartW.WorldDistanceXYTo(lastRequestStart) < 1f &&
+                    result.EndW.WorldDistanceXYTo(lastRequestEnd) < 1f;
+
+                if (matchesActiveRequest)
+                {
+                    bool sameAsLastStale =
+                        result.StartW.WorldDistanceXYTo(_staleEmptyLastStartW) < 1f &&
+                        result.EndW.WorldDistanceXYTo(_staleEmptyLastEndW) < 1f;
+                    if (!sameAsLastStale)
+                    {
+                        _staleEmptyLastStartW = result.StartW;
+                        _staleEmptyLastEndW = result.EndW;
+                        _staleEmptySameCount = 0;
+                    }
+                    _staleEmptySameCount++;
+
+                    logger.LogWarning(
+                        $"[NAV] Fix AB-1: stale no-path #{_staleEmptySameCount}/" +
+                        $"{StaleEmptyResultsBeforeOnPathFailed} for active (start, end). " +
+                        $"start={result.StartW} end={result.EndW}");
+
+                    if (_staleEmptySameCount >= StaleEmptyResultsBeforeOnPathFailed)
+                    {
+                        logger.LogError(
+                            $"[NAV] Fix AB-1: pather failed {_staleEmptySameCount} consecutive " +
+                            $"times for the same (start, end) — firing OnPathFailed to escalate. " +
+                            $"start={result.StartW} end={result.EndW}");
+                        _staleEmptySameCount = 0;
+                        _staleEmptyLastStartW = default;
+                        _staleEmptyLastEndW = default;
+                        // 2s cooldown — long enough that the next FFG tick (after
+                        // OnPathFailed fires) doesn't immediately re-trigger a path
+                        // request inside FFG.Navigation_OnPathFailed's rewind branch
+                        // before that branch sets the rewind anchor and waits for
+                        // it to resolve.
+                        noPathCooldownUntilUtc = DateTime.UtcNow.AddSeconds(2);
+                        OnPathFailed?.Invoke(result.StartW, result.EndW);
+                    }
+                }
+                else
+                {
+                    // The active request has changed since this stale result
+                    // was issued — the failure information is no longer
+                    // relevant to what FFG is currently asking. Reset.
+                    _staleEmptySameCount = 0;
+                    _staleEmptyLastStartW = default;
+                    _staleEmptyLastEndW = default;
+                }
+            }
             return;
         }
 
@@ -3084,6 +3200,13 @@ public sealed partial class Navigation : IDisposable
         sameNoPathCount = 0;
         lastNoPathStartW = default;
         lastNoPathEndW = default;
+
+        // Fix AB-1: pather just returned a successful path for the active
+        // request — clear the stale-empty tracker so a future stale failure
+        // for a different (start, end) starts the count fresh.
+        _staleEmptySameCount = 0;
+        _staleEmptyLastStartW = default;
+        _staleEmptyLastEndW = default;
 
         LogPathfinderSuccess(logger, result.Distance, result.StartW, result.EndW, result.ElapsedMs);
 

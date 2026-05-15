@@ -1794,50 +1794,188 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// <summary>
     /// Computes an escape waypoint <paramref name="yards"/> away from the
     /// nearest blacklist rect's center, projected through the assist's
-    /// current position. Returns <see cref="Vector3.Zero"/> if no rect
-    /// contains the assist within the standard inflation margin.
+    /// current position.
+    ///
+    /// <para>When no rect contains the assist (Fix AB-2), falls back to a
+    /// direction-aware projection AWAY from the leader's body, with
+    /// ±120° rotation per escalation level — so the Projection10/20/30
+    /// escape phases sweep a ~240° arc and have a real chance of
+    /// physically displacing the bot even in non-blacklisted zones
+    /// (e.g., Durotar corridor stucks where PPather genuinely cannot
+    /// navigate the terrain).</para>
     /// </summary>
     private Vector3 ComputeAwayFromRectWaypoint(float yards)
     {
-        if (navigation.AreaBlacklist == null)
-            return default;
-
         Vector3 pos = playerReader.WorldPos;
 
-        // Inflate the containment check by the same margin the rest of
-        // Navigation uses for detour candidates (DetourMargin * 0.5).
-        // This catches the log-52 sliver case where the assist is just
-        // outside the strict rect but inside the 6 y safety zone — the
-        // pathing problem is the same, and the escape direction should
-        // be the same.
-        float searchInflation = navigation.DetourMargin * 0.5f;
-        if (!navigation.AreaBlacklist.TryGetContainingRectInflated(pos, searchInflation, out var rect))
-            return default;
-
-        float centerX = (rect.MinX + rect.MaxX) * 0.5f;
-        float centerY = (rect.MinY + rect.MaxY) * 0.5f;
-
-        float dx = pos.X - centerX;
-        float dy = pos.Y - centerY;
-        float magSq = dx * dx + dy * dy;
-        float mag = MathF.Sqrt(magSq);
-
-        if (mag < 0.001f)
+        // ── Path 1: rect-aware projection (original behaviour) ────────────
+        if (navigation.AreaBlacklist != null)
         {
-            // Degenerate: assist is exactly at the rect center. Pick an
-            // arbitrary positive-X direction — any escape direction will
-            // do, and the next projection cycle will recompute from a
-            // non-degenerate position.
-            dx = 1f;
-            dy = 0f;
-            mag = 1f;
+            // Inflate the containment check by the same margin the rest of
+            // Navigation uses for detour candidates (DetourMargin * 0.5).
+            // This catches the log-52 sliver case where the assist is just
+            // outside the strict rect but inside the 6 y safety zone — the
+            // pathing problem is the same, and the escape direction should
+            // be the same.
+            float searchInflation = navigation.DetourMargin * 0.5f;
+            if (navigation.AreaBlacklist.TryGetContainingRectInflated(pos, searchInflation, out var rect))
+            {
+                float centerX = (rect.MinX + rect.MaxX) * 0.5f;
+                float centerY = (rect.MinY + rect.MaxY) * 0.5f;
+
+                float dx = pos.X - centerX;
+                float dy = pos.Y - centerY;
+                float magSq = dx * dx + dy * dy;
+                float mag = MathF.Sqrt(magSq);
+
+                if (mag < 0.001f)
+                {
+                    // Degenerate: assist is exactly at the rect center. Pick an
+                    // arbitrary positive-X direction — any escape direction will
+                    // do, and the next projection cycle will recompute from a
+                    // non-degenerate position.
+                    dx = 1f;
+                    dy = 0f;
+                    mag = 1f;
+                }
+
+                float invMag = 1f / mag;
+                return new Vector3(
+                    pos.X + dx * invMag * yards,
+                    pos.Y + dy * invMag * yards,
+                    pos.Z);
+            }
         }
 
-        float invMag = 1f / mag;
-        return new Vector3(
-            pos.X + dx * invMag * yards,
-            pos.Y + dy * invMag * yards,
-            pos.Z);
+        // ── Path 2: Fix AB-2 directional fallback ─────────────────────────
+        //
+        // Fix AB-2 (log-68 11:03:43→11:04:25, assist stuck in Durotar
+        // corridor between hill and tree; no blacklist exists for the
+        // route so the original return-default fell through to
+        // LastSafeAnchor):
+        //
+        // When no rect contains the assist (within the inflated search
+        // zone), the original code returned default and StartProjectionPhase
+        // logged "Projection{yards} — not inside any inflated rect;
+        // CantFollow may not be BL-driven. Falling through to LastSafeAnchor."
+        //
+        // In log-68, LastSafeAnchor was 0.1y from the assist's current
+        // position (set during a recent successful navigation step before
+        // the stuck began). The co-located check in StartLastSafeAnchorPhase
+        // (line ~1714) then jumped to PhysicalUnstuck — fired ONCE — and
+        // afterwards the second Projection10 attempt repeated the same
+        // fall-through pattern, this time landing on an anchor 5.8y away
+        // (now reachable in principle) but PPather still failed to route
+        // there. After 8s of no progress all phases were exhausted, and
+        // the bot held position for another ~16s waiting for the leader.
+        //
+        // The mechanism missing was directional waypoint-based escape
+        // when no blacklist exists. With BL absent, the entire 10/20/30
+        // projection escalation collapsed into a single PhysicalUnstuck
+        // round.
+        //
+        // Fix: provide a fallback direction so the Projection phases can
+        // still emit meaningful escape waypoints. Direction strategy —
+        // AWAY from the leader's body (the unreachable target):
+        //   - The leader is "where we want to go but can't reach".
+        //   - Reversing the leader→assist vector points along the bot's
+        //     natural back-step direction; whatever path the assist took
+        //     to arrive at the stuck position is probably traversable in
+        //     reverse.
+        //   - The leader, via AssistRequestReturn, is navigating TOWARD
+        //     the assist, so even slight backward displacement doesn't
+        //     hurt the rendezvous — the leader catches up.
+        //
+        // Rotation by escalation level (mirrors Fix W in Navigation.cs):
+        //   10y: 0°    — straight back along the leader→assist axis
+        //   20y: +120° — 60° forward-and-side from straight back
+        //   30y: -120° — 60° forward-and-side, opposite side
+        // This sweeps ~240° around the bot so three attempts cover
+        // most clear directions. If "straight back" is also obstructed
+        // (corner stuck, etc.), one of the rotated attempts is more
+        // likely to find clearance.
+        //
+        // Edge cases:
+        //   - Leader missing/stale: use reversed player facing
+        //     (-cos(facing), -sin(facing)). This is the "back away from
+        //     whatever you were heading toward" heuristic.
+        //   - Co-located with leader (degenerate, shouldn't reach
+        //     CantFollow but defensive): same reversed-facing fallback.
+        //
+        // The projection target may itself be unreachable by PPather
+        // (e.g., 30y backward lands in another impassable area). In
+        // that case the escape phase's 3-second budget elapses with no
+        // progress and EscalateEscapePhase fires normally. Behaviour is
+        // strictly improved over the pre-fix collapse: we get up to 3
+        // directional attempts where previously we got 0.
+        LeaderState? leader = leaderConnection.LastLeaderState;
+        bool leaderFresh = leader != null &&
+                           leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs;
+
+        float fdx, fdy;
+        bool usingLeaderDirection;
+
+        if (leaderFresh)
+        {
+            fdx = pos.X - leader!.WorldPos.X;
+            fdy = pos.Y - leader.WorldPos.Y;
+            float lenSq = fdx * fdx + fdy * fdy;
+            if (lenSq < 0.001f)
+            {
+                float facing = playerReader.Direction;
+                fdx = -MathF.Cos(facing);
+                fdy = -MathF.Sin(facing);
+                usingLeaderDirection = false;
+            }
+            else
+            {
+                float len = MathF.Sqrt(lenSq);
+                fdx /= len;
+                fdy /= len;
+                usingLeaderDirection = true;
+            }
+        }
+        else
+        {
+            float facing = playerReader.Direction;
+            fdx = -MathF.Cos(facing);
+            fdy = -MathF.Sin(facing);
+            usingLeaderDirection = false;
+        }
+
+        // ±120° rotation. yards is always 10/20/30 (the three Projection
+        // phases pass these constants explicitly). Use >25/>15 thresholds
+        // so the test is robust to future constant adjustments without
+        // breaking at the exact boundaries.
+        const float Rotate120 = 2f * MathF.PI / 3f;
+        float angleOffset = 0f;
+        if (yards > 25f)
+            angleOffset = -Rotate120;
+        else if (yards > 15f)
+            angleOffset = Rotate120;
+
+        if (MathF.Abs(angleOffset) > 0.001f)
+        {
+            float cos = MathF.Cos(angleOffset);
+            float sin = MathF.Sin(angleOffset);
+            float rdx = fdx * cos - fdy * sin;
+            float rdy = fdx * sin + fdy * cos;
+            fdx = rdx;
+            fdy = rdy;
+        }
+
+        Vector3 fallbackTarget = new Vector3(
+            pos.X + fdx * yards,
+            pos.Y + fdy * yards,
+            0f);
+
+        logger.LogInformation(
+            $"[FFG] Fix AB-2: no BL rect contains assist — directional fallback projection " +
+            $"{yards:0}y (offset={angleOffset * 180f / MathF.PI:+0.0;-0.0;0}°, " +
+            $"basis={(usingLeaderDirection ? "away-from-leader" : "reversed-facing")}) → " +
+            $"{fallbackTarget} (pos={pos}).");
+
+        return fallbackTarget;
     }
 
     // -----------------------------------------------------------------------
