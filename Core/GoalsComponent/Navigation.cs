@@ -3030,6 +3030,101 @@ public sealed partial class Navigation : IDisposable
 
             if (sameNoPathCount == 2 && dist <= 30f)
             {
+                // Fix AD (log-70b 12:32:40:629→12:33:12:706, assist stuck for
+                // 32 seconds in a narrow corridor between a hill and a wall;
+                // user description: "ran directly into the hill, then did
+                // unstuck that got it part way into the corridor while running
+                // against the side of the hill, before it gave up"):
+                //
+                // The original count==2 branch unconditionally pushed a direct
+                // route to the unreachable target whenever dist <= 30y. That
+                // 30y bound permits the dangerous walk-into-terrain case: when
+                // PPather has just failed twice for the same (start, end) at a
+                // significant distance (say 8.16y in log-70b), it's signalling
+                // that the geometry doesn't admit a path. Walking the bot
+                // BLINDLY toward the unreachable point doesn't fix the
+                // unreachability — it just rams the bot into whatever obstacle
+                // PPather was failing to route around. In log-70b reqId=113
+                // returned pathLen=0 at 12:32:40:629 with dist=8.16y, the
+                // direct-route push fired at 12:32:40:630, and the bot walked
+                // ~5y SE from <-468.88, -4398.20> to <-465.23, -4401.78> — past
+                // the corridor's safe zone and into the navmesh dead area where
+                // PPather's "closest spot Z=49.26" indicates impassable
+                // hillside terrain. From <-465.23, -4401.78> every subsequent
+                // path request stale-timed-out (3s wait, 10s PPather response).
+                // 30 seconds later TickNavActiveTimeout fired CantFollow.
+                //
+                // Importantly, my own comment block in the Fix AB-1 design
+                // (line ~558) acknowledged this hazard:
+                //     "Intentionally NOT routed through HandleRepeatedNoPath
+                //      because that function's count==1 branch builds a DIRECT
+                //      route to the unreachable target after 2 hits — for the
+                //      log-68 corridor that would walk the bot straight into
+                //      the hill geometry."
+                // Fix AB-1 routed AROUND this branch but the branch itself
+                // remained intact and now fires through the normal (non-stale)
+                // path with the same harmful effect. Fix AD closes that gap.
+                //
+                // Fix: bound the direct-route push to dist <=
+                // DirectRouteMaxSafeYards (5y). For dist > 5y the bot has
+                // meaningful distance to traverse and walking forward into
+                // unknown terrain is unsafe; fire OnPathFailed instead so
+                // FFG's Navigation_OnPathFailed handler can rewind to
+                // LastSafeAnchor (a known navigable position from recent
+                // successful route progress) or, on the second failure,
+                // escalate to CantFollow within ~5s instead of waiting 30s.
+                //
+                // Why 5y:
+                //   - 5y is just under FollowingMaxYards (7y) — the distance
+                //     at which the bot considers itself "in follow position".
+                //     Below this, the bot is essentially adjacent to its
+                //     target and a brief direct walk is unlikely to do harm
+                //     even if the pather is having a navmesh hiccup.
+                //   - 5y is short enough that a walk-into-terrain incident is
+                //     bounded: even worst-case the bot ends up 5y closer to
+                //     its target, still within Following range of the leader.
+                //   - 5y > POP_DIST (3.6y) so we don't immediately pop the
+                //     pushed wp before any movement — the direct-route push
+                //     can actually achieve some forward progress when it's
+                //     safe to use.
+                //
+                // For log-70b's case (dist=8.16y > 5y), Fix AD fires
+                // OnPathFailed at 12:32:40:630. FFG's
+                // Navigation_OnPathFailed: _navAttempt=0 → rewind to
+                // LastSafeAnchor (set during paths 110-111's successful route
+                // progress, somewhere in the navigable corridor). Bot
+                // navigates back ~1-3y. New path request from anchor.
+                // If that also fails: _navAttempt=1 → EnterCantFollow at
+                // ~12:32:41 (vs 12:33:12 actual). Saved ~31 seconds, AND the
+                // CantFollow occurs from a navigable position where
+                // Projection10/20/30 escape (Fix AB-2) has a real chance of
+                // succeeding instead of running 0.0y displacement against
+                // the dead zone.
+                //
+                // No change to count==3 forcing stuckDetector.Update or to
+                // the outer escalation at sameNoPathCount >=
+                // MaxSameNoPathBeforeFallback (3) — both remain useful for
+                // their intended cases (genuinely small targets, repeated
+                // failures from same position).
+                const float DirectRouteMaxSafeYards = 5.0f;
+                if (dist > DirectRouteMaxSafeYards)
+                {
+                    logger.LogWarning(
+                        $"[NAV] Fix AD: skipping direct-route push (count=2 " +
+                        $"dist={dist:0.0}y > {DirectRouteMaxSafeYards:0.0}y) — pather has " +
+                        $"failed twice for this (start, end) at a non-trivial " +
+                        $"distance; walking the bot directly toward an " +
+                        $"unreachable target would ram it into terrain. Firing " +
+                        $"OnPathFailed for FFG to rewind to LastSafeAnchor or " +
+                        $"escalate to CantFollow. start={startW} end={endW}");
+                    sameNoPathCount = 0;
+                    lastNoPathStartW = default;
+                    lastNoPathEndW = default;
+                    noPathCooldownUntilUtc = DateTime.UtcNow.AddSeconds(1);
+                    OnPathFailed?.Invoke(startW, endW);
+                    return true;
+                }
+
                 logger.LogWarning(
                     $"[NAV] No-path fallback: building direct route start={startW} end={endW} dist={dist:0.00}");
 
