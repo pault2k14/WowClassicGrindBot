@@ -5,7 +5,7 @@
   "Skin": true,
   "KeyboardOnly": true,
   "UnitToFollow": "party1",
-  "PathFilename": "5_Gnome.json",
+  "PathFilename": "_pack/20-30/Ashenvale/26-28 Wolves and Stags v2.json",
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AssistPull": false,
@@ -33,8 +33,9 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
-          "Mana > 125",
-          "TargetAlive"
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:8",
+          "Mana > 125"
         ]
       },
       {
@@ -47,8 +48,9 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 105 ",
-          "TargetAlive"
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:10",
+          "Mana > 105 "
         ]
       },
       {
@@ -58,12 +60,13 @@
         "Cooldown": 1000,
         "Requirements": [
           "!P1_Fortitude",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:6",
           "!InCombat",
           "!FocusCombat",
           "Mana% > 80",
           "!Food",
-          "!Drink",
-          "TargetAlive"
+          "!Drink"
         ]
       },
       {
@@ -74,12 +77,13 @@
         "UseWithForcedFollow": true,
         "Requirements": [
           "PartyMember1Health% < 20",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:7",
           "Mana > 175",
           "InCombat",
           "!P1_Shield",
           "!Food",
-          "!Drink",
-          "TargetAlive"
+          "!Drink"
         ]
       }
     ]
@@ -120,11 +124,13 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
+        "Cooldown": 120000,
         "Requirement": "Health% < 20"
       },
       {
         "Name": "Mana Potion",
         "Key": "F9",
+        "Cooldown": 120000,
         "Requirements": [
           "Mana% < 15",
           "MobCount > 1"
@@ -141,8 +147,9 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
-          "Mana > 125",
-          "TargetAlive"
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:8",
+          "Mana > 125"
         ]
       },
       {
@@ -156,8 +163,9 @@
         "Requirements": [
           "!P1_Renew",
           "PartyMember1Health% < 45",
-          "Mana > 105",
-          "TargetAlive"
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:10",
+          "Mana > 105"
         ]
       },
       {
@@ -185,7 +193,7 @@
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 1500,
+        "Cooldown": 3000,
         "Requirements": [
           "!Shadow Word: Pain",
           "MaxRange < 27",
@@ -197,7 +205,7 @@
         "Key": "1",
         "AfterCastWaitCastbar": true,
         "HasCastBar": true,
-        "Cooldown": 3000,
+        "Cooldown": 5000,
         "Requirements": [
           "!Holy Fire",
           "MaxRange < 27",
@@ -242,9 +250,91 @@
           //"!InMeleeRange"
           //"OutOfCombatRange"
           //"MaxRange > 27"
+          "!Casting",
           "!SpellInRange:1"
         ],
         "Log": true
+      }
+    ]
+  },
+  "FollowFocusActions": {
+    "Sequence": [
+      {
+        "Name": "HP Potion",
+        "Key": "F10",
+        "Cooldown": 120000,
+        "Requirement": "Health% < 20"
+      },
+      {
+        "Name": "Flash Heal Party1",
+        "Key": "3",
+        "Cost": 2,
+        "Cooldown": 500,
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "ChangeTargetTo": "party1",
+        "AfterCastDelay": 500,
+        "Requirements": [
+          "PartyMember1Health% < 65",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:8",
+          "Mana > 125"
+        ]
+      },
+      {
+        "Name": "Renew Party1",
+        "Key": "6",
+        "Cost": 3,
+        "Cooldown": 10000,
+        "HasCastBar": false,
+        "UseWithForcedFollow": true,
+        "ChangeTargetTo": "party1",
+        "Requirements": [
+          "!P1_Renew",
+          "PartyMember1Health% < 45",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:10",
+          "Mana > 105"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield Party1",
+        "Key": "9",
+        "WhenUsable": true,
+        "Cooldown": 500,
+        "UseWithForcedFollow": true,
+        "Requirements": [
+          "PartyMember1Health% < 20",
+          "PartyMember1Health% > 1",
+          "PartyMember1SpellInRange:7",
+          "Mana > 175",
+          "InCombat",
+          "!P1_Shield",
+          "!Food",
+          "!Drink"
+        ]
+      },
+      {
+        "Name": "Flash Heal",
+        "Key": "3",
+        "HasCastBar": true,
+        "AfterCastWaitCastbar": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 125"
+        ]
+      },
+      {
+        "Name": "Power Word: Shield",
+        "Key": "9",
+        "WhenUsable": true,
+        "Cooldown": 500,
+        "Requirements": [
+          "Health% < 70",
+          "Mana > 175",
+          "!Shield"
+        ]
       }
     ]
   },
@@ -371,6 +461,7 @@
       {
         "Name": "HP Potion",
         "Key": "F10",
+        "Cooldown": 120000,
         "UseWithForcedFollow": true,
         "Requirements": [
           "Health% < 20",

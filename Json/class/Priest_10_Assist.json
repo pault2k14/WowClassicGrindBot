@@ -5,20 +5,11 @@
   "Skin": true,
   "KeyboardOnly": true,
   "UnitToFollow": "party1",
-  "PathFilename": "5_Gnome.json",
-  "PathThereAndBack": true,
+  "PathFilename": "_pack/1-20/Troll.Orc/10-12_The Barrens_Crossroads Circle v2.json",
+  "PathThereAndBack": false,
   "PathReduceSteps": false,
   "AssistPull": false,
   "AssistApproach": false,
-  "RaidIconsToSkipInCombat": [
-    5, // Moon
-    6, // Square
-    7 // Cross
-  ],
-  "RaidIconsToAttackWithoutFocus": [
-    2 // Circle
-  ],
-  // Diamond 3
   "IntVariables": {
     "MIN_WATER%": 20,
     "MIN_MANA_LESSER_HEAL%": 10,
@@ -189,8 +180,10 @@
         "Name": "Shadow Word: Pain",
         "Key": "5",
         "BeforeCastFaceTarget": true,
-        "Cooldown": 12000,
+        "Cooldown": 3000,
         "Requirements": [
+          "!Shadow Word: Pain",
+          "MaxRange < 27",
           "Mana% > MIN_MANA_OFFENSIVE%"
         ]
       },
@@ -232,6 +225,7 @@
           //"!InMeleeRange"
           //"OutOfCombatRange"
           //"MaxRange > 27"
+          "!Casting",
           "!SpellInRange:1"
         ],
         "Log": true

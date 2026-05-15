@@ -4,7 +4,7 @@
   "Loot": true,
   "KeyboardOnly": true,
   "UnitToFollow": "party1",
-  "PathFilename": "5_Gnome.json",
+  "PathFilename": "_pack/1-20/Troll.Orc/01-04_Durotar_Valley of Trials.json",
   "PathThereAndBack": true,
   "PathReduceSteps": false,
   "AssistPull": false,
@@ -30,8 +30,9 @@
         "AfterCastDelay": 500,
         "Requirements": [
           "PartyMember1Health% < 65",
+          "PartyMember1Health% > 1",
           "Mana > 45",
-          "TargetAlive"
+          "PartyMember1SpellInRange:8"
         ]
       }
     ]
@@ -98,7 +99,7 @@
   },
   "ForcedFollow": {
     "Sequence": [
-    
+
     ]
   },
   "Adhoc": {
@@ -134,6 +135,7 @@
         "Name": "Drink",
         "Key": "F11",
         "AfterCastMaxDelay": 3000,
+        "Cooldown": 12000,
         "Requirements": [
           "Mana% < 40",
           "!InCombat",
@@ -144,7 +146,7 @@
   },
   "LootActions": {
     "Sequence": [
-      
+
     ]
   }
 }
