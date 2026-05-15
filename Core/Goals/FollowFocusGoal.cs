@@ -372,6 +372,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private DateTime _stuckEscapeLastUtc = DateTime.MinValue;
 
     // -----------------------------------------------------------------------
+    // Option B refactor — moved from Navigation.cs:
+    //   Fix AB-1 stale-empty-path counter state. Used by
+    //   Navigation_OnStaleEmptyPathMatchesActive to count consecutive
+    //   stale empty-path results that match the active in-flight request.
+    //   The counter is also reset in Navigation_OnPathResultInspected on
+    //   accepted paths (any successful, non-rejected path implies the
+    //   pather is functional again for the current (start, end)), and on
+    //   OnEnter to avoid carrying state across follow sessions.
+    // -----------------------------------------------------------------------
+    private int _staleEmptySameCount;
+    private Vector3 _staleEmptyLastStartW;
+    private Vector3 _staleEmptyLastEndW;
+    private const int StaleEmptyResultsBeforeOnPathFailed = 3;
+
+    // -----------------------------------------------------------------------
     // Active-navigation stuck reporting
     //
     // Detects a stationary assist while in NavigatingToLeader and reports
@@ -454,6 +469,15 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
         navigation.OnWayPointReached    += Navigation_OnWayPointReached;
         navigation.OnPathFailed         += Navigation_OnPathFailed;
+
+        // Option B refactor: subscribe to Navigation's policy-decision
+        // events to host the moved Fix AB-1 / Fix AC+AE / Fix AD policies.
+        // FRG does not subscribe to these events so the leader sees no
+        // behavior change. See the corresponding Navigation_On* handlers
+        // below for the moved evidence trails and rationale.
+        navigation.OnPathResultInspected               += Navigation_OnPathResultInspected;
+        navigation.OnStaleEmptyPathMatchesActive       += Navigation_OnStaleEmptyPathMatchesActive;
+        navigation.OnRepeatedNoPathDirectRouteDecision += Navigation_OnRepeatedNoPathDirectRouteDecision;
     }
 
     private void Cleanup()
@@ -461,6 +485,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         navigation.OnDestinationReached -= Navigation_OnDestinationReached;
         navigation.OnWayPointReached    -= Navigation_OnWayPointReached;
         navigation.OnPathFailed         -= Navigation_OnPathFailed;
+
+        navigation.OnPathResultInspected               -= Navigation_OnPathResultInspected;
+        navigation.OnStaleEmptyPathMatchesActive       -= Navigation_OnStaleEmptyPathMatchesActive;
+        navigation.OnRepeatedNoPathDirectRouteDecision -= Navigation_OnRepeatedNoPathDirectRouteDecision;
     }
 
     // -----------------------------------------------------------------------
@@ -500,6 +528,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _activeStuckReported = false;
         navigation.ResetApproachEscape();
         ResetSetWaypointLoopGuardState();
+
+        // Option B refactor: reset Fix AB-1 stale-empty counter so a
+        // previous follow session's count doesn't carry over.
+        _staleEmptySameCount = 0;
+        _staleEmptyLastStartW = default;
+        _staleEmptyLastEndW = default;
 
         // Always reset rendezvous on goal entry — the assist must re-confirm
         // proximity to the leader before waypoint-sharing mode activates.
@@ -3221,5 +3255,293 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         logger.LogWarning(
             $"[FFG] Path failed. Rewinding to anchor={_navRewindAnchorW}.");
         SetWaypointLoopGuarded(_navRewindAnchorW);
+    }
+
+    // -----------------------------------------------------------------------
+    // Option B refactor — moved from Navigation.cs:
+    //
+    // The three handlers below implement path-validation policy that used
+    // to live inline inside Navigation.PathCalculatedCallback /
+    // Navigation.HandleRepeatedNoPath as Fix AB-1 / Fix AC+AE / Fix AD.
+    // Navigation now fires snapshot events at the corresponding decision
+    // points and acts on the subscriber's decision flag — see
+    // PathInspectionSnapshot / StaleEmptyPathSnapshot /
+    // RepeatedNoPathDecisionSnapshot in Navigation.cs.
+    //
+    // The leader's FollowRouteGoal does not subscribe to these events, so
+    // these policies apply only to the assist's follow flow. That matches
+    // the assist-only nature of the original log evidence (log-68 corridor
+    // stuck, log-69 U-turn into dead zone, log-70b walk-into-terrain,
+    // log-71 false-positive AC rejections).
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Option B refactor — implements the policy that used to live as Fix AC
+    /// and Fix AE inline inside Navigation.PathCalculatedCallback.
+    ///
+    /// Fix AC original evidence (log-69 12:00:19:399 reqId=23, assist at
+    /// &lt;-508.93, -4447.33&gt; chasing target &lt;-501.98, -4448.21&gt; 7y east
+    /// through a Durotar corridor between a hill and a tree):
+    /// PPather returned pathLen=146 — a heavily-curved wrap-around route
+    /// to detour around a tree obstacle. Fix AA correctly dropped 2
+    /// individual rear-pointing path nodes within 3y of start, but
+    /// PathSimplify reduced 144 remaining nodes to 17, and the simplified
+    /// routeTop landed at &lt;-512.4, -4444.8&gt; — dist=4.3y from start,
+    /// dot=-26.3 against the forward direction. That node is REAR-POINTING
+    /// but just outside Fix AA's 3y bound, so Fix AA didn't catch it. The
+    /// bot then turned ~180° and ran NW toward the rear routeTop. Each
+    /// subsequent path request from the new (westward-drifted) position
+    /// generated another rear-curving wrap. Within 4 seconds the bot was
+    /// pulled from &lt;-508.93&gt; west to &lt;-517.45&gt; and then south to
+    /// &lt;-4450.98&gt; — a navmesh dead zone where PPather cannot find paths
+    /// in ANY direction.
+    ///
+    /// Original Fix AC: after Fix AA filtering AND PathSimplify, examine
+    /// the FINAL simplified routeTop. If it's &gt; 2y from start AND its
+    /// projection on the forward direction is &lt;= 0 (rear half-plane),
+    /// reject the entire path. The 2y minimum left micro-rear-noise alone;
+    /// no upper bound because even a 10y rear routeTop is still bad.
+    ///
+    /// Fix AE evidence (log-71 13:10:20:141 + 13:10:20:712 + 13:10:31:246
+    /// + 13:10:31:814, assist at &lt;-511.73, -4373.90&gt; chasing target
+    /// &lt;-505.90, -4377.77&gt; 7y SE, then at &lt;-509.92, -4369.01&gt; chasing
+    /// target &lt;-512.46, -4362.49&gt; 7y NNW; user described "tree in front
+    /// of them and clear paths on both sides and behind"):
+    ///
+    /// Fix AC fired 4 times in this episode, rejecting paths whose
+    /// simplified routeTops were only marginally rear-leaning:
+    ///   #1 (20:141): dist=3.13y dot=-1.19 cos=-0.054 angle= 93.1°
+    ///   #2 (20:712): dist=3.21y dot=-1.68 cos=-0.075 angle= 94.3°
+    ///   #3 (31:246): dist=4.50y dot=-7.56 cos=-0.240 angle=103.9°
+    ///   #4 (31:814): dist=4.50y dot=-7.56 cos=-0.240 angle=103.9°
+    /// These are SIDEWAYS detours around an obstacle, not the U-turns
+    /// Fix AC was designed for. The genuine log-69 cases were at
+    /// cos=-0.875 (151°) and cos=-0.955 (163°). Fix AC's original
+    /// `dot &lt;= 0` threshold (90° half-plane) wrongly rejected the
+    /// sideways detours, forcing 2 spurious CantFollow entries in
+    /// log-71 (assist immobile for 5s + 13s).
+    ///
+    /// Fix AE tightens the threshold to require angle &gt; 135° (cos &lt; -0.707).
+    /// Math identity (avoids sqrt in hot path):
+    ///   cos(angle) &lt; -0.707
+    ///     ⇔ dot/(|fwd|·|top|) &lt; -0.707
+    ///     ⇔ dot² &gt; 0.5·|fwd|²·|top|²   (combined with the dot &lt; 0 guard)
+    ///
+    /// Recovery path: on Reject, Navigation clears the route, sets a 500ms
+    /// cooldown, and fires OnPathFailed → Navigation_OnPathFailed below:
+    ///   1st: _navAttempt=0 → rewind to LastSafeAnchor.
+    ///   2nd: _navAttempt=1 → EnterCantFollow.
+    /// </summary>
+    private void Navigation_OnPathResultInspected(PathInspectionSnapshot snap)
+    {
+        // Only operate while actively chasing the leader. If FFG isn't the
+        // logical owner of the current path (e.g., Idle), don't impose
+        // assist-follow policy on it.
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
+        if (snap.HasSimplifiedRouteTop && snap.ForwardLenSq > 0.0001f)
+        {
+            float toTopX = snap.SimplifiedRouteTop.X - snap.StartW.X;
+            float toTopY = snap.SimplifiedRouteTop.Y - snap.StartW.Y;
+            float toTopDistSq = toTopX * toTopX + toTopY * toTopY;
+            const float REAR_TOP_REJECT_MIN_YARDS = 2.0f;
+            // Fix AE: cos² threshold for angle > 135°. 0.707² = 0.5.
+            // To revisit the threshold, this is the one constant to tune
+            // (0.75 → 150°, 0.25 → 120°).
+            const float REAR_REJECT_COS_THRESHOLD_SQ = 0.5f;
+
+            if (toTopDistSq > REAR_TOP_REJECT_MIN_YARDS * REAR_TOP_REJECT_MIN_YARDS)
+            {
+                float dot = snap.ForwardX * toTopX + snap.ForwardY * toTopY;
+                if (dot < 0f && dot * dot > REAR_REJECT_COS_THRESHOLD_SQ * snap.ForwardLenSq * toTopDistSq)
+                {
+                    // Compute readable cos/angle for the log message. Only
+                    // executed on the rare rejection path, so the sqrt is fine.
+                    float topDist = MathF.Sqrt(toTopDistSq);
+                    float fwdLen = MathF.Sqrt(snap.ForwardLenSq);
+                    float cosA = dot / (fwdLen * topDist);
+                    if (cosA < -1f) cosA = -1f;
+                    else if (cosA > 1f) cosA = 1f;
+                    float angleDeg = MathF.Acos(cosA) * (180f / MathF.PI);
+
+                    logger.LogError(
+                        $"[FFG] Fix AC+AE: rejecting strongly-rear-curving path " +
+                        $"(angle > 135° from forward). Simplified routeTop " +
+                        $"{snap.SimplifiedRouteTop} is {topDist:0.00}y from start with " +
+                        $"dot={dot:0.00} cos={cosA:0.000} angle={angleDeg:0.0}° " +
+                        $"against forward direction. Bot would U-turn away from goal. " +
+                        $"start={snap.StartW} end={snap.EndW} " +
+                        $"pathLen={snap.PathLength} routeCount-after-simplify={snap.SimplifiedRouteCount}. " +
+                        $"Signalling Reject — Navigation will clear route and fire OnPathFailed.");
+                    snap.Reject = true;
+                    snap.RejectCooldownMs = 500;
+                    return;
+                }
+            }
+        }
+
+        // Path is accepted — pather is functional for the current (start,
+        // end). Reset Fix AB-1's stale-empty counter so a future stale
+        // failure for a different (start, end) starts the count fresh.
+        // (This mirrors the original behavior that lived in Navigation's
+        // success branch.)
+        _staleEmptySameCount = 0;
+        _staleEmptyLastStartW = default;
+        _staleEmptyLastEndW = default;
+    }
+
+    /// <summary>
+    /// Option B refactor — implements the policy that used to live as Fix AB-1
+    /// inline inside Navigation.PathCalculatedCallback's stale-result branch.
+    ///
+    /// Original evidence (log-68 11:03:43:081 → 11:04:12:949 — assist stuck
+    /// for 30s in Durotar corridor at &lt;-517.30, -4448.72&gt; with target
+    /// &lt;-510.42, -4449.06&gt; only 6.9y east; PPather's navmesh ends on a
+    /// hillside, every search returned "closest spot &lt;-508.80, -4441.2,
+    /// Z=67.11&gt;" with "Closest spot is too far from target. 9.2&gt;5",
+    /// taking ~10s per attempt to fail):
+    ///
+    /// When the pather takes longer than the 3-second waitingForPathResult
+    /// watchdog to return a failure, the result arrives AFTER a new request
+    /// for the same (start, end) has been enqueued and made the previous
+    /// one stale. The PathCalculatedCallback stale-result branch used to
+    /// drop the result without informing HandleRepeatedNoPath or
+    /// OnPathFailed subscribers — so the same-(start, end) failure
+    /// pattern that HandleRepeatedNoPath would have detected after 3 hits
+    /// NEVER accumulated. Each failure was silently stale-dropped, leaving
+    /// FFG to time out at the 30s TickNavActiveTimeout wall.
+    ///
+    /// Log-68 evidence: 10 successive ENQUEUE events with identical
+    /// start=&lt;-517.30, -4448.72&gt; end=&lt;-510.42, -4449.06&gt; dist=6.89y
+    /// over the 30-second window, original reqId=328 callback arriving at
+    /// 11:03:53:416 reporting "Ignoring stale path result … activeReqId=331"
+    /// — the failure information was discarded.
+    ///
+    /// Fix: when a stale empty-path result arrives whose (start, end)
+    /// matches the currently in-flight request's (start, end) within 1y
+    /// (Navigation pre-computes the match and only fires the event when
+    /// true), count it toward a dedicated stale-no-path counter. After
+    /// StaleEmptyResultsBeforeOnPathFailed (3) consecutive matches, signal
+    /// Escalate so Navigation fires OnPathFailed and sets a 2s cooldown.
+    /// The 2s cooldown is long enough that the next FFG tick (after
+    /// OnPathFailed fires) doesn't immediately re-trigger a path request
+    /// inside Navigation_OnPathFailed's rewind branch before that branch
+    /// sets the rewind anchor and waits for it to resolve.
+    ///
+    /// Intentionally NOT routed through HandleRepeatedNoPath because that
+    /// function's count==2 branch builds a DIRECT route to the unreachable
+    /// target (gated to dist &lt;= 5y by the moved Fix AD policy in
+    /// Navigation_OnRepeatedNoPathDirectRouteDecision below). For the
+    /// log-68 corridor that would still walk the bot straight into the
+    /// hill geometry at dist=6.89y; the stale-counter path here uses ONLY
+    /// the OnPathFailed escalation, which is safe regardless of why the
+    /// pather couldn't find a route.
+    /// </summary>
+    private void Navigation_OnStaleEmptyPathMatchesActive(StaleEmptyPathSnapshot snap)
+    {
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
+        // Reset the counter if the active (start, end) has rolled to a
+        // different one since the last stale match we counted. (Navigation
+        // doesn't fire the event for results that don't match the active
+        // request, so we don't need to handle the !matches case here.)
+        bool sameAsLastStale =
+            snap.ResultStartW.WorldDistanceXYTo(_staleEmptyLastStartW) < 1f &&
+            snap.ResultEndW.WorldDistanceXYTo(_staleEmptyLastEndW) < 1f;
+        if (!sameAsLastStale)
+        {
+            _staleEmptyLastStartW = snap.ResultStartW;
+            _staleEmptyLastEndW = snap.ResultEndW;
+            _staleEmptySameCount = 0;
+        }
+        _staleEmptySameCount++;
+
+        logger.LogWarning(
+            $"[FFG] Fix AB-1: stale no-path #{_staleEmptySameCount}/" +
+            $"{StaleEmptyResultsBeforeOnPathFailed} for active (start, end). " +
+            $"start={snap.ResultStartW} end={snap.ResultEndW}");
+
+        if (_staleEmptySameCount >= StaleEmptyResultsBeforeOnPathFailed)
+        {
+            logger.LogError(
+                $"[FFG] Fix AB-1: pather failed {_staleEmptySameCount} consecutive " +
+                $"times for the same (start, end) — signalling Escalate. " +
+                $"Navigation will fire OnPathFailed. start={snap.ResultStartW} end={snap.ResultEndW}");
+            _staleEmptySameCount = 0;
+            _staleEmptyLastStartW = default;
+            _staleEmptyLastEndW = default;
+            snap.Escalate = true;
+            snap.EscalateCooldownMs = 2000;
+        }
+    }
+
+    /// <summary>
+    /// Option B refactor — implements the policy that used to live as Fix AD
+    /// inline inside Navigation.HandleRepeatedNoPath's count==2 branch.
+    ///
+    /// Original evidence (log-70b 12:32:40:629→12:33:12:706, assist stuck
+    /// for 32 seconds in a narrow corridor between a hill and a wall; user
+    /// description: "ran directly into the hill, then did unstuck that got
+    /// it part way into the corridor while running against the side of the
+    /// hill, before it gave up"):
+    ///
+    /// The original count==2 branch unconditionally pushed a direct route
+    /// to the unreachable target whenever dist &lt;= 30y. That permitted the
+    /// dangerous walk-into-terrain case: when PPather has just failed
+    /// twice for the same (start, end) at non-trivial distance (8.16y in
+    /// log-70b), it's signalling that the geometry doesn't admit a path.
+    /// Walking the bot blindly toward the unreachable point doesn't fix
+    /// the unreachability — it rams the bot into whatever obstacle PPather
+    /// was failing to route around. In log-70b reqId=113 returned pathLen=0
+    /// at 12:32:40:629 with dist=8.16y, the direct-route push fired at
+    /// 12:32:40:630, and the bot walked ~5y SE from &lt;-468.88, -4398.20&gt;
+    /// to &lt;-465.23, -4401.78&gt; — past the corridor's safe zone and into
+    /// the navmesh dead area. From there every subsequent path request
+    /// stale-timed-out; 30s later TickNavActiveTimeout fired CantFollow.
+    ///
+    /// Fix: bound the direct-route push to dist &lt;= DirectRouteMaxSafeYards
+    /// (5y). For dist &gt; 5y, signal Veto so Navigation skips the push,
+    /// resets its no-path counter, applies a 1s cooldown, and fires
+    /// OnPathFailed.
+    ///
+    /// Why 5y:
+    ///   - Just under FollowingMaxYards (7y) — below this, the bot is
+    ///     essentially adjacent to its target and a brief direct walk is
+    ///     unlikely to do harm even on a navmesh hiccup.
+    ///   - Short enough that worst-case walk-into-terrain is bounded.
+    ///   - 5y &gt; POP_DIST (3.6y) so the pushed wp doesn't immediately pop
+    ///     before any movement — the push can actually achieve progress
+    ///     when it's safe to use.
+    ///
+    /// For log-70b's case (dist=8.16y &gt; 5y) the Veto fires OnPathFailed
+    /// at the equivalent moment. FFG's Navigation_OnPathFailed:
+    /// _navAttempt=0 → rewind to LastSafeAnchor (set during earlier
+    /// successful route progress in the navigable corridor). If that also
+    /// fails: _navAttempt=1 → EnterCantFollow at ~12:32:41 vs 12:33:12
+    /// actual. Saved ~31s, AND the CantFollow occurs from a navigable
+    /// position where Projection10/20/30 escape (Fix AB-2) has a real
+    /// chance of succeeding instead of running 0.0y displacement against
+    /// the dead zone.
+    /// </summary>
+    private void Navigation_OnRepeatedNoPathDirectRouteDecision(RepeatedNoPathDecisionSnapshot snap)
+    {
+        if (_navState != NavState.NavigatingToLeader)
+            return;
+
+        const float DirectRouteMaxSafeYards = 5.0f;
+        if (snap.DistYards > DirectRouteMaxSafeYards)
+        {
+            logger.LogWarning(
+                $"[FFG] Fix AD: signalling Veto on direct-route push " +
+                $"(count={snap.SameNoPathCount} dist={snap.DistYards:0.0}y > " +
+                $"{DirectRouteMaxSafeYards:0.0}y). Pather has failed twice for " +
+                $"this (start, end) at a non-trivial distance; a direct walk " +
+                $"would ram the assist into terrain. Navigation will fire " +
+                $"OnPathFailed. start={snap.StartW} end={snap.EndW}");
+            snap.Veto = true;
+            snap.VetoCooldownMs = 1000;
+        }
     }
 }

@@ -18,6 +18,131 @@ using static System.MathF;
 
 namespace Core.Goals;
 
+// =====================================================================
+// Option B refactor (post-Fix AE): policy-decision snapshots fired by
+// Navigation so that goal-specific path-validation logic can live in
+// the goal (e.g., FollowFocusGoal) instead of in shared Navigation
+// code. The leader's patrol (FollowRouteGoal) does not subscribe to
+// any of these events and therefore sees no behavior change from
+// Fix AB-1 / Fix AC+AE / Fix AD — the policies they encode apply
+// only to subscribers (currently the assist's FollowFocusGoal).
+//
+// Pattern: Navigation populates a snapshot, fires the event, then
+// reads back the subscriber's decision (Reject / Escalate / Veto)
+// and performs the corresponding state mutation itself. This keeps
+// route-stack and cooldown mutations inside Navigation while moving
+// the policy out.
+// =====================================================================
+
+/// <summary>
+/// Fired by <see cref="Navigation.OnPathResultInspected"/> after a path
+/// is computed, after Fix AA filtering, and after PathSimplify, but
+/// before the route is committed to drive movement. A subscriber can
+/// set <see cref="Reject"/> = true to have Navigation clear the route,
+/// set a cooldown, and fire <see cref="Navigation.OnPathFailed"/> — for
+/// example, when the simplified routeTop would U-turn the bot.
+/// </summary>
+public sealed class PathInspectionSnapshot
+{
+    public long RequestId { get; }
+    public Vector3 StartW { get; }
+    public Vector3 EndW { get; }
+    public int PathLength { get; }
+    /// <summary>True if a simplified routeTop was produced after Fix AA + PathSimplify.</summary>
+    public bool HasSimplifiedRouteTop { get; }
+    /// <summary>The first node the bot would walk to. Valid only when <see cref="HasSimplifiedRouteTop"/> is true.</summary>
+    public Vector3 SimplifiedRouteTop { get; }
+    public int SimplifiedRouteCount { get; }
+    /// <summary>X component of (EndW - StartW), the path-forward direction in 2D.</summary>
+    public float ForwardX { get; }
+    /// <summary>Y component of (EndW - StartW), the path-forward direction in 2D.</summary>
+    public float ForwardY { get; }
+    /// <summary>Squared magnitude of the forward vector. Subscribers should skip evaluation when this is below ~0.0001 (degenerate path).</summary>
+    public float ForwardLenSq { get; }
+
+    /// <summary>Set by a subscriber to request that the path be rejected.</summary>
+    public bool Reject { get; set; }
+    /// <summary>Cooldown to apply on reject (default 500ms).</summary>
+    public int RejectCooldownMs { get; set; } = 500;
+
+    public PathInspectionSnapshot(long requestId, Vector3 startW, Vector3 endW,
+        int pathLength, bool hasSimplifiedRouteTop, Vector3 simplifiedRouteTop,
+        int simplifiedRouteCount, float forwardX, float forwardY, float forwardLenSq)
+    {
+        RequestId = requestId;
+        StartW = startW;
+        EndW = endW;
+        PathLength = pathLength;
+        HasSimplifiedRouteTop = hasSimplifiedRouteTop;
+        SimplifiedRouteTop = simplifiedRouteTop;
+        SimplifiedRouteCount = simplifiedRouteCount;
+        ForwardX = forwardX;
+        ForwardY = forwardY;
+        ForwardLenSq = forwardLenSq;
+    }
+}
+
+/// <summary>
+/// Fired by <see cref="Navigation.OnStaleEmptyPathMatchesActive"/> when
+/// the pather returns an empty (no-path) result that arrived stale (a
+/// newer request superseded it) BUT whose (start, end) still matches
+/// the currently in-flight request within a 1y tolerance. A subscriber
+/// can set <see cref="Escalate"/> = true after counting enough such
+/// confirmations to have Navigation set a cooldown and fire
+/// <see cref="Navigation.OnPathFailed"/>.
+/// </summary>
+public sealed class StaleEmptyPathSnapshot
+{
+    public Vector3 ResultStartW { get; }
+    public Vector3 ResultEndW { get; }
+    public Vector3 ActiveRequestStartW { get; }
+    public Vector3 ActiveRequestEndW { get; }
+
+    /// <summary>Set by a subscriber to request that OnPathFailed be fired with cooldown.</summary>
+    public bool Escalate { get; set; }
+    /// <summary>Cooldown to apply on escalate (default 2000ms).</summary>
+    public int EscalateCooldownMs { get; set; } = 2000;
+
+    public StaleEmptyPathSnapshot(Vector3 resultStartW, Vector3 resultEndW,
+        Vector3 activeRequestStartW, Vector3 activeRequestEndW)
+    {
+        ResultStartW = resultStartW;
+        ResultEndW = resultEndW;
+        ActiveRequestStartW = activeRequestStartW;
+        ActiveRequestEndW = activeRequestEndW;
+    }
+}
+
+/// <summary>
+/// Fired by <see cref="Navigation.OnRepeatedNoPathDirectRouteDecision"/>
+/// in HandleRepeatedNoPath at the count==2 branch, before the (potentially
+/// dangerous) direct-route push toward an unreachable target. A subscriber
+/// can set <see cref="Veto"/> = true to skip the push and have Navigation
+/// reset its no-path counter, apply a cooldown, and fire
+/// <see cref="Navigation.OnPathFailed"/>.
+/// </summary>
+public sealed class RepeatedNoPathDecisionSnapshot
+{
+    public Vector3 StartW { get; }
+    public Vector3 EndW { get; }
+    public float DistYards { get; }
+    public int SameNoPathCount { get; }
+
+    /// <summary>Set by a subscriber to skip the direct-route push and escalate via OnPathFailed.</summary>
+    public bool Veto { get; set; }
+    /// <summary>Cooldown to apply on veto (default 1000ms).</summary>
+    public int VetoCooldownMs { get; set; } = 1000;
+
+    public RepeatedNoPathDecisionSnapshot(Vector3 startW, Vector3 endW,
+        float distYards, int sameNoPathCount)
+    {
+        StartW = startW;
+        EndW = endW;
+        DistYards = distYards;
+        SameNoPathCount = sameNoPathCount;
+    }
+}
+
 public sealed partial class Navigation : IDisposable
 {
     private const bool debug = false;
@@ -63,6 +188,14 @@ public sealed partial class Navigation : IDisposable
     public event Action? OnAnyPointReached;
     public event Action? OnNoPathFound;
     public event Action<Vector3, Vector3>? OnPathFailed; // (startW, endW)
+
+    // Option B refactor: policy-decision events that allow a goal-specific
+    // subscriber (currently FollowFocusGoal) to make path-validation
+    // decisions that previously lived inline in Navigation as Fix AB-1 /
+    // Fix AC+AE / Fix AD. Non-subscribers see no behavior change.
+    public event Action<PathInspectionSnapshot>? OnPathResultInspected;
+    public event Action<StaleEmptyPathSnapshot>? OnStaleEmptyPathMatchesActive;
+    public event Action<RepeatedNoPathDecisionSnapshot>? OnRepeatedNoPathDirectRouteDecision;
 
     /// <summary>
     /// Fired when the top waypoint changes due to a non-pop operation such as
@@ -521,50 +654,18 @@ public sealed partial class Navigation : IDisposable
     private int sameNoPathCount;
     private const int MaxSameNoPathBeforeFallback = 3;
 
-    // Fix AB-1 (log-68 11:03:43:081 → 11:04:12:949 — assist stuck for 30s in
-    // Durotar corridor at <-517.30, -4448.72> with target <-510.42, -4449.06>
-    // only 6.9y east. PPather's navmesh ends on a hillside; every search
-    // returned "closest spot <-508.80, -4441.2, Z=67.11>" with "Closest spot
-    // is too far from target. 9.2>5", taking ~10s per attempt to fail):
-    //
-    // When pather (PPather/RemotePathingAPIV3) takes longer than the
-    // 3-second waitingForPathResult watchdog (line 1062) to return a
-    // failure, the result arrives AFTER a new request for the same (start,
-    // end) has been enqueued and made the previous one stale. The
-    // PathCalculatedCallback stale-result branch (line 3034) drops the
-    // result without informing HandleRepeatedNoPath or OnPathFailed
-    // subscribers. The same-(start, end) failure pattern that
-    // HandleRepeatedNoPath would have detected after 3 hits NEVER
-    // accumulates — each failure is silently stale-dropped.
-    //
-    // Log-68 evidence: 10 successive ENQUEUE events with identical
-    // start=<-517.30, -4448.72> end=<-510.42, -4449.06> dist=6.89y over the
-    // 30-second window, with the original reqId=328 callback arriving at
-    // 11:03:53:416 reporting "Ignoring stale path result reqId=328
-    // waitingReqId=331 activeReqId=331" — the failure information was
-    // discarded. FFG was left to time out at the 30s TickNavActiveTimeout
-    // wall before escalating to CantFollow.
-    //
-    // Fix: when a stale empty-path result arrives AND its (start, end)
-    // matches the currently-in-flight request's (start, end), count it
-    // toward a dedicated stale-no-path counter. After
-    // StaleEmptyResultsBeforeOnPathFailed (3) such matches, fire
-    // OnPathFailed and set a longer noPathCooldown so FFG's
-    // Navigation_OnPathFailed handler can escalate to CantFollow within
-    // ~9 s (3 × ~3 s per stale-result arrival pulse from PPather's
-    // 10s timeout cadence with the 3s wait-watchdog interleaving)
-    // instead of waiting 30 s for TickNavActiveTimeout.
-    //
-    // Intentionally NOT routed through HandleRepeatedNoPath because that
-    // function's wpCount==1 branch builds a DIRECT route to the
-    // unreachable target after 2 hits (line ~2986). For the log-68
-    // corridor that would walk the bot straight into the hill geometry.
-    // The stale-counter path here uses ONLY the OnPathFailed escalation,
-    // which is safe regardless of why the pather couldn't find a route.
-    private int _staleEmptySameCount;
-    private Vector3 _staleEmptyLastStartW;
-    private Vector3 _staleEmptyLastEndW;
-    private const int StaleEmptyResultsBeforeOnPathFailed = 3;
+    // Fix AB-1 stale-empty-path counter state was previously stored here
+    // (private fields _staleEmptySameCount / _staleEmptyLastStartW /
+    // _staleEmptyLastEndW, with const StaleEmptyResultsBeforeOnPathFailed).
+    // Option B refactor moved both the state and the policy into
+    // FollowFocusGoal.cs. Navigation now only fires
+    // OnStaleEmptyPathMatchesActive when a stale empty-path result
+    // arrives whose (start, end) matches the active request, and the
+    // subscriber decides whether to escalate. The leader's
+    // FollowRouteGoal does not subscribe, so the leader sees no AB-1
+    // policy effect (matching the assist-only nature of the original
+    // log-68 evidence). See FollowFocusGoal.Navigation_OnStaleEmptyPathMatchesActive
+    // for the rationale and the moved counter.
 
     public Navigation(ILogger<Navigation> logger,
         CancellationTokenSource<GoapAgent> cts,
@@ -3030,97 +3131,32 @@ public sealed partial class Navigation : IDisposable
 
             if (sameNoPathCount == 2 && dist <= 30f)
             {
-                // Fix AD (log-70b 12:32:40:629→12:33:12:706, assist stuck for
-                // 32 seconds in a narrow corridor between a hill and a wall;
-                // user description: "ran directly into the hill, then did
-                // unstuck that got it part way into the corridor while running
-                // against the side of the hill, before it gave up"):
+                // Option B refactor (was Fix AD): the dangerous direct-route
+                // push toward an unreachable target at non-trivial distance
+                // was previously bounded inline by `dist > 5y` and routed
+                // through OnPathFailed. That policy now lives in
+                // FollowFocusGoal.Navigation_OnRepeatedNoPathDirectRouteDecision,
+                // where it can examine context (assist-specific state,
+                // CantFollow readiness) before deciding. Navigation just
+                // fires the event with a decision snapshot; if the subscriber
+                // sets Veto=true, Navigation cleans up its no-path counter
+                // and fires OnPathFailed. Non-subscribers (FRG) take the
+                // unchanged path: direct-route push when dist <= 30y.
                 //
-                // The original count==2 branch unconditionally pushed a direct
-                // route to the unreachable target whenever dist <= 30y. That
-                // 30y bound permits the dangerous walk-into-terrain case: when
-                // PPather has just failed twice for the same (start, end) at a
-                // significant distance (say 8.16y in log-70b), it's signalling
-                // that the geometry doesn't admit a path. Walking the bot
-                // BLINDLY toward the unreachable point doesn't fix the
-                // unreachability — it just rams the bot into whatever obstacle
-                // PPather was failing to route around. In log-70b reqId=113
-                // returned pathLen=0 at 12:32:40:629 with dist=8.16y, the
-                // direct-route push fired at 12:32:40:630, and the bot walked
-                // ~5y SE from <-468.88, -4398.20> to <-465.23, -4401.78> — past
-                // the corridor's safe zone and into the navmesh dead area where
-                // PPather's "closest spot Z=49.26" indicates impassable
-                // hillside terrain. From <-465.23, -4401.78> every subsequent
-                // path request stale-timed-out (3s wait, 10s PPather response).
-                // 30 seconds later TickNavActiveTimeout fired CantFollow.
-                //
-                // Importantly, my own comment block in the Fix AB-1 design
-                // (line ~558) acknowledged this hazard:
-                //     "Intentionally NOT routed through HandleRepeatedNoPath
-                //      because that function's count==1 branch builds a DIRECT
-                //      route to the unreachable target after 2 hits — for the
-                //      log-68 corridor that would walk the bot straight into
-                //      the hill geometry."
-                // Fix AB-1 routed AROUND this branch but the branch itself
-                // remained intact and now fires through the normal (non-stale)
-                // path with the same harmful effect. Fix AD closes that gap.
-                //
-                // Fix: bound the direct-route push to dist <=
-                // DirectRouteMaxSafeYards (5y). For dist > 5y the bot has
-                // meaningful distance to traverse and walking forward into
-                // unknown terrain is unsafe; fire OnPathFailed instead so
-                // FFG's Navigation_OnPathFailed handler can rewind to
-                // LastSafeAnchor (a known navigable position from recent
-                // successful route progress) or, on the second failure,
-                // escalate to CantFollow within ~5s instead of waiting 30s.
-                //
-                // Why 5y:
-                //   - 5y is just under FollowingMaxYards (7y) — the distance
-                //     at which the bot considers itself "in follow position".
-                //     Below this, the bot is essentially adjacent to its
-                //     target and a brief direct walk is unlikely to do harm
-                //     even if the pather is having a navmesh hiccup.
-                //   - 5y is short enough that a walk-into-terrain incident is
-                //     bounded: even worst-case the bot ends up 5y closer to
-                //     its target, still within Following range of the leader.
-                //   - 5y > POP_DIST (3.6y) so we don't immediately pop the
-                //     pushed wp before any movement — the direct-route push
-                //     can actually achieve some forward progress when it's
-                //     safe to use.
-                //
-                // For log-70b's case (dist=8.16y > 5y), Fix AD fires
-                // OnPathFailed at 12:32:40:630. FFG's
-                // Navigation_OnPathFailed: _navAttempt=0 → rewind to
-                // LastSafeAnchor (set during paths 110-111's successful route
-                // progress, somewhere in the navigable corridor). Bot
-                // navigates back ~1-3y. New path request from anchor.
-                // If that also fails: _navAttempt=1 → EnterCantFollow at
-                // ~12:32:41 (vs 12:33:12 actual). Saved ~31 seconds, AND the
-                // CantFollow occurs from a navigable position where
-                // Projection10/20/30 escape (Fix AB-2) has a real chance of
-                // succeeding instead of running 0.0y displacement against
-                // the dead zone.
-                //
-                // No change to count==3 forcing stuckDetector.Update or to
-                // the outer escalation at sameNoPathCount >=
-                // MaxSameNoPathBeforeFallback (3) — both remain useful for
-                // their intended cases (genuinely small targets, repeated
-                // failures from same position).
-                const float DirectRouteMaxSafeYards = 5.0f;
-                if (dist > DirectRouteMaxSafeYards)
+                // Original log-70b evidence (12:32:40:629→12:33:12:706, 32s
+                // assist stuck) and full rationale: see
+                // FollowFocusGoal.Navigation_OnRepeatedNoPathDirectRouteDecision.
+                var decision = new RepeatedNoPathDecisionSnapshot(startW, endW, dist, sameNoPathCount);
+                OnRepeatedNoPathDirectRouteDecision?.Invoke(decision);
+                if (decision.Veto)
                 {
                     logger.LogWarning(
-                        $"[NAV] Fix AD: skipping direct-route push (count=2 " +
-                        $"dist={dist:0.0}y > {DirectRouteMaxSafeYards:0.0}y) — pather has " +
-                        $"failed twice for this (start, end) at a non-trivial " +
-                        $"distance; walking the bot directly toward an " +
-                        $"unreachable target would ram it into terrain. Firing " +
-                        $"OnPathFailed for FFG to rewind to LastSafeAnchor or " +
-                        $"escalate to CantFollow. start={startW} end={endW}");
+                        $"[NAV] Direct-route push vetoed by subscriber (count=2 dist={dist:0.0}y). " +
+                        $"start={startW} end={endW}");
                     sameNoPathCount = 0;
                     lastNoPathStartW = default;
                     lastNoPathEndW = default;
-                    noPathCooldownUntilUtc = DateTime.UtcNow.AddSeconds(1);
+                    noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(decision.VetoCooldownMs);
                     OnPathFailed?.Invoke(startW, endW);
                     return true;
                 }
@@ -3176,24 +3212,25 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation(
                 $"[NAV] Ignoring stale path result reqId={requestId} waitingReqId={waitingId} activeReqId={activeId}");
 
-            // Fix AB-1: account for stale empty-path results that match the
-            // CURRENTLY in-flight request's (start, end). See the long comment
-            // at the field declarations (~line 388) for the full rationale.
+            // Option B refactor (was Fix AB-1): stale empty-path counting
+            // and the OnPathFailed escalation policy used to live inline
+            // here. The counter state and the escalation threshold now
+            // live in FollowFocusGoal.Navigation_OnStaleEmptyPathMatchesActive.
+            // Navigation continues to do the (start, end) match against
+            // the in-flight request — that information is Navigation's
+            // legitimate concern — and fires the event only when the
+            // stale result matches. The subscriber decides whether to
+            // escalate; if Escalate=true, Navigation applies the cooldown
+            // and fires OnPathFailed. Non-subscribers see no change.
             //
-            // We compare the stale result's (start, end) against the
-            // last-issued path request's (start, end) (lastRequestStart /
-            // lastRequestEnd, set in TryBeginPathRequest). When they match,
-            // the pather has just confirmed that the path FFG is still asking
-            // for is unreachable. After StaleEmptyResultsBeforeOnPathFailed
-            // such confirmations, fire OnPathFailed so FFG's existing
-            // handler can escalate to CantFollow without waiting for the
-            // 30s TickNavActiveTimeout wall.
+            // 1y tolerance is unchanged: lastRequestStart updates each
+            // time a new request is issued, so by the time a 10s-stale
+            // result arrives the player may have drifted a fraction of a
+            // yard while the requested start has shifted with the bot.
             //
-            // 1y tolerance (not 0.1y) because lastRequestStart updates each
-            // time a new request is issued — by the time a 10s-stale result
-            // arrives, the player may have drifted a fraction of a yard, but
-            // the requested start position will have shifted with the bot.
-            // The result's recorded start is from when its request was queued.
+            // Original log-68 evidence (11:03:43:081 → 11:04:12:949, 30s
+            // assist stuck at <-517.30, -4448.72>) and full rationale: see
+            // FollowFocusGoal.Navigation_OnStaleEmptyPathMatchesActive.
             if (result.Path.Length == 0)
             {
                 bool matchesActiveRequest =
@@ -3202,48 +3239,15 @@ public sealed partial class Navigation : IDisposable
 
                 if (matchesActiveRequest)
                 {
-                    bool sameAsLastStale =
-                        result.StartW.WorldDistanceXYTo(_staleEmptyLastStartW) < 1f &&
-                        result.EndW.WorldDistanceXYTo(_staleEmptyLastEndW) < 1f;
-                    if (!sameAsLastStale)
+                    var snap = new StaleEmptyPathSnapshot(
+                        result.StartW, result.EndW,
+                        lastRequestStart, lastRequestEnd);
+                    OnStaleEmptyPathMatchesActive?.Invoke(snap);
+                    if (snap.Escalate)
                     {
-                        _staleEmptyLastStartW = result.StartW;
-                        _staleEmptyLastEndW = result.EndW;
-                        _staleEmptySameCount = 0;
-                    }
-                    _staleEmptySameCount++;
-
-                    logger.LogWarning(
-                        $"[NAV] Fix AB-1: stale no-path #{_staleEmptySameCount}/" +
-                        $"{StaleEmptyResultsBeforeOnPathFailed} for active (start, end). " +
-                        $"start={result.StartW} end={result.EndW}");
-
-                    if (_staleEmptySameCount >= StaleEmptyResultsBeforeOnPathFailed)
-                    {
-                        logger.LogError(
-                            $"[NAV] Fix AB-1: pather failed {_staleEmptySameCount} consecutive " +
-                            $"times for the same (start, end) — firing OnPathFailed to escalate. " +
-                            $"start={result.StartW} end={result.EndW}");
-                        _staleEmptySameCount = 0;
-                        _staleEmptyLastStartW = default;
-                        _staleEmptyLastEndW = default;
-                        // 2s cooldown — long enough that the next FFG tick (after
-                        // OnPathFailed fires) doesn't immediately re-trigger a path
-                        // request inside FFG.Navigation_OnPathFailed's rewind branch
-                        // before that branch sets the rewind anchor and waits for
-                        // it to resolve.
-                        noPathCooldownUntilUtc = DateTime.UtcNow.AddSeconds(2);
+                        noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(snap.EscalateCooldownMs);
                         OnPathFailed?.Invoke(result.StartW, result.EndW);
                     }
-                }
-                else
-                {
-                    // The active request has changed since this stale result
-                    // was issued — the failure information is no longer
-                    // relevant to what FFG is currently asking. Reset.
-                    _staleEmptySameCount = 0;
-                    _staleEmptyLastStartW = default;
-                    _staleEmptyLastEndW = default;
                 }
             }
             return;
@@ -3295,13 +3299,6 @@ public sealed partial class Navigation : IDisposable
         sameNoPathCount = 0;
         lastNoPathStartW = default;
         lastNoPathEndW = default;
-
-        // Fix AB-1: pather just returned a successful path for the active
-        // request — clear the stale-empty tracker so a future stale failure
-        // for a different (start, end) starts the count fresh.
-        _staleEmptySameCount = 0;
-        _staleEmptyLastStartW = default;
-        _staleEmptyLastEndW = default;
 
         LogPathfinderSuccess(logger, result.Distance, result.StartW, result.EndW, result.ElapsedMs);
 
@@ -3416,112 +3413,42 @@ public sealed partial class Navigation : IDisposable
         if (routeToNextWaypoint.Count == 0 && wayPoints.Count > 0)
             routeToNextWaypoint.Push(Nav2D(wayPoints.Peek()));
 
-        // Fix AC (log-69 12:00:19:399 reqId=23, assist at <-508.93, -4447.33>
-        // chasing target <-501.98, -4448.21> 7y east through a Durotar
-        // corridor between a hill and a tree):
+        // Option B refactor (was Fix AC and Fix AE): post-simplification
+        // routeTop rear-angle inspection used to live inline here. The
+        // angle test, the 135° threshold, the 2y minimum, and the
+        // OnPathFailed escalation now live in
+        // FollowFocusGoal.Navigation_OnPathResultInspected. Navigation
+        // builds a PathInspectionSnapshot, fires the event, and acts on
+        // the Reject flag if set: clears the route, applies cooldown,
+        // fires OnPathFailed. Non-subscribers (FRG) see no change.
         //
-        // PPather returned pathLen=146 — a heavily-curved wrap-around
-        // route to detour around a tree obstacle. Fix AA correctly dropped
-        // 2 individual rear-pointing path nodes within REAR_NODE_DROP_YARDS
-        // (3y) of the start, but PathSimplify then reduced 144 remaining
-        // nodes to 17, and the simplified routeTop landed at
-        // <-512.4, -4444.8> — dist=4.3y from start, dot=-26.3 against the
-        // forward (end-start) direction. That node is REAR-POINTING but
-        // just outside Fix AA's 3y bound, so Fix AA didn't catch it.
-        //
-        // The bot then turned ~180° (LeftArrow pressed for 891+335 ms)
-        // and ran NW toward the rear routeTop. Each subsequent path
-        // request from the new (westward-drifted) position generated
-        // another rear-curving wrap (reqId=24 pathLen=147, simplified
-        // routeTop <-514.8, -4444.8> dist=3.3y dot≈-22). Within 4
-        // seconds the bot was pulled from <-508.93> west to <-517.45>
-        // and then south to <-4450.98> — a navmesh dead zone where
-        // PPather cannot find paths in ANY direction (confirmed by
-        // 6 subsequent Projection10/20/30 attempts in CantFollow's
-        // escape, all 0.0y displacement).
-        //
-        // The fix: after Fix AA filtering AND PathSimplify, examine the
-        // FINAL simplified routeTop (the node the bot will actually walk
-        // to first). If it's > REAR_TOP_REJECT_MIN_YARDS from start AND
-        // its projection on the forward direction is <= 0 (rear half-
-        // plane), reject the entire path. Clear the route, fire
-        // OnPathFailed (so FFG can rewind to LastSafeAnchor or escalate
-        // to CantFollow within ~5-10s instead of waiting 30s for
-        // TickNavActiveTimeout), and set a 500ms noPathCooldown to
-        // prevent immediate re-spam.
-        //
-        // Why REAR_TOP_REJECT_MIN_YARDS=2.0y:
-        //   - Lower bound (2y) — micro-rear-noise (0-2y) is left alone;
-        //     either Fix AA caught it (within 3y of start) or it's a
-        //     near-collinear simplification artifact that won't cause
-        //     visible misbehaviour.
-        //   - No upper bound — even if the rear routeTop is 10y away,
-        //     the bot will walk toward it and reach a worse position.
-        //     Distance doesn't make rear-pointing OK.
-        //
-        // Why dot <= 0 (strict rear half-plane):
-        //   - dot = 0: perpendicular — bot moves sideways, not toward
-        //     or away from goal. Rejecting is conservative; allowing
-        //     would let bot orbit the start. Rejection is safer.
-        //   - dot > 0: forward half-plane — bot moves at least slightly
-        //     toward the goal. Don't reject; ordinary navigation handles.
-        //
-        // Recovery path (FFG.Navigation_OnPathFailed):
-        //   1st OnPathFailed: _navAttempt=0 → rewind to LastSafeAnchor
-        //                     (most-recent successful route-pop position;
-        //                     in log-69 this would be ~<-509, -4447>).
-        //   2nd OnPathFailed: _navAttempt=1 → EnterCantFollow. From
-        //                     LastSafeAnchor's position (still navigable),
-        //                     CantFollow's escape with Fix AB-2 directional
-        //                     fallback has a real chance of finding a
-        //                     clearance direction (10y west of <-509>
-        //                     should be open terrain).
-        //
-        // False-positive risk: a path that legitimately needs to wrap
-        // (e.g., bot must navigate around a small obstacle, and the only
-        // efficient first node is genuinely backward). Cost in that case:
-        // ~5-10s to escalate to CantFollow + leader rescue via
-        // AssistRequestReturn. Acceptable tradeoff vs the alternative
-        // (30s timeout AND ending in a worse position). The log-67b
-        // navmesh-snap case is unaffected because Fix AA filters those
-        // within 3y BEFORE the path reaches this Fix AC check; the
-        // simplified routeTop in those cases will already be the next
-        // legitimate forward node.
-        //
-        // Why post-simplification (not pre-): PathSimplify can remove
-        // a forward node between start and a rear node if collinear
-        // with later forward nodes; the post-simplify routeTop is the
-        // node the bot actually walks to, which is what matters for
-        // heading and rotation decisions in the Update loop.
-        if (routeToNextWaypoint.Count > 0 && forwardLenSq > 0.0001f)
+        // Original log-69 + log-71 evidence and full geometry rationale
+        // (including the angle-threshold math and the log-71 false-
+        // positive that drove the Fix AE tightening) live in the
+        // FollowFocusGoal handler.
+        bool hasSimplifiedRouteTop = routeToNextWaypoint.Count > 0;
+        Vector3 simplifiedRouteTop = hasSimplifiedRouteTop
+            ? Nav2D(routeToNextWaypoint.Peek())
+            : default;
+        var inspection = new PathInspectionSnapshot(
+            requestId,
+            result.StartW,
+            result.EndW,
+            result.Path.Length,
+            hasSimplifiedRouteTop,
+            simplifiedRouteTop,
+            routeToNextWaypoint.Count,
+            forward.X,
+            forward.Y,
+            forwardLenSq);
+        OnPathResultInspected?.Invoke(inspection);
+        if (inspection.Reject)
         {
-            Vector3 simplifiedTop = Nav2D(routeToNextWaypoint.Peek());
-            float toTopX = simplifiedTop.X - start2D.X;
-            float toTopY = simplifiedTop.Y - start2D.Y;
-            float toTopDistSq = toTopX * toTopX + toTopY * toTopY;
-            const float REAR_TOP_REJECT_MIN_YARDS = 2.0f;
-
-            if (toTopDistSq > REAR_TOP_REJECT_MIN_YARDS * REAR_TOP_REJECT_MIN_YARDS)
-            {
-                float dot = forward.X * toTopX + forward.Y * toTopY;
-                if (dot <= 0f)
-                {
-                    logger.LogError(
-                        $"[NAV] Fix AC: rejecting heavily-rear-curving path. " +
-                        $"Simplified routeTop {simplifiedTop} is " +
-                        $"{MathF.Sqrt(toTopDistSq):0.00}y from start with dot={dot:0.00} " +
-                        $"<= 0 against forward direction. Bot would walk away from goal " +
-                        $"(corridor wrap-around past Fix AA's 3y bound — would pull assist " +
-                        $"into navmesh dead zone). start={result.StartW} end={result.EndW} " +
-                        $"pathLen={result.Path.Length} routeCount-after-simplify={routeToNextWaypoint.Count}. " +
-                        $"Clearing route, firing OnPathFailed for FFG to rewind/escalate.");
-                    routeToNextWaypoint.Clear();
-                    SyncRouteStateToTop();
-                    noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
-                    OnPathFailed?.Invoke(result.StartW, result.EndW);
-                    return;
-                }
-            }
+            routeToNextWaypoint.Clear();
+            SyncRouteStateToTop();
+            noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(inspection.RejectCooldownMs);
+            OnPathFailed?.Invoke(result.StartW, result.EndW);
+            return;
         }
 
         logger.LogDebug(
