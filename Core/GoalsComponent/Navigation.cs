@@ -606,6 +606,18 @@ public sealed partial class Navigation : IDisposable
     private const float STOP_DIST_SQ = STOP_DIST * STOP_DIST;
     private const float POP_DIST_SQ = POP_DIST * POP_DIST;
 
+    // Fix AQ (log-79 03:55:13:166 → 03:55:16:257, 3.1 s stall):
+    // Threshold for the conservative "bot at final waypoint but route
+    // still non-empty" short-circuit. See the comment block at the
+    // insertion site in Update() for the full evidence trail. Set to
+    // 1.5 s so the short-circuit fires comfortably before FFG's
+    // ActiveStuckDetection threshold (2.5 s — FollowFocusGoal
+    // ActiveStuckThresholdSec) — Navigation pops the waypoint and
+    // emits OnDestinationReached, letting FFG set a fresh waypoint
+    // before FFG's Stuck flag → leader pause → RouteEscape chain
+    // would have to run.
+    private const double AtWpStallThresholdSec = 1.5;
+
     // Chase-progress watchdog with movement hysteresis
     private Vector3 _chaseProgTarget;
     private float _chaseProgBestDist = float.MaxValue;
@@ -1329,6 +1341,96 @@ public sealed partial class Navigation : IDisposable
             }
 
             SyncRouteStateToTop(routeToNextWaypoint.Count > 0 || wayPoints.Count > 0);
+        }
+
+        // ── Fix AQ (log-79 03:55:13:166 → 03:55:16:257) ──
+        //
+        // The route-pop loop above drains route nodes the bot is close to
+        // (within POP_DIST = 3.6 y of the routeTop, or wpReach for the
+        // last node). It does NOT drain nodes the bot can't physically
+        // reach — e.g., when the path-finder routed through a corridor
+        // the bot's actual movement got blocked from.
+        //
+        // Symptom: the bot arrives at the final waypoint area
+        // straight-line (within IsAtFinalWaypoint reach ≈ 3.35 y) but
+        // some intermediate route node remains unreachable. The existing
+        // IsAtFinalWaypoint pop just below (line ~1439) only fires when
+        // `routeToNextWaypoint.Count == 0`, so a non-empty route blocks
+        // the pop. The bot computes targetW = routeTop (unreachable),
+        // ShouldMoveToward against routeTop, runs through the chase
+        // watchdog (4 s + 1.5 s thresholds), and ultimately gets caught
+        // by FFG's ActiveStuckDetection (2.5 s) — by which point the
+        // leader's combat has often resolved itself.
+        //
+        // Evidence from log-79:
+        //   03:55:13:166  bot 1.7 y from wpTop <-735.25, -4278.86>;
+        //                 path-preservation kept route; route still has
+        //                 nodes that the bot will not reach.
+        //   03:55:13:970  last LeftArrow press; bot finishes aligning
+        //                 with the unreachable routeTop direction.
+        //   03:55:13:970 → 03:55:16:257  bot drifts 0.75 y total (slow
+        //                 into-terrain motion); ends at <-735.65,
+        //                 -4281.47> — 2.64 y from wpTop, still inside
+        //                 IsAtFinalWaypoint reach for the entire window.
+        //   03:55:16:257  FFG ActiveStuckDetection fires.
+        //   03:55:16:448  leader kills the mob (combat ends).
+        //   03:55:16:690  RouteEscape fires — 242 ms too late to matter.
+        //
+        // Conservative gate: requires `_chaseProgSinceUtc` to be valid
+        // (a chase has been observed) AND `sinceBestSec >=
+        // AtWpStallThresholdSec` (the chase target's closest-distance
+        // hasn't improved for ≥ 1.5 s). Without the stall gate, this
+        // would fire on the FIRST tick the bot enters IsAtFinalWaypoint
+        // reach — which is fine if the bot has actually arrived but
+        // wrong during legitimate detours where the bot is straight-line
+        // close to wpTop but still needs to traverse the route. The
+        // stall gate ensures we only short-circuit when the route has
+        // PROVABLY failed to deliver the bot to a closer position.
+        //
+        // Why 1.5 s: needs to fire before FFG's ActiveStuckDetection
+        // (2.5 s) so navigation has first chance to recover the bot
+        // via a clean pop + OnDestinationReached. If FFG fires first,
+        // the bot's status flips to Stuck (leader pauses) and the
+        // existing recovery chain runs — Fix AQ becomes redundant but
+        // not harmful. 1.5 s is also short enough that we don't add
+        // material latency to legitimate "bot is briefly stuck on a
+        // route node but will recover" cases — those typically resolve
+        // sub-second.
+        //
+        // What the short-circuit does: emit OnDestinationReached the
+        // same way the existing IsAtFinalWaypoint pop just below
+        // (line ~1439) does. FFG's handler accepts the position (if
+        // within follow distance) or sets a new waypoint toward the
+        // leader, which triggers fresh path-finding from the bot's
+        // current position — far more likely to produce a reachable
+        // route than the stale one we just abandoned.
+        if (routeToNextWaypoint.Count > 0 &&
+            wayPoints.Count == 1 &&
+            _chaseProgSinceUtc != DateTime.MinValue)
+        {
+            double sinceBestSec_atWp = (now - _chaseProgSinceUtc).TotalSeconds;
+            if (sinceBestSec_atWp >= AtWpStallThresholdSec)
+            {
+                Vector3 finalWp = Nav2D(wayPoints.Peek());
+                float dWp = playerPos.WorldDistanceXYTo(finalWp);
+                float wpReach = ReachedDistance(OutDoorMinDistance) + 0.35f;
+                if (dWp <= wpReach)
+                {
+                    logger.LogWarning(
+                        $"[NAV] Fix AQ: route-pop stalled (sinceBest={sinceBestSec_atWp:0.00}s " +
+                        $">= {AtWpStallThresholdSec:0.00}s threshold) but bot is within reach " +
+                        $"({dWp:0.00}y <= {wpReach:0.00}y) of final waypoint {finalWp}. " +
+                        $"Accepting arrival, clearing {routeToNextWaypoint.Count} unreachable " +
+                        $"route node(s), and emitting OnDestinationReached.");
+
+                    SetLastSafeAnchor(playerPos);
+                    wayPoints.Pop();
+                    routeToNextWaypoint.Clear();
+                    SyncRouteStateToTop();
+                    CompleteDestinationReached(fireWaypointReached: true);
+                    return;
+                }
+            }
         }
 
         // Route may have emptied after pop; consume waypoint and/or refill immediately in same Update.

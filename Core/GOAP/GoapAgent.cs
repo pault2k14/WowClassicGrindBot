@@ -1273,7 +1273,118 @@ public sealed partial class GoapAgent : IDisposable
         return ((playerCombat || bits.Focus_Combat()) && dmgTaken)
                 || ((playerCombat || bits.Focus_Combat()) && hasTarget && (hasTarget && !b.Target_Dead())
                      && (b.Target_Hostile() || (bits.Target() && combatLog.ToPull.Contains(playerReader.TargetGuid)))
-                     && playerReader.WithInCombatRange());
+                     && playerReader.WithInCombatRange())
+                // ── Fix AP (log-79 03:55:01:459 → 03:55:16:448, first-mob window) ──
+                //
+                // Asymmetric counterpart to PartyLeaderInCombat()'s
+                //   `(b.FocusTarget() && bits.FocusTarget_Combat())`
+                // disjunct (line ~1402 below). The leader-side accepts that
+                // looser predicate because the leader is meant to be the
+                // proactive combatant — "leader observes any in-combat mob"
+                // is a valid signal for the leader to engage. The
+                // member-side (assist in AssistFocus mode) needs a tighter
+                // gate: the assist should only join when the LEADER HERSELF
+                // is engaged, not merely observing a fight someone else is
+                // in. The third conjunct `bits.Focus_Combat()` provides that
+                // gate.
+                //
+                // Evidence: in log-79's first mob, the leader entered combat
+                // at 03:55:10:502 (BotStatus.Combat broadcast received by the
+                // assist at 03:55:11:149). The assist:
+                //   - playerCombat = false (no aggro on the assist)
+                //   - dmgTaken = false (no damage taken during the 6s combat)
+                //   - hasTarget = false (Fix AH/AJ/AN never fired — assist
+                //     never reached the anchor: 11.6y at path-enqueue, ended
+                //     20.5y away by anchor-clear due to pather wrap-around)
+                // → both existing disjuncts evaluate false → partymembercombat
+                // = false → CombatGoal's AssistFocus precondition
+                // (CombatGoal.cs ctor) fails → CombatGoal not selected →
+                // assist stays in FollowFocusGoal doing PositionChase →
+                // wedged against terrain at <-735.65, -4281.47> for the
+                // entire combat duration. RouteEscape fired at 03:55:16:690,
+                // 242ms after the leader had already killed the mob at
+                // 03:55:16:448. User observation: "assist runs into wall for
+                // the entire combat duration."
+                //
+                // Why the existing predicate was insufficient: the original
+                // semantics were "this bot is locally engaged" — only the
+                // bot's own combat / damage / target signals counted.
+                // PartyLeaderInCombat already had a focus-engagement branch
+                // (matched here below) so the LEADER recognised "the assist
+                // is engaging via focus chain" and could fire CombatGoal.
+                // The assist had no such symmetric path: it could only enter
+                // Combat by either (a) being attacked itself, or (b) having
+                // its own target acquired by an external mechanism (Fix AH/
+                // AJ/AN's focus chain). When (a) didn't happen and (b)
+                // couldn't fire (anchor windows too short, geometry didn't
+                // permit convergence), the assist was stuck.
+                //
+                // Why this is the right place to fix (vs an FFG-side focus
+                // chain): CombatGoal already has Case 2 (CombatGoal.cs
+                // line ~410) which performs PressTargetFocus +
+                // PressTargetOfTarget as its first action when
+                // currentTargetIsIgnored=true. The acquisition logic is
+                // already present; what was missing was simply the
+                // precondition that allows CombatGoal to be SELECTED in
+                // the first place. Adding this branch lets the planner
+                // pick CombatGoal once the leader is actually engaging a
+                // fightable mob, and CombatGoal's own Case 2 swaps the
+                // target. No new code path duplicates an existing one.
+                //
+                // Three-conjunct gate (Focus_Combat AND FocusTarget AND
+                // FocusTarget_Combat) — each conjunct rejects a specific
+                // failure case:
+                //
+                //   - Focus_Combat (leader herself is in combat): rejects
+                //     scenarios where the leader is OOC but happens to
+                //     have a target that's in combat with someone else.
+                //     Examples:
+                //       * Leader auto-targets (Tab / soft-interact) a
+                //         passing mob already engaged with another player
+                //         — without this conjunct the assist would enter
+                //         CombatGoal, Case 2 swaps to leader's target,
+                //         and assist starts attacking a mob another player
+                //         is tagging (kill-steal).
+                //       * Leader's stale post-kill target still has the
+                //         combat flag for a tick or two after death (rare
+                //         but observable). Focus_Combat drops within the
+                //         tick the leader exits combat, so this conjunct
+                //         filters out the residual flag.
+                //       * Pet-class scenario: leader's pet engages a mob
+                //         while the leader is OOC. Leader's target =
+                //         pet's target = in-combat-with-pet. Without this
+                //         conjunct the assist would join, which is
+                //         design-dependent (some configurations may want
+                //         it, but the safe default is "no").
+                //
+                //   - FocusTarget (leader actually has a target): trivial
+                //     guard against FocusTarget_Combat reading garbage
+                //     when no target is set.
+                //
+                //   - FocusTarget_Combat (the target is itself in combat):
+                //     the substantive signal — the mob is actually engaged,
+                //     not just selected. Filters out the PTG window where
+                //     the leader has acquired but hasn't yet landed the
+                //     pull cast (target selected, target not in combat
+                //     yet). Once the pull lands, this becomes true and
+                //     CombatGoal can fire.
+                //
+                // Conjunct ordering chosen for short-circuit efficiency:
+                // Focus_Combat first because it's the most likely to be
+                // false in the common case (leader patrolling/looting/
+                // etc.), then FocusTarget, then FocusTarget_Combat.
+                //
+                // Why no IsIgnored check here: PartyMemberInCombat is
+                // a generic engagement signal; the IsIgnored / blacklist
+                // semantics are gated by GoapKey.allPartyTargetsIsIgnored
+                // (the CombatGoal precondition just below
+                // partymembercombat in the AssistFocus ctor). If the
+                // leader's target is on IsIgnored, allPartyTargetsIsIgnored
+                // resolves to true and CombatGoal is still blocked at
+                // the planner level — even if this branch returns true.
+                // The two preconditions compose correctly without
+                // duplicating the IsIgnored check here.
+                || (bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Combat());
     }
 
     public bool PartyLeaderInCombat()
