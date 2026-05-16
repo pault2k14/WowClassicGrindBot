@@ -202,6 +202,73 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         _ghostCombatActive = false;
         _ghostCombatSinceUtc = DateTime.MinValue;
         _ghostCombatDamageSnapshot = 0;
+
+        // ── Fix AR (log-79b 14:21:20:475 → 14:21:23:312) ──
+        //
+        // Reset per-session approach counters at the start of every Combat.
+        // Without these resets, `consecutiveApproach` and `consecutiveNoAction`
+        // carry over from the previous Combat session — these are private
+        // CombatGoal instance fields that nothing else clears between
+        // engagements (OnExit doesn't reset them; the only in-Update reset
+        // paths require very specific conditions to fire).
+        //
+        // Evidence from log-79b first combat:
+        //   14:21:20:475  Combat OnEnter (combat starts, fresh session).
+        //   14:21:20:660  1st Approach (I key) press — consecutiveApproach
+        //                 should be 1 in a clean session.
+        //   14:21:21:123  2nd Approach press — should be 2.
+        //   14:21:21:570  3rd Approach press — should be 3.
+        //   14:21:21:585  *** First StuckDetector log fires *** —
+        //                 "We are moving". The Update branch that emits
+        //                 this message is gated on `consecutiveApproach
+        //                 >= 5`. With only 3 fresh presses in THIS combat,
+        //                 the counter must have been ≥ 2 at OnEnter for
+        //                 the gate to be open. Carry-over from the prior
+        //                 combat is the only path to that state.
+        //   14:21:22:334  First "We aren't moving" — bot is genuinely
+        //                 stalled (Approach key auto-walk failed to make
+        //                 the bot reach the new mob; RecordApproach logs
+        //                 show moved=0.00y across every press).
+        //   14:21:22:387  Jump (Spacebar) — StuckDetector's first
+        //                 recovery action.
+        //   14:21:23:230  "Unstuck by turning for 68ms" + 14:21:23:312
+        //                 "Unstuck by moving for 1483ms" — the
+        //                 user-visible random-direction recovery: a
+        //                 LeftArrow tap followed by 1.483 s of held
+        //                 UpArrow taking the bot off its current heading.
+        //
+        // Why the previous session left the counter non-zero: the only
+        // reset paths inside Update() are
+        //   (a) consecutiveApproach = 0 in the "non-Approach cast" else
+        //       branch — fires when a non-Approach key (e.g., an attack
+        //       spell) is the one CastIfReady accepts this tick;
+        //   (b) consecutiveApproach = 0 in the
+        //       `consecutiveApproach >= 5 && IsInMeleeRange && DamageDone`
+        //       branch — fires only after the bot is in melee range AND
+        //       has dealt damage AFTER consecutiveApproach already hit 5;
+        //   (c) consecutiveApproach = 0 in the geometry-trap timeout
+        //       branch — fires after UnreachableMobTimeoutSec (18 s).
+        // A prior combat that ended via an assist's killing blow while
+        // the leader was still mid-Approach, or whose final action was
+        // the Approach key itself, leaves the counter non-zero. The
+        // counter persists across the Approach Target / Pull Target /
+        // Follow / Combat plan transitions and into the next Combat
+        // OnEnter.
+        //
+        // Why both counters: `consecutiveNoAction` has the symmetric
+        // issue. Its only reset is `consecutiveNoAction = 0` inside the
+        // successful-cast branch, and it gates a "press Interact after
+        // 20 idle ticks with no damage done" branch. Carry-over could
+        // cause a premature Interact at the start of a new combat —
+        // smaller-visibility bug, but the same root cause and a trivial
+        // co-fix.
+        //
+        // Why not `lastTargetGuid`: it's used purely as a "did the target
+        // change since last tick?" diagnostic; carry-over only affects
+        // whether the "Target Changed To: X" log fires on the first
+        // tick of a new combat. No behavioral impact.
+        consecutiveApproach = 0;
+        consecutiveNoAction = 0;
     }
 
     public override void OnExit()
