@@ -476,6 +476,47 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     private DateTime _cantFollowEnteredUtc;
 
+    /// <summary>
+    /// Fix AK (revised): UTC timestamp of the most recent <see cref="OnExit"/>
+    /// call. Used in <see cref="OnEnter"/> when <c>_navState == CantFollow</c>
+    /// to measure how long FFG was preempted by another goal. Brief
+    /// preemptions (Heal, Buff, Loot, ConsumeCorpse — typically &lt;2.5s)
+    /// indicate the underlying CantFollow condition is essentially
+    /// unchanged and we should resume CantFollow as before (Fix 31/32
+    /// behavior). Long preemptions (Combat — typically &gt;3s) indicate
+    /// significant time has passed during which world state may have
+    /// changed in ways we can't detect locally (mob respawns/despawns,
+    /// blacklist changes, leader's queued actions, etc.), so we reset
+    /// to Idle for a fresh evaluation. Initialised to
+    /// <see cref="DateTime.MinValue"/> so the very first
+    /// <see cref="OnEnter"/> (before any <see cref="OnExit"/>) treats the
+    /// preemption duration as effectively zero and preserves CantFollow
+    /// if somehow that's the entry state.
+    /// </summary>
+    private DateTime _lastOnExitUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Fix AK: preemption-duration threshold above which FFG.OnEnter treats
+    /// the previous CantFollow state as stale and resets to Idle for
+    /// fresh evaluation. Below this threshold, the original Fix 31/32
+    /// behavior (resume CantFollow, reset escape phase only) is preserved.
+    /// <para>
+    /// 2500 ms is calibrated to discriminate Combat-class preemptions
+    /// (CombatGoal typically holds the plan for &gt;3s — the shortest
+    /// realistic combat duration seen in logs is ~3s for a one-shot)
+    /// from brief-cast preemptions (Heal/Buff cast times 1-2s in WoW
+    /// Classic, plus ~250ms goal-swap overhead). The threshold is
+    /// asymmetric on purpose: false negatives (very brief Combat fights
+    /// treated as brief preemptions) cost only the same wrong-direction
+    /// projection that Fix AK was designed to prevent; false positives
+    /// (long Heal casts treated as significant preemptions) cost only
+    /// 2 wasted path-find attempts (~100ms) before re-escalating to
+    /// CantFollow. The fix is robust to misclassification in both
+    /// directions.
+    /// </para>
+    /// </summary>
+    private const double SignificantPreemptionMs = 2500.0;
+
     // -----------------------------------------------------------------------
     // SetSingleWaypoint loop guard (Fix 5, log-36)
     // -----------------------------------------------------------------------
@@ -617,26 +658,114 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
         else if (_navState == NavState.CantFollow)
         {
-            // Remain in CantFollow across plan cycles — the assist should not start
-            // moving just because another goal briefly preempted us.
-            logger.LogInformation("[FFG] OnEnter: resuming CantFollow state.");
-
-            // Fix 31: defensive Stop() — another goal (e.g., CombatGoal)
-            // may have been active during the brief preemption and started
-            // navigation. Per-tick Stop() in UpdateCantFollow was removed
-            // (see comment block there), so this is the only place that
-            // re-asserts the "navigation stopped while CantFollow" invariant
-            // on plan-cycle re-entry. Stop() is idempotent — if navigation
-            // is already stopped, this is a single redundant log line per
-            // re-entry rather than per tick.
+            // Fix AK (revised, log-76 evidence + oscillation-safety review):
+            //
+            // Original log-76 scenario (00:34:35:005 → 00:34:40:383):
+            //   - Assist entered CantFollow at <-375.78, -4134.94> due to a
+            //     genuine Fix AC+AE+AI U-turn rejection (angle=166.7°) when
+            //     pathing 10y SE through rocks.
+            //   - Combat preempted FFG at 00:34:35:362, ran for 5s, exited
+            //     at 00:34:40:217. FFG.OnEnter at 00:34:40:383.
+            //   - Pre-fix behavior: "resuming CantFollow state" branch fires
+            //     Projection10 with basis=away-from-leader. Leader had moved
+            //     south during Combat (final pos <-381.44, -4152.90>), so
+            //     away-from-leader projected NORTH. Assist walked north
+            //     for 15+ seconds through 16 Projection10 iterations.
+            //
+            // Naive Fix AK would always reset to Idle on FFG.OnEnter from
+            // CantFollow. But that creates a regression for the oscillation
+            // case raised in review: a genuinely-stuck assist (terrain
+            // obstacle persists) being briefly preempted by Heal, Buff,
+            // Loot, or any range-keyed goal would, on each preemption,
+            // pay 2 wasted path-find attempts (~100ms) AND briefly
+            // re-enter NavigatingToLeader (movement keys may pulse →
+            // visible jitter). Repeated rapidly, this is bad UX AND
+            // accumulating overhead.
+            //
+            // The discriminator: preemption duration. Position-based checks
+            // looked appealing but log-76 disproved them — the assist moved
+            // 1.25y during Combat and the leader moved 0.27y. Both were
+            // essentially stationary (the assist a ranged caster fighting
+            // in place). The ONLY signal that distinguishes Combat-class
+            // preemption from Heal-class preemption is wall-clock duration.
+            //
+            // Calibration:
+            //   - Combat: ~3-30s typical (log-76 was 5s; CombatTracker
+            //     "Left Combat after 3.00sec" line shows the shortest
+            //     realistic case).
+            //   - Heal/Buff: 1-2s cast time + 250ms goal-swap = 1.25-2.25s.
+            //   - Loot: 1-3s depending on items.
+            //   - ConsumeCorpse: 2-4s depending on level.
+            //   - SignificantPreemptionMs = 2500ms threshold.
+            //
+            // Behavior split:
+            //   - Brief preemption (≤2500ms): resume CantFollow with
+            //     ResetEscapeState() (original Fix 31/32 behavior). No
+            //     regression; oscillation-safe.
+            //   - Long preemption (>2500ms): reset to Idle, ResetEscapeState,
+            //     ResetNavState. UpdateIdle re-evaluates from current world
+            //     state. If still unreachable, FFG re-escalates to CantFollow
+            //     after 2 path attempts (~100ms wasted in the worst case).
+            //
+            // Misclassification cost:
+            //   - Very brief Combat (<2500ms) classified as brief: assist
+            //     resumes CantFollow with possibly-stale projection direction.
+            //     But the leader likely hasn't moved much in such a short
+            //     fight, so the projection direction is still roughly correct.
+            //   - Long Heal cast (>2500ms, e.g. resurrect-channel) classified
+            //     as long: assist pays 2 wasted path attempts before re-
+            //     escalating. Bounded, recoverable, no behavior loop.
+            //
+            // Both misclassification modes are strictly less bad than the
+            // log-76 wrong-direction walk.
             navigation.Stop();
 
-            // Fix 32 — reset the escape state machine. Whatever escape
-            // phase we were in before the preemption, the post-preemption
-            // position may be different (Combat moved us, etc.), so the
-            // old target waypoint is stale. Restart from Projection10 to
-            // pick a fresh direction from the current position.
-            ResetEscapeState();
+            double preemptionMs = _lastOnExitUtc != DateTime.MinValue
+                ? (DateTime.UtcNow - _lastOnExitUtc).TotalMilliseconds
+                : 0.0;
+
+            // Capture position context for both branches' troubleshooting logs.
+            // Computed once outside the branch so a future maintainer can't
+            // accidentally diverge the two messages.
+            LeaderState? leaderForLog = leaderConnection.LastLeaderState;
+            string posCtx;
+            if (leaderForLog != null)
+            {
+                float distToLeader = playerReader.WorldPos.WorldDistanceXYTo(leaderForLog.WorldPos);
+                posCtx = $"assist={playerReader.WorldPos}, leader={leaderForLog.WorldPos}, dist={distToLeader:0.0}y";
+            }
+            else
+            {
+                posCtx = $"assist={playerReader.WorldPos}, leader=<unknown — no fresh broadcast>";
+            }
+
+            if (preemptionMs > SignificantPreemptionMs)
+            {
+                logger.LogInformation(
+                    $"[FFG] OnEnter: CantFollow CLEARED by Fix AK gate. " +
+                    $"Preemption={preemptionMs:0}ms (> SignificantPreemptionMs={SignificantPreemptionMs:0}ms), " +
+                    $"treating as Combat-class — world state may have changed in non-positional " +
+                    $"ways during the preemption. {posCtx}. " +
+                    $"Resetting _navState to Idle for fresh evaluation; if the leader is still " +
+                    $"unreachable, FFG will re-escalate to CantFollow via the standard " +
+                    $"path-failure → _navAttempt escalation flow.");
+                ResetEscapeState();
+                ResetNavState();
+                _navState = NavState.Idle;
+            }
+            else
+            {
+                // Original Fix 31/32 behavior — brief preemption, geometry
+                // and conditions essentially unchanged. Resume CantFollow,
+                // reset escape phase only (so projection picks fresh
+                // direction from current position).
+                logger.LogInformation(
+                    $"[FFG] OnEnter: CantFollow PRESERVED by Fix AK gate. " +
+                    $"Preemption={preemptionMs:0}ms (≤ SignificantPreemptionMs={SignificantPreemptionMs:0}ms), " +
+                    $"treating as brief (Heal/Buff/Loot-class). {posCtx}. " +
+                    $"Resuming CantFollow with escape-phase reset (Fix 31/32 behavior preserved).");
+                ResetEscapeState();
+            }
         }
     }
 
@@ -766,6 +895,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             _navState = NavState.Idle;
         }
         // CantFollow persists across plan cycles so the assist holds position.
+
+        // Fix AK: capture exit timestamp so the next OnEnter can measure
+        // preemption duration and discriminate brief preemptions (Heal/Buff,
+        // resume CantFollow) from long ones (Combat, reset to Idle for
+        // fresh evaluation).
+        _lastOnExitUtc = DateTime.UtcNow;
     }
 
     public bool ChangeToTarget(KeyAction keyAction) 
@@ -3669,10 +3804,82 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // failed path attempt before falling through to the same recovery.
             const float REAR_REJECT_COS_THRESHOLD_SQ = 0.75f;
 
+            // Fix AL (log-76 00:34:34:449 + 00:34:35:004, assist at
+            // <-375.78, -4134.94> chasing target <-379.89, -4143.99> 9.94y
+            // SSE through some rocks; user observed assist participated in
+            // combat after barely clearing the rocks, then "took off running
+            // in the opposite direction" post-combat):
+            //
+            // Fix AI's 150° threshold rejected what was actually a legitimate
+            // short rock-detour at angle=166.8° (cos=-0.973, dot=-40.79,
+            // dist=4.22y). pathLen=16 raw, simplified to 3 nodes — a short,
+            // simple detour requiring ONE bend, not a navmesh-dead-zone
+            // wraparound. The cos²=0.947 result is FAR above 0.75; raising
+            // the angle threshold further would chase the symptom forever.
+            //
+            // What actually distinguishes genuine dead-zone U-turns from
+            // legitimate short detours is PATH COMPLEXITY, not angle alone:
+            //
+            //   Case           | angle  | pathLen | simplified | Verdict
+            //   ---------------|--------|---------|------------|---------
+            //   log-69 (real)  | 151°   | 146     | 17         | DEAD ZONE
+            //   log-69 (real)  | 163°   | (high)  | (high)     | DEAD ZONE
+            //   log-74 (false) | 135.1° | 14      | 3          | DETOUR
+            //   log-76 (false) | 166.8° | 16      | 3          | DETOUR
+            //
+            // The angle distribution does NOT separate the classes; the
+            // simplified-route-count distribution does. log-69's 17-node
+            // simplified route reflects a heavy wraparound through navmesh-
+            // difficult terrain. log-74 and log-76's 3-node simplified routes
+            // reflect single-bend detours around isolated obstacles (trees,
+            // rocks).
+            //
+            // Fix AL: require BOTH high angle AND high simplified route
+            // count. A path that meets only the angle criterion (short
+            // detour around a small obstacle) is accepted with a warning
+            // log line — useful for monitoring future evidence of the
+            // false-positive class without losing the data point.
+            //
+            // The threshold of 8 simplified nodes gives ~5 nodes of margin
+            // between known detours (3) and known wraparounds (17). The
+            // threshold could be tuned tighter (e.g., 6) without losing
+            // detection of log-69, but 8 leaves room for legitimate
+            // mid-complexity detours we haven't seen yet.
+            //
+            // Behavior on known cases:
+            //   log-69 (simplified=17, angle 151°-163°) → STILL REJECTED ✓
+            //     (both conditions met — genuine dead zone)
+            //   log-71 (simplified varies, angle 93°-104°) → unchanged
+            //     from Fix AE (angle below threshold)
+            //   log-74 (simplified=3, angle 135.1°) → was already accepted
+            //     by Fix AI; still accepted here
+            //   log-76 (simplified=3, angle 166.8°) → NOW ACCEPTED — bot
+            //     follows the detour around the rocks, ~1s of swing-wide
+            //     instead of 15s+ of CantFollow walking the wrong direction
+            //
+            // Why simplified route count rather than raw pathLen: pathLen
+            // varies with the pather's per-segment node spacing (which can
+            // shift across navmesh versions and area-density). simplified
+            // count is measured AFTER Fix AA pruning AND PathSimplify, so
+            // it captures the path's actual kink-count — a more direct
+            // measure of "is this a complex wraparound" than raw pathLen.
+            //
+            // Recovery for any missed-rejection case is unchanged: if the
+            // accepted path turns out to land the bot in trouble (the bot
+            // walks NE 4y then runs into a navmesh edge), Navigation's
+            // stuck detection and OnPathFailed escalation still fire.
+            const int COMPLEX_WRAPAROUND_MIN_ROUTECOUNT = 8;
+
             if (toTopDistSq > REAR_TOP_REJECT_MIN_YARDS * REAR_TOP_REJECT_MIN_YARDS)
             {
                 float dot = snap.ForwardX * toTopX + snap.ForwardY * toTopY;
-                if (dot < 0f && dot * dot > REAR_REJECT_COS_THRESHOLD_SQ * snap.ForwardLenSq * toTopDistSq)
+                bool angleExceedsThreshold =
+                    dot < 0f &&
+                    dot * dot > REAR_REJECT_COS_THRESHOLD_SQ * snap.ForwardLenSq * toTopDistSq;
+                bool isComplexWraparound =
+                    snap.SimplifiedRouteCount >= COMPLEX_WRAPAROUND_MIN_ROUTECOUNT;
+
+                if (angleExceedsThreshold && isComplexWraparound)
                 {
                     // Compute readable cos/angle for the log message. Only
                     // executed on the rare rejection path, so the sqrt is fine.
@@ -3684,17 +3891,43 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     float angleDeg = MathF.Acos(cosA) * (180f / MathF.PI);
 
                     logger.LogError(
-                        $"[FFG] Fix AC+AE+AI: rejecting strongly-rear-curving path " +
-                        $"(angle > 150° from forward). Simplified routeTop " +
-                        $"{snap.SimplifiedRouteTop} is {topDist:0.00}y from start with " +
-                        $"dot={dot:0.00} cos={cosA:0.000} angle={angleDeg:0.0}° " +
-                        $"against forward direction. Bot would U-turn away from goal. " +
+                        $"[FFG] Fix AC+AE+AI+AL: rejecting strongly-rear-curving COMPLEX path " +
+                        $"(angle > 150° AND simplified route count ≥ {COMPLEX_WRAPAROUND_MIN_ROUTECOUNT}). " +
+                        $"Simplified routeTop {snap.SimplifiedRouteTop} is {topDist:0.00}y " +
+                        $"from start with dot={dot:0.00} cos={cosA:0.000} " +
+                        $"angle={angleDeg:0.0}° against forward direction. " +
+                        $"Bot would U-turn into navmesh dead zone. " +
                         $"start={snap.StartW} end={snap.EndW} " +
                         $"pathLen={snap.PathLength} routeCount-after-simplify={snap.SimplifiedRouteCount}. " +
                         $"Signalling Reject — Navigation will clear route and fire OnPathFailed.");
                     snap.Reject = true;
                     snap.RejectCooldownMs = 500;
                     return;
+                }
+                else if (angleExceedsThreshold)
+                {
+                    // Fix AL: angle alone met the threshold, but the path is
+                    // a short simple detour (low simplified count), not a
+                    // dead-zone wraparound. Accept it. Log at Warning level
+                    // so future evidence of this false-positive class is
+                    // visible without polluting normal logs.
+                    float topDist = MathF.Sqrt(toTopDistSq);
+                    float fwdLen = MathF.Sqrt(snap.ForwardLenSq);
+                    float cosA = dot / (fwdLen * topDist);
+                    if (cosA < -1f) cosA = -1f;
+                    else if (cosA > 1f) cosA = 1f;
+                    float angleDeg = MathF.Acos(cosA) * (180f / MathF.PI);
+
+                    logger.LogWarning(
+                        $"[FFG] Fix AL: angle would have triggered rejection " +
+                        $"(angle={angleDeg:0.0}°, cos={cosA:0.000}) but path is a " +
+                        $"short simple detour (simplified routeCount={snap.SimplifiedRouteCount} " +
+                        $"< {COMPLEX_WRAPAROUND_MIN_ROUTECOUNT}); accepting. " +
+                        $"start={snap.StartW} end={snap.EndW} routeTop={snap.SimplifiedRouteTop} " +
+                        $"dist={topDist:0.00}y pathLen={snap.PathLength}. " +
+                        $"If the bot subsequently struggles to navigate this path, " +
+                        $"OnPathFailed/_navAttempt escalation will trigger CantFollow normally.");
+                    // Fall through — path is accepted (no Reject set).
                 }
             }
         }
