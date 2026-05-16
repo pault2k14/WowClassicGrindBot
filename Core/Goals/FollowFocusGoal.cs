@@ -256,6 +256,47 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // as stuck and may consider escalating earlier.
     private const float EscapeMinProgressYards = 1.5f;
 
+    /// <summary>
+    /// Fix AO (log-78 02:41:21:328 → end-of-log, leader paused at AssistReturn
+    /// destination while assist's escape projection ran east unbounded for 49+
+    /// seconds, displacing 177y from leader): position recorded at the moment
+    /// of CantFollow entry. Used by the cumulative-displacement exit in
+    /// <c>UpdateCantFollow</c> — when the assist has moved further than
+    /// <c>MaxEscapeDisplacementYards</c> from this point, the escape has
+    /// fulfilled its purpose (relocate the bot to a navigable region) and
+    /// the bot exits CantFollow to re-attempt NavigatingToLeader from the
+    /// new position. See the comment above the displacement-cap exit in
+    /// <c>UpdateCantFollow</c> for the full evidence trail.
+    /// </summary>
+    private Vector3 _cantFollowEnteredPos;
+
+    /// <summary>
+    /// Fix AO: cumulative-displacement cap from the CantFollow entry position.
+    /// When exceeded, the bot exits CantFollow back to NavigatingToLeader.
+    /// <para>
+    /// 20 y covers ~2-3 Projection10 cycles (each yielding ~6-8 y net
+    /// displacement). After that much escape, the bot is materially clear
+    /// of the original navmesh dead-zone that caused the path rejection
+    /// and a fresh navigation attempt to the leader's CURRENT position
+    /// is likely to succeed via a different geometric route.
+    /// </para>
+    /// <para>
+    /// If the new path still fails (bot is in an unusually large dead-zone),
+    /// CantFollow re-fires from the new position with <c>_cantFollowEnteredPos</c>
+    /// reset to the new spot. The escape continues from there, bounded fresh
+    /// to 20 y per cycle. This is self-limiting and prevents the
+    /// unbounded one-direction escape observed in log-78.
+    /// </para>
+    /// <para>
+    /// Smaller values risk premature exits while the bot is still partially
+    /// in the dead-zone — repeated CantFollow flapping. Larger values give
+    /// the escape more room but extend the worst-case "wrong direction"
+    /// travel. 20 y is a middle-ground per the log-78 evidence; tune via
+    /// the warning log line below if future evidence shows mis-calibration.
+    /// </para>
+    /// </summary>
+    private const float MaxEscapeDisplacementYards = 20.0f;
+
     // Fix 33 (log-53: 1000 "Position-chase: standard target ... within 6.0y
     // of assist's blacklist; projected toward assist to ..." log lines in
     // ~100 s, ~10 Hz steady state and ~60 Hz during CantFollow flap):
@@ -2128,6 +2169,81 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
+        // ── Fix AO (log-78 02:41:21:328 → end-of-log): cumulative-displacement exit
+        //
+        // Evidence: assist failed to path 36 y NE to leader's waypoint top
+        // (Fix AC+AE+AI+AL rejected a 107-raw-node, 11-simplified path with
+        // 172.6° rear angle — genuine navmesh wraparound). Entered CantFollow
+        // at <-707.89, -4281.00> at 02:41:21:328. Leader detected CantFollow
+        // rising edge, broadcast AssistRequestReturn, navigated to assist's
+        // last position (<-710.68, -4280.07>), arrived at 02:41:23:812, then
+        // PAUSED waiting for assist to report Following.
+        //
+        // Meanwhile, the assist's CantFollow escape ran Fix AB-2 "directional
+        // fallback projection 10y, basis=away-from-leader." Each Projection10
+        // cycle recomputed direction using the leader's CURRENT (stationary)
+        // position. Leader stayed west; projection stayed east. Across 23
+        // cycles in 49 s, assist moved <-707.89, -4281.00> → <-531.31, -4313.57>
+        // — 177 y east of leader. The log ended with the escape still running;
+        // the only exit that would have fired was the 120 s CantFollowTimeoutSec.
+        //
+        // Why the existing exits didn't fire:
+        //   - Leader-arrived (6 y): leader paused, assist running away —
+        //     gap monotonically widened. Never triggers.
+        //   - Segment-clear-of-BL: gated by `navigation.AreaBlacklist != null`;
+        //     on the assist side AreaBlacklist is null (no blacklist data
+        //     loaded), so the entire block is skipped regardless of position.
+        //   - 120 s timeout: would eventually fire but lets the assist
+        //     wander 200+ y before retrying.
+        //
+        // Root cause: the Fix AB-2 design rationale (line ~2585-2587) assumes
+        // "The leader, via AssistRequestReturn, is navigating TOWARD the
+        // assist, so even slight backward displacement doesn't hurt the
+        // rendezvous — the leader catches up." When the leader's AssistReturn
+        // completes and the leader PAUSES, this assumption breaks: the leader
+        // has already caught up, but the assist's escape keeps recomputing
+        // "away from leader" and recedes further.
+        //
+        // Fix: cap cumulative displacement from the CantFollow entry position
+        // at MaxEscapeDisplacementYards (20 y). When exceeded, exit CantFollow
+        // → NavigatingToLeader. From the new position, navigation re-attempts
+        // pathing to the leader's CURRENT position (whatever it is now). One
+        // of three things happens:
+        //   (a) Path succeeds (most common when bot has escaped the original
+        //       dead-zone; in log-78's case, a path WEST to the paused
+        //       leader is geometrically different from the rejected NE path
+        //       and likely navigable). Assist returns to leader. ✓
+        //   (b) Path fails identically. CantFollow re-fires with
+        //       _cantFollowEnteredPos updated to the new spot. Escape starts
+        //       fresh, bounded again. Self-limiting.
+        //   (c) Bot has actually walked PAST the rendezvous (rare). Leader
+        //       moves toward bot when assist reports Following or via
+        //       subsequent AssistReturn cycles.
+        //
+        // This is additive — it does not change leader-arrived, segment-clear,
+        // or 120 s timeout behavior. The only new outcome is "give up on
+        // unbounded escape after 20 y and let normal navigation retry."
+        if (leaderFresh && _cantFollowEnteredPos != default)
+        {
+            float displacementFromEntry =
+                playerReader.WorldPos.WorldDistanceXYTo(_cantFollowEnteredPos);
+            if (displacementFromEntry > MaxEscapeDisplacementYards)
+            {
+                float distToLeader =
+                    playerReader.WorldPos.WorldDistanceXYTo(leader!.WorldPos);
+                logger.LogWarning(
+                    $"[FFG] Fix AO: cumulative escape displacement {displacementFromEntry:0.0}y " +
+                    $"exceeded cap ({MaxEscapeDisplacementYards}y) from entry at {_cantFollowEnteredPos}. " +
+                    $"Exiting CantFollow to re-attempt navigation to leader (currently {distToLeader:0.0}y " +
+                    $"at {leader.WorldPos}). If path still fails, CantFollow will re-fire from current position.");
+                assistStatusProvider.CantFollow = false;
+                ResetEscapeState();
+                ResetNavState();
+                StartNavigatingToLeader(leader);
+                return;
+            }
+        }
+
         // Existing 120 s timeout — retry navigation in case the leader moved.
         if (cantFollowSec >= CantFollowTimeoutSec)
         {
@@ -3412,6 +3528,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         navigation.Stop();
         assistStatusProvider.CantFollow = true;
         _cantFollowEnteredUtc = DateTime.UtcNow;
+        // Fix AO (log-78): record entry position for the cumulative-displacement
+        // exit in UpdateCantFollow. See the field comment for rationale.
+        _cantFollowEnteredPos = playerReader.WorldPos;
         assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
         // Fix 32 — reset the escape state machine so it starts fresh from
         // NotStarted on the first UpdateCantFollow tick. Without this,
