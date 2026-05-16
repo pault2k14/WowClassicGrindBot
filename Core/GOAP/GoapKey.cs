@@ -108,6 +108,46 @@ public enum GoapKey
     /// </summary>
     allPartyTargetsIsIgnored,
 
+    /// <summary>
+    /// Fix AH (log-73 16:43:37 → 16:44:15, ~37 s assist wedge): true when the
+    /// party is either already in combat (<c>PartyInCombat()</c>) OR the
+    /// leader has published an approach-start anchor
+    /// (<c>LeaderNavigationProvider.HasApproachStart</c>). Used as
+    /// ApproachTargetGoal's AssistFocus precondition in place of the
+    /// previous <see cref="partyincombat"/> requirement.
+    /// <para>
+    /// Rationale: the leader's ATG OnEnter publishes the approach anchor and
+    /// begins pressing Interact on its hard-acquired target. Combat does not
+    /// actually start until the leader reaches the mob (~8.5 s later in
+    /// log-73). During that pre-combat window the assist's ATG was un-
+    /// selectable (<c>partyincombat=false</c>), so the assist fell back to
+    /// FollowFocusGoal's PositionChase — which the pather cannot route
+    /// through terrain that the leader's Interact key auto-walks across
+    /// (rocks at <c>Z=51.86</c> in log-73). By the time combat finally fired
+    /// the assist was already 23 y behind, wedged at
+    /// <c>&lt;-389.84, -4137.61&gt;</c>, and escalated to CantFollow.
+    /// </para>
+    /// <para>
+    /// With <c>partyEngaging=true</c> during the leader's approach phase,
+    /// ATG (cost 8) becomes selectable on the assist as soon as
+    /// <c>hastarget=true</c> is satisfied — see the focus-chain target
+    /// acquisition in <c>FollowFocusGoal</c> (Fix AH Part 1) which presses
+    /// PressTargetFocus + PressTargetOfTarget at the approach anchor. Once
+    /// ATG owns the goal slot, its AssistFocus branch presses
+    /// Approach every tick on the leader's hard target — the same
+    /// interact-key auto-walk mechanism the leader uses to traverse
+    /// pather-unfriendly terrain.
+    /// </para>
+    /// <para>
+    /// Note: this key does NOT replace <c>partyincombat</c> generally — only
+    /// ATG's AssistFocus precondition is migrated. <c>partyincombat</c> is
+    /// preserved verbatim because FRG and other goals depend on its
+    /// "combat is actually active" semantics; broadening it would cause
+    /// FRG to abort patrol the moment the leader publishes an anchor.
+    /// </para>
+    /// </summary>
+    partyEngaging,
+
     LENGTH
 }
 
@@ -166,6 +206,7 @@ public static class GoapKey_Extension
         GoapKey.targetIsIgnored => "target is ignored or absent",
         GoapKey.focusTargetIsIgnored => "focus target is ignored or absent",
         GoapKey.allPartyTargetsIsIgnored => "all party targets ignored or absent",
+        GoapKey.partyEngaging => "party engaging (in combat or leader approaching)",
         _ => unknown
     };
 
@@ -220,6 +261,7 @@ public static class GoapKey_Extension
         GoapKey.targetIsIgnored => "!target is ignored or absent",
         GoapKey.focusTargetIsIgnored => "!focus target is ignored or absent",
         GoapKey.allPartyTargetsIsIgnored => "!all party targets ignored or absent",
+        GoapKey.partyEngaging => "!party engaging (not in combat and leader not approaching)",
         _ => unknown
     };
 

@@ -815,6 +815,9 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.partymembercombat: " + PartyMemberInCombat());
         logger.LogInformation("GoapKey.partyleadercombat: " + PartyLeaderInCombat());
         logger.LogInformation("GoapKey.partyincombat: " + PartyInCombat());
+        logger.LogInformation("GoapKey.partyEngaging: " +
+            (PartyInCombat() ||
+             (classConfig.Mode == Mode.AssistFocus && leaderNavProvider.HasApproachStart)));
         logger.LogInformation("GoapKey.inblacklistarea: " + navigation.IsInBlacklistArea());
         logger.LogInformation("GoapKey.focusconnected: " + bits.Focus_Connected());
         logger.LogInformation("GoapKey.party1connected: " + bits.Party1_Connected());
@@ -1213,6 +1216,32 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.partymembercombat]  = PartyMemberInCombat();
         WorldState[GoapKey.partyleadercombat]  = PartyLeaderInCombat();
         WorldState[GoapKey.partyincombat]      = PartyInCombat();
+
+        // Fix AH (log-73 16:43:37 → 16:44:15:225): partyEngaging is the
+        // disjunction of partyincombat and "the leader has published an
+        // approach-start anchor" (HasApproachStart). It is consumed only by
+        // ApproachTargetGoal's AssistFocus precondition (was: partyincombat=true;
+        // now: partyEngaging=true), so it makes ATG selectable on the assist
+        // during the leader's pre-combat approach window. partyincombat itself
+        // is preserved verbatim above — FRG.OnGoapEvent and other consumers
+        // still receive the "actual combat is happening" semantics they rely on.
+        //
+        // Mode gate (AssistFocus only): HasApproachStart is set by the leader's
+        // ATG.OnEnter and broadcast via LeaderNavigationProvider. The leader's
+        // own GoapAgent has no business reading the leader's own flag back —
+        // ATG is the goal that publishes it. For PartyLeader and Grind modes,
+        // partyEngaging collapses to partyincombat (the historical semantics)
+        // because the leader-approaching disjunct is mode-gated.
+        //
+        // Why a key and not a CanRun gate: GOAP preconditions are pure boolean
+        // tests against WorldState. Moving this into ATG.CanRun would mean ATG
+        // is never selected for planning at all (the planner short-circuits on
+        // unsatisfied preconditions before reaching the goal's body). A new
+        // key, computed once per UpdateWorldState, is the idiomatic match.
+        WorldState[GoapKey.partyEngaging] =
+            PartyInCombat() ||
+            (classConfig.Mode == Mode.AssistFocus && leaderNavProvider.HasApproachStart);
+
         WorldState[GoapKey.drinking]           = restHandler.IsDrinking();
         WorldState[GoapKey.eating]             = restHandler.IsEating();
         WorldState[GoapKey.inblacklistarea]    = navigation.IsInBlacklistArea();

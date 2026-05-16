@@ -332,6 +332,37 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private bool _approachAnchorColocated;
 
     /// <summary>
+    /// Fix AH (log-73 16:43:37 → 16:44:15): one-shot latch — true once
+    /// FollowFocusGoal has pressed the focus chain
+    /// (<c>PressTargetFocus</c> + <c>PressTargetOfTarget</c>) during the
+    /// current leader-approach phase to hand the assist's hard target over
+    /// to the leader's currently-targeted mob. Set to <c>true</c> by the
+    /// top-of-<c>Update</c> acquisition block (above the state-machine
+    /// switch). Reset to <c>false</c> on every <c>FFG.OnEnter</c> and
+    /// alongside <c>_approachAnchorColocated</c> when the leader leaves
+    /// the approach phase (<c>HasApproachStart=false</c> observed in
+    /// <c>GetNavigationTarget</c>).
+    /// <para>
+    /// Purpose: satisfies ATG's <c>hastarget=true</c> precondition during
+    /// the leader's pre-combat approach window so the planner can select
+    /// ATG (cost 8) over FFG (cost 19) on the next tick. Without this,
+    /// the planner is stuck in FFG → PositionChase, whose pather cannot
+    /// route through terrain the leader's Interact key auto-walks across.
+    /// Once ATG owns the goal slot, its own AssistFocus Update branch
+    /// re-presses the focus chain every tick, so a single acquisition
+    /// here is sufficient.
+    /// </para>
+    /// <para>
+    /// Why one-shot rather than every-tick: focus-chain re-acquisition is
+    /// idempotent at the WoW level (pressing TargetFocus + TargetOfTarget
+    /// repeatedly just re-selects the same units), but each press incurs
+    /// a <c>wait.Update()</c> delay. ATG's Update is the right place for
+    /// continuous re-acquisition; FFG only needs to bootstrap.
+    /// </para>
+    /// </summary>
+    private bool _approachTargetAcquired;
+
+    /// <summary>
     /// Discriminates the three possible navigation target sources returned by
     /// <see cref="GetNavigationTarget"/>: the fixed approach-start anchor, the
     /// shared patrol waypoint, or the leader's live body (position-chasing).
@@ -543,6 +574,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _lastLeaderHadTargetWaypoint = false; // force waypoint-published detection on first UpdateIdle tick
         _lastLeaderHadApproachStart = false;  // force approach-start detection on first UpdateIdle tick
         _approachAnchorColocated = false;     // reset co-located latch on each FFG entry
+        _approachTargetAcquired = false;       // Fix AH: reset focus-chain one-shot latch on each FFG entry
         _lastLoggedNavTargetMode = NavTargetMode.PositionChase; // first transition will log
 
         if (input.IsKeyDown(input.ForwardKey))
@@ -863,6 +895,81 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // → leader pauses → recovery / pather-based escape) is exactly the
         // right behaviour during a flee. Only bits.Combat() remains as an
         // exemption because cast-loop stationarity is genuinely not a stall.
+
+        // ── Fix AH (log-73): focus-chain target acquisition at approach anchor ──
+        //
+        // Hand off to ApproachTargetGoal at the moment the assist is co-located
+        // with the leader's approach-start anchor. ATG's AssistFocus precondition
+        // (GoapKey.partyEngaging, formerly partyincombat) is already satisfied
+        // by leader.HasApproachStart via the corresponding partyEngaging key in
+        // GoapAgent.UpdateWorldState. The remaining blocker is the common
+        // hastarget=true precondition — the assist has no target at this point
+        // because the leader's mob is too far/obscured for autotargeting to
+        // grab it.
+        //
+        // Solution: press the same focus chain that ATG.Update's AssistFocus
+        // branch presses every tick (PressTargetFocus + PressTargetOfTarget),
+        // ONCE, so the assist acquires the leader's hard target. On the next
+        // planner tick, the world state includes hastarget=true and ATG
+        // (cost 8) outranks FFG (cost 19) — control transfers to ATG, which
+        // then re-presses the focus chain every Update and adds PressApproach
+        // for the interact-key auto-walk.
+        //
+        // Gating conditions (all must hold):
+        //   - leader != null              we have a fresh broadcast
+        //   - leader.HasApproachStart     the leader is in its ATG phase
+        //   - _approachAnchorColocated    the assist is at the anchor; the
+        //                                 latch is set by GetNavigationTarget
+        //                                 when the bot is within POP_DIST of
+        //                                 the anchor. Co-location is the
+        //                                 right moment to begin interact
+        //                                 traversal — the leader is about
+        //                                 to walk into terrain the pather
+        //                                 cannot route through.
+        //   - !_approachTargetAcquired    one-shot: don't re-press every
+        //                                 tick. ATG owns continuous re-
+        //                                 acquisition after the handoff.
+        //
+        // Placement above the state machine: at the approach anchor the assist
+        // toggles rapidly between Idle (dist < FollowingMaxYards) and
+        // NavigatingToLeader (dist > NavigatingMinYards). Log-73 16:43:37 shows
+        // Idle → NavigatingToLeader → Idle within 15 ms. A check inside any
+        // single state handler would miss most ticks. Placing the check above
+        // the switch makes it state-agnostic.
+        //
+        // Why not also gate on combat: we want to fire DURING the pre-combat
+        // approach window. The whole point is that ATG's partyincombat
+        // precondition prevented selection until combat fired (8.5 s late in
+        // log-73). Fix AH's new partyEngaging key + this acquisition together
+        // unblock the pre-combat path.
+        //
+        // No StopForward / navigation.Stop here — FFG's own pather machinery
+        // continues running normally this tick. ATG.OnEnter (when it takes
+        // over) handles its own navigation setup. The single tick of overlap
+        // is benign: ATG.OnEnter runs PressDisableSoftInteract and resets
+        // its approach timers; FFG's last-tick movement keys remain pressed
+        // briefly but get redirected by ATG's PressApproach on the next tick.
+        {
+            LeaderState? approachLeader = leaderConnection.LastLeaderState;
+            if (approachLeader != null
+                && approachLeader.HasApproachStart
+                && _approachAnchorColocated
+                && !_approachTargetAcquired)
+            {
+                logger.LogInformation(
+                    $"[FFG] Fix AH: at approach anchor (HasApproachStart=true, " +
+                    $"_approachAnchorColocated=true) — acquiring leader's target via " +
+                    $"PressTargetFocus + PressTargetOfTarget to satisfy ATG's " +
+                    $"hastarget=true precondition. ATG (cost 8) should win the next " +
+                    $"plan over FFG (cost 19) and take over the interact-key approach.");
+
+                input.PressTargetFocus();
+                wait.Update();
+                input.PressTargetOfTarget();
+                wait.Update();
+                _approachTargetAcquired = true;
+            }
+        }
 
         // ── State machine ──────────────────────────────────────────────────
         switch (_navState)
@@ -2195,6 +2302,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // assist observes HasApproachStart=false at least once between phases
             // (poll interval ~250ms).
             _approachAnchorColocated = false;
+            // Fix AH: also drop the one-shot focus-chain latch so the next approach
+            // phase re-acquires the leader's (possibly different) target. Same
+            // re-entry safety as above — the HasApproachStart=false observation
+            // between phases clears both latches together.
+            _approachTargetAcquired = false;
         }
 
         // Priority 1: Waypoint-sharing during patrol.

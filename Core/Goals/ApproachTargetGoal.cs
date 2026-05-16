@@ -103,7 +103,50 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if (classConfig.Mode == Mode.AssistFocus)
         {
-            AddPrecondition(GoapKey.partyincombat, true);
+            // Fix AH (log-73 16:43:37 → 16:44:15:225): was partyincombat=true; now
+            // partyEngaging=true. partyEngaging is computed in GoapAgent.UpdateWorldState
+            // as PartyInCombat() || (Mode == AssistFocus && leaderNavProvider.HasApproachStart),
+            // so this broadens the precondition to also be satisfied during the leader's
+            // pre-combat approach window.
+            //
+            // Why: in log-73 the leader entered ATG at 16:43:37:493 and published an
+            // approach-start anchor at <-414.54, -4120.96>. The leader then walked into
+            // rocks via the Interact key auto-walk (which uses the game's built-in
+            // movement system, not PPather), pressing Approach 9 times across 4.2 s
+            // (16:43:37:835 → 16:43:42:000) before combat finally fired at 16:43:46:079
+            // — an 8.5 s pre-combat traversal. The assist's ATG was un-selectable that
+            // entire window (partyincombat=false), so FFG remained active and fell into
+            // PositionChase via the _approachAnchorColocated latch (anchor 2.6 y away
+            // <  3.6 y POP_DIST). FFG's pather then tried to route to position-chase
+            // targets on the rocky terrain (PPather returned Z=51.86 elevation results
+            // it couldn't actually walk to). 8 path requests in 12 s, all rejected.
+            // 16:44:15:225 TickNavActiveTimeout escalated to CantFollow. The assist
+            // never moved past <-389.84, -4137.61>, leaving the leader 23 y away alone
+            // at the kill site.
+            //
+            // What partyEngaging unblocks: once FollowFocusGoal's Fix AH Part 1
+            // (focus-chain target acquisition at the approach anchor) satisfies
+            // hastarget=true, the planner sees the precondition tuple
+            // {partyEngaging=true, hastarget=true, targetisalive=true, targethostile=true,
+            //  incombatrange=false, inblacklistarea=false, evadeRecovery=false,
+            //  forcedfollow=false} and selects ATG (cost 8) over FFG (cost 19). ATG's
+            // AssistFocus Update branch then runs the same key sequence the leader's
+            // ATG uses (PressTargetFocus → PressTargetOfTarget → PressApproach), and
+            // the assist auto-walks through the rocks via the in-game Interact mechanic
+            // — the same one the leader used to cross that terrain.
+            //
+            // Once partyincombat does fire (combat starts), partyEngaging stays true
+            // (combat is one of its two disjuncts) and ATG continues unchanged. When
+            // the leader exits ATG, HasApproachStart goes false; if combat is still
+            // active partyEngaging stays true, otherwise it drops and ATG becomes
+            // un-selectable (FFG resumes). This matches the prior steady-state
+            // semantics exactly — the change only affects the previously-uncovered
+            // pre-combat window.
+            //
+            // partyincombat itself is NOT redefined (only ATG's precondition migrates).
+            // FRG.OnGoapEvent's partyincombat handler still fires only on true combat,
+            // so the leader's patrol-abort behavior is unchanged.
+            AddPrecondition(GoapKey.partyEngaging, true);
         }
 
         AddPrecondition(GoapKey.forcedfollow, false);

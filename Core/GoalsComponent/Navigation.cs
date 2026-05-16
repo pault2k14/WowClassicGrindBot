@@ -1639,6 +1639,20 @@ public sealed partial class Navigation : IDisposable
         Interlocked.Exchange(ref pathRequestPending, 0);
         Volatile.Write(ref waitingRequestId, 0);
 
+        // Fix AG (paired with PathRequest's drain): Stop() also bumps
+        // activePathRequestId above, which makes every queued path request
+        // stale (their reqIds are all smaller). Without draining, the
+        // PathFinderThread would still process them one-by-one (~10 s each in
+        // log-73's failed-search scenario), and their results would all be
+        // stale-ignored. Worse: when CantFollow's projection escape calls
+        // SetSingleWaypoint immediately after Stop() (FollowFocusGoal
+        // EnterCantFollow path), its new path request lands at the tail of
+        // that stale queue and waits behind every stale entry before
+        // PathFinderThread can attempt the escape. In log-73 the queue had 7
+        // stale entries at CantFollow entry, putting the escape ~80 s behind
+        // real-time. See PathRequest's Fix AG comment for the full evidence.
+        DrainStalePathRequests("stop");
+
         routeToNextWaypoint.Clear();
         escapeRouteInProgress = false;
         escapeActive = false;
@@ -3053,8 +3067,85 @@ public sealed partial class Navigation : IDisposable
         waitingForPathResult = true;
         waitingSinceUtc = DateTime.UtcNow;
         logger.LogInformation($"[BL] PathRequest queued: {pathRequest.StartW} -> {pathRequest.EndW} dist={pathRequest.Distance}");
+
+        // Fix AG (log-73 16:43:45:622 → 16:45:06:777+, assist stuck at
+        // <-389.84277, -4137.6133> for 50+ seconds, reqQ growing 0→8 while
+        // PPather returned "search failed, 10 seconds since last progress,
+        // returning the closest spot <-385.2, -4146, 51.866215>" every ~10s):
+        //
+        // Evidence from log-73:
+        //   16:43:45:623   ENQUEUE reqId=375 start=<-389.84> end=<-385.08>
+        //                  dist=7.58 (the unreachable query)
+        //   16:43:48:649   NAV-EMPTY reqQ=0, Path wait timeout → gate released
+        //   16:43:48:650   ENQUEUE reqId=378 (gate re-acquired, activeRequestId
+        //                  bumped) → reqQ=1
+        //   16:43:51:700   ENQUEUE reqId=379 → reqQ=2
+        //   16:43:54:715   ENQUEUE reqId=380 → reqQ=3
+        //   ... repeats every ~3s ...
+        //   16:44:15:243   At CantFollow entry: ENQUEUE reqId=386 (Projection10
+        //                  escape target <-398.97, -4133.54>) → reqQ=8
+        //   16:44:15:705 → 16:45:06:776   PPather processes reqId=377, 378, …
+        //                  in FIFO order, each taking 10 s to fail with the
+        //                  same closest-spot return. reqId=386 (the escape
+        //                  path) sits at the queue tail and never gets to run
+        //                  before the log ends.
+        //
+        // Root cause: TryBeginPathRequest atomically bumps activePathRequestId
+        // every time a new request is begun, but nothing drains the items
+        // already queued in pathRequests. Their results, when PathFinderThread
+        // eventually processes them, will be stale-ignored by
+        // PathCalculatedCallback (reqId < activeId). This is wasted work AND
+        // it blocks the FIFO queue so a NEW request (e.g., a CantFollow
+        // projection target the bot urgently needs to escape to) waits ~10 s
+        // per stale entry ahead of it. With reqQ=8 the escape was ~80 s
+        // behind real-time.
+        //
+        // Fix: drain the queue here. By the time PathRequest() runs:
+        //   - TryBeginPathRequest already succeeded and incremented
+        //     activePathRequestId to the new request's id.
+        //   - Every item currently in pathRequests has an older reqId
+        //     (Interlocked.Increment is strictly monotonic) and would be
+        //     stale-ignored on completion.
+        //   - The single item currently in PathFinderThread's hands (already
+        //     dequeued, mid-FindWorldRoute) is uncancellable; it will return
+        //     a stale result that PathCalculatedCallback ignores. No change
+        //     in behaviour for that one.
+        // Result: only the freshly-enqueued request below remains in the
+        // queue. PathFinderThread processes it as soon as the current
+        // in-flight item completes — ~10 s in the worst case instead of
+        // ~10 s × queue-depth.
+        //
+        // This call is paired with one in Stop() (~line 1637), which also
+        // bumps activePathRequestId and similarly leaves the queue stale.
+        DrainStalePathRequests("supersededByNewActiveRequest");
+
         pathRequests.Enqueue(pathRequest);
         manualReset.Set();
+    }
+
+    /// <summary>
+    /// Empties the <c>pathRequests</c> queue. Callers must ensure that any
+    /// items currently in the queue have a <c>reqId &lt; activePathRequestId</c>
+    /// (i.e., are already stale) so the drain is semantically a no-op apart
+    /// from saving wasted PathFinderThread work. See the Fix AG comment in
+    /// <see cref="PathRequest"/> for the full rationale and evidence trail.
+    /// </summary>
+    private void DrainStalePathRequests(string reason)
+    {
+        int drained = 0;
+        while (pathRequests.TryDequeue(out _))
+            drained++;
+
+        if (drained > 0)
+        {
+            logger.LogInformation(
+                $"[NAV] Fix AG: drained {drained} stale queued path request(s) " +
+                $"(reason={reason}). Their reqIds are all < activePathRequestId={Volatile.Read(ref activePathRequestId)}, " +
+                "so results would have been stale-ignored on completion; draining " +
+                "frees the PathFinderThread to process the newest request without " +
+                "10 s × queue-depth latency. The single item already in PathFinderThread " +
+                "(if any) is not affected — it will return and its result will be stale-ignored normally.");
+        }
     }
 
     private bool TryBeginPathRequest(Vector3 startW, Vector3 endW, out long requestId)
