@@ -3527,7 +3527,47 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // Fix AE: cos² threshold for angle > 135°. 0.707² = 0.5.
             // To revisit the threshold, this is the one constant to tune
             // (0.75 → 150°, 0.25 → 120°).
-            const float REAR_REJECT_COS_THRESHOLD_SQ = 0.5f;
+            //
+            // Fix AI (log-74 22:52:09:983 + 22:52:10:540, assist at
+            // <-256.48, -4206.46> chasing target <-255.35, -4213.68> 7.3y SSE;
+            // user described "trees obscuring the way", then bot "turned
+            // around and walked in the opposite direction"):
+            //
+            // Fix AE's 0.5 threshold (135°) rejected a legitimate tree-detour
+            // path at angle=135.1° (cos=-0.708, dot=-18.28, dist=3.53y).
+            // pathLen was 14 (modest detour, not a wraparound); the simplified
+            // route had 3 nodes — first NE to swing around trees, then south
+            // to the goal — exactly the pather output expected when obstacles
+            // sit directly in the goal direction.
+            //
+            // Two rejections fired back-to-back at exactly 135.1° (a borderline
+            // case where the pather's navmesh snapping deterministically lands
+            // the simplified routeTop just past the cos²=0.5 threshold), FFG
+            // escalated to CantFollow at 22:52:10:541, and Fix AB-2's
+            // directional projection (basis=away-from-leader) sent the bot
+            // 10y NORTH while the leader was 10y SOUTH at <-254.88, -4216.65>
+            // (per leader log at 22:52:10:514). That sent the assist directly
+            // away from the leader during active combat — the visible symptom.
+            //
+            // Fix AI raises the threshold to 0.75 (cos² > 0.75 ⇔ cos < -0.866
+            // ⇔ angle > 150°). Effect on known cases:
+            //   log-69 #1 (genuine U-turn into navmesh dead zone): cos=-0.875,
+            //     151° → STILL rejected (cos²=0.766 > 0.75).
+            //   log-69 #2 (genuine U-turn into navmesh dead zone): cos=-0.955,
+            //     163° → STILL rejected (cos²=0.912 > 0.75).
+            //   log-71 #1-#4 (sideways detours): 93-104° → unchanged from
+            //     Fix AE (cos² in 0.003-0.058, well below either threshold).
+            //   log-74 (tree-detour false positive): cos=-0.708, 135.1° →
+            //     ACCEPTED (cos²=0.501 < 0.75).
+            //
+            // Risk profile: the new threshold gives ~15° of margin between
+            // accepted detours and rejected U-turns (135° vs 150°). A future
+            // genuine U-turn at 140-149° would slip past Fix AI, but the
+            // recovery path is unchanged — Navigation's OnPathFailed still
+            // fires, _navAttempt increments, and a 2nd failure escalates to
+            // CantFollow. So a missed rejection costs at most one extra
+            // failed path attempt before falling through to the same recovery.
+            const float REAR_REJECT_COS_THRESHOLD_SQ = 0.75f;
 
             if (toTopDistSq > REAR_TOP_REJECT_MIN_YARDS * REAR_TOP_REJECT_MIN_YARDS)
             {
@@ -3544,8 +3584,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     float angleDeg = MathF.Acos(cosA) * (180f / MathF.PI);
 
                     logger.LogError(
-                        $"[FFG] Fix AC+AE: rejecting strongly-rear-curving path " +
-                        $"(angle > 135° from forward). Simplified routeTop " +
+                        $"[FFG] Fix AC+AE+AI: rejecting strongly-rear-curving path " +
+                        $"(angle > 150° from forward). Simplified routeTop " +
                         $"{snap.SimplifiedRouteTop} is {topDist:0.00}y from start with " +
                         $"dot={dot:0.00} cos={cosA:0.000} angle={angleDeg:0.0}° " +
                         $"against forward direction. Bot would U-turn away from goal. " +
