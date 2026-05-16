@@ -2449,8 +2449,59 @@ public sealed partial class Navigation : IDisposable
         _routeEscapeActive = true;
         _routeEscapeStartUtc = now;
         _routeEscapeStartPos = playerW;
-        _routeEscapeLastProgressPos = default;
-        _routeEscapeLastProgressUtc = DateTime.MinValue;
+        // ── Fix AT (log-80 15:07:25:070 → 15:07:29:812+) ──
+        //
+        // Initialize the progress tracker at escape-start rather than
+        // leaving it as (default, MinValue) for TryRouteUnstuck to lazy-
+        // init on its first call. The lazy-init pattern stacks with the
+        // StuckDetector's 3 s ACTION_STUCK_TIME grace on the line ~1740
+        // call site:
+        //
+        //   1. Escape starts. SetWayPoints clears + pushes the single
+        //      escape waypoint. SyncRouteStateToTop calls
+        //      stuckDetector.SetTargetLocation(escape) → ResetInternal()
+        //      → startTime = now → IsGettingCloser returns TRUE for the
+        //      next 3 s regardless of motion (ACTION_STUCK_TIME = 3 s,
+        //      see StuckDetector.cs line 32).
+        //   2. For those 3 s the line ~1740 path
+        //      (`if (!stuckDetector.IsGettingCloser) TryRouteUnstuck(...)`)
+        //      does NOT call TryRouteUnstuck — so its internal noProgress
+        //      timer (RouteEscapeNoMovementSec = 3 s) never starts.
+        //   3. At t+3 s the StuckDetector's grace expires →
+        //      IsGettingCloser returns FALSE → TryRouteUnstuck is called
+        //      for the FIRST time → it enters the escape-active branch
+        //      → the lazy-init guard
+        //      `if (_routeEscapeLastProgressPos == default)` fires →
+        //      `_routeEscapeLastProgressUtc = now` (i.e. t+3 s, not t+0).
+        //   4. noProgress now needs ANOTHER 3 s of stationary state
+        //      before firing — total 6 s before escalation.
+        //
+        // 6 s is too long for the "leader is in combat, assist needs to
+        // catch up" scenario. log-80's leader combat lasted from
+        // 15:07:14 → 15:07:20 (6 s); the assist's escape fired at
+        // 15:07:25 (already 5 s after combat ended), would have
+        // escalated at 15:07:31 under the stacked timer, but the log
+        // ends at 15:07:29 — escalation never made it into the captured
+        // window, and the user observed "stuck escape did not work very
+        // well at all and made no real progress."
+        //
+        // The "noProgress at 3 s" was the documented intent (it's the
+        // "fast path" relative to the 8 s timedOut path, see
+        // RouteEscapeNoMovementSec vs RouteEscapeTimeoutSecPerYard at
+        // line 421-420). The lazy-init negated the fast path entirely
+        // by deferring its zero point. Initializing here restores the
+        // intended semantics: 3 s after escape start, if the bot
+        // hasn't displaced 2 y, escalate.
+        //
+        // The existing lazy-init guard in TryRouteUnstuck at
+        // line ~2400 is preserved as defensive code — it remains
+        // correct (Vector3.WorldDistanceXYTo with default is well-
+        // defined) but will never fire in practice now that this site
+        // initializes the values. Worth keeping in case some future
+        // path enters the escape-active branch without going through
+        // this initialization (e.g., a state-restore on reconnect).
+        _routeEscapeLastProgressPos = playerW;
+        _routeEscapeLastProgressUtc = now;
         return true;
     }
 
