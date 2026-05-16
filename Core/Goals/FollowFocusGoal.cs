@@ -390,6 +390,79 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const double ApproachTargetAcquireRetryMs = 250.0;
 
     /// <summary>
+    /// Fix AM (log-77 01:47:03:506 → end-of-log, assist at &lt;-315.53, -4320.31&gt;
+    /// during leader's second approach to mob; Fix AJ confirmed hostile target
+    /// (guid=535132) but the planner never transitioned to ATG and the assist
+    /// continued in FFG/PositionChase for the remainder of the log):
+    ///
+    /// UTC timestamp of the moment Fix AJ successfully latched. Used by the
+    /// state-machine code below to detect "latched but ATG never took over"
+    /// — i.e., when FFG.Update is still running &gt;1 s after the latch despite
+    /// the planner having had ample opportunity to re-evaluate. The exact
+    /// stale-latch warning is in the state-machine prelude.
+    ///
+    /// Reset to <see cref="DateTime.MinValue"/> on every <c>FFG.OnEnter</c>
+    /// and at the same place the other approach-phase latches reset (when
+    /// <c>HasApproachStart</c> goes false). Diagnostic only — no functional
+    /// gating depends on this field.
+    /// </summary>
+    private DateTime _approachTargetLatchedUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Fix AM: rate-limit the stale-latch warning to once per
+    /// <c>StaleLatchWarningCooldownMs</c> so the diagnostic doesn't flood
+    /// every FFG.Update tick once tripped.
+    /// </summary>
+    private DateTime _staleLatchLastWarnUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Fix AM: how long after a successful Fix AJ latch we expect ATG to
+    /// have taken over. If FFG.Update is still running past this threshold
+    /// with <c>_approachTargetAcquired==true</c> and <c>HasApproachStart==true</c>,
+    /// emit a warning. 1000ms is comfortably longer than the
+    /// <c>Thread.Sleep(1)</c> GoapAgent loop + worst-case wait.Update() and
+    /// covers any number of planner cycles.
+    /// </summary>
+    private const double StaleLatchWarnAfterMs = 1000.0;
+
+    /// <summary>
+    /// Fix AM: how often the stale-latch warning may re-fire while the
+    /// condition persists. Keeps the log readable but lets the operator
+    /// see the cadence of the failure.
+    /// </summary>
+    private const double StaleLatchWarningCooldownMs = 2000.0;
+
+    /// <summary>
+    /// Fix AN (log-74, log-77 first-approach window): position of the most
+    /// recently observed approach-start anchor on the assist side, plus the
+    /// time it was last seen. Used to extend the Fix AH+AJ activation
+    /// envelope: even if the leader has cleared <c>HasApproachStart</c>
+    /// (because its short ATG window finished), the assist may still be
+    /// converging on the anchor location. If the assist arrives at the
+    /// last-seen anchor within <c>AnchorLocalTtlMs</c> of the leader
+    /// publishing it, Fix AH+AJ should still fire — the focus-chain
+    /// target acquisition is just as useful one tick after the anchor
+    /// expired as it was during the anchor's life.
+    ///
+    /// Reset on <c>FFG.OnEnter</c>. Captured whenever the assist observes
+    /// <c>HasApproachStart=true</c>.
+    /// </summary>
+    private Vector3 _lastSeenApproachAnchorW;
+    private DateTime _lastSeenApproachAnchorUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Fix AN: how long after the leader clears the approach anchor the
+    /// assist still treats it as locally active for Fix AH+AJ purposes.
+    /// 3000ms covers the worst-case "leader's ATG was only 2s long, assist
+    /// needs another ~700ms to converge to the anchor location plus a poll
+    /// or two of slack." Larger values risk stale acquisition during long
+    /// patrol-then-engage cycles; smaller values reproduce the log-74 and
+    /// log-77 first-approach failure mode where the anchor expired before
+    /// the assist could converge.
+    /// </summary>
+    private const double AnchorLocalTtlMs = 3000.0;
+
+    /// <summary>
     /// Discriminates the three possible navigation target sources returned by
     /// <see cref="GetNavigationTarget"/>: the fixed approach-start anchor, the
     /// shared patrol waypoint, or the leader's live body (position-chasing).
@@ -644,6 +717,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _approachAnchorColocated = false;     // reset co-located latch on each FFG entry
         _approachTargetAcquired = false;       // Fix AH: reset focus-chain one-shot latch on each FFG entry
         _approachTargetLastAttemptUtc = DateTime.MinValue;  // Fix AJ: reset focus-chain retry timestamp
+        _approachTargetLatchedUtc = DateTime.MinValue;  // Fix AM: reset stale-latch diagnostic timestamp
+        _staleLatchLastWarnUtc = DateTime.MinValue;  // Fix AM: reset stale-latch warn cooldown
+        _lastSeenApproachAnchorW = default;  // Fix AN: reset local anchor TTL position
+        _lastSeenApproachAnchorUtc = DateTime.MinValue;  // Fix AN: reset local anchor TTL timestamp
         _lastLoggedNavTargetMode = NavTargetMode.PositionChase; // first transition will log
 
         if (input.IsKeyDown(input.ForwardKey))
@@ -1146,11 +1223,109 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // toggles rapidly between Idle and NavigatingToLeader (log-73 shows
         // <15 ms toggling). A check inside any single state handler would
         // miss most ticks. Above-the-switch placement is state-agnostic.
+        //
+        // ── Fix AN (log-74 22:52, log-77 first-approach 01:46:45→01:46:48):
+        // Local anchor TTL fallback.
+        //
+        // log-74 22:52: leader's ATG window was 2.55s. At the moment the
+        //   anchor cleared, the assist was 4.28y from it — just past
+        //   POP_DIST (3.6y). The co-location latch never fired; Fix AH
+        //   never ran. Assist fell back to PositionChase through trees,
+        //   hit Fix AC+AE+AI rejection, escalated to CantFollow.
+        // log-77 first-approach 01:46:45→01:46:48: leader's ATG window
+        //   was only 2.14s — even shorter. The assist never converged
+        //   to the anchor. Same failure mode as log-74.
+        //
+        // Pattern: leader's ATG completes faster than the assist can
+        // traverse to the anchor. The anchor was a perfectly good place
+        // to fire the focus-chain handoff, but the leader's side cleared
+        // it on ATG.OnExit, and the assist abandoned the latch a tick
+        // later when HasApproachStart=false was observed.
+        //
+        // Fix AN: remember the most recently observed anchor position
+        // for up to AnchorLocalTtlMs after HasApproachStart goes false.
+        // If, within that window, the assist actually arrives at the
+        // anchor location (within POP_DIST), fire the same Fix AH+AJ
+        // focus-chain anyway. The target acquisition itself is just as
+        // useful one tick after the anchor expired: the leader still
+        // has the target selected (it's in PTG/Combat now), and the
+        // assist can latch onto it via the focus chain.
+        //
+        // Why an assist-side TTL rather than leader-side extended anchor:
+        // The leader-side fix (keep the anchor set across PTG/Combat)
+        // requires touching multiple files (ATG, PTG, CombatGoal, plus
+        // all of ATG's bail-out paths) and creates new coordination
+        // contracts. The assist-side TTL is single-file, has a bounded
+        // blast radius (3s window), and addresses the same failure mode.
+        // If the simpler fix proves insufficient, the leader-side fix
+        // remains an option to layer on top.
+        //
+        // ── Fix AM (log-77 01:47:03:506 → end-of-log):
+        // Diagnostic logging for "Fix AJ latched but ATG never took over."
+        //
+        // log-77 evidence: at 01:47:03:506 Fix AJ confirmed hostile target
+        // acquired (guid=535132). FFG.Update continued running for another
+        // 3+ seconds in PositionChase mode, with the planner never selecting
+        // ATG. One of ATG's preconditions must be failing in
+        // GoapAgent.UpdateWorldState, but without a snapshot of the relevant
+        // GoapKey values at the latch moment we can't tell which.
+        //
+        // Fix AM emits two diagnostics:
+        //   1. At the moment Fix AJ latches, dump every ATG-gating value
+        //      that FFG can observe (bits.Target_*, playerReader.With...,
+        //      navigation.IsInBlacklistArea, leaderNavProvider.HasApproachStart,
+        //      chatReader.ForcedFollow). This gives a single line of evidence
+        //      at the moment the world state should be ATG-favorable.
+        //   2. If FFG.Update is still running >StaleLatchWarnAfterMs after
+        //      the latch with HasApproachStart still true, emit a warning
+        //      indicating ATG did NOT take over. This makes the bug visible
+        //      in the log even when nothing else looks wrong.
+        //
+        // Together these turn "ATG silently not picked" into a single
+        // greppable warning line plus a diagnostic snapshot.
         {
             LeaderState? approachLeader = leaderConnection.LastLeaderState;
+            bool leaderAnchorActive = approachLeader != null && approachLeader.HasApproachStart;
+
+            // Fix AN: capture the anchor position whenever HasApproachStart=true
+            // so we can use it within AnchorLocalTtlMs after it expires.
+            if (leaderAnchorActive)
+            {
+                _lastSeenApproachAnchorW = new Vector3(
+                    approachLeader!.ApproachStartWorldX,
+                    approachLeader.ApproachStartWorldY,
+                    0f);
+                _lastSeenApproachAnchorUtc = DateTime.UtcNow;
+            }
+
+            // Determine whether we should try Fix AH+AJ this tick. Two paths:
+            //   (a) original Fix AH path: HasApproachStart=true AND the
+            //       _approachAnchorColocated latch (set by GetNavigationTarget)
+            //       AND not yet acquired.
+            //   (b) Fix AN local-TTL path: HasApproachStart=false, but
+            //       _lastSeenApproachAnchorUtc is fresh (within AnchorLocalTtlMs),
+            //       and the bot is currently at the last-seen anchor position
+            //       (within POP_DIST). The bot might have arrived just after
+            //       the leader cleared HasApproachStart.
+            bool isAtAnchorLive = leaderAnchorActive && _approachAnchorColocated;
+            bool isAtAnchorViaTtl = false;
+            if (!leaderAnchorActive
+                && approachLeader != null
+                && _lastSeenApproachAnchorUtc != DateTime.MinValue)
+            {
+                double anchorAgeMs = (DateTime.UtcNow - _lastSeenApproachAnchorUtc).TotalMilliseconds;
+                if (anchorAgeMs < AnchorLocalTtlMs)
+                {
+                    float distToLastAnchor = playerReader.WorldPos.WorldDistanceXYTo(_lastSeenApproachAnchorW);
+                    if (distToLastAnchor < Navigation.POP_DIST)
+                    {
+                        isAtAnchorViaTtl = true;
+                    }
+                }
+            }
+
             if (approachLeader != null
-                && approachLeader.HasApproachStart
-                && _approachAnchorColocated
+                && (isAtAnchorLive || isAtAnchorViaTtl)
                 && !_approachTargetAcquired)
             {
                 double msSinceLast =
@@ -1164,9 +1339,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     bool isRetry = _approachTargetLastAttemptUtc != DateTime.MinValue;
                     _approachTargetLastAttemptUtc = DateTime.UtcNow;
 
+                    string gatePath = isAtAnchorLive
+                        ? "live anchor (HasApproachStart=true, _approachAnchorColocated=true)"
+                        : "Fix AN local-TTL (anchor expired but assist arrived within " +
+                          $"{AnchorLocalTtlMs:0}ms at last-seen position)";
+
                     logger.LogInformation(
-                        $"[FFG] Fix AH+AJ: at approach anchor (HasApproachStart=true, " +
-                        $"_approachAnchorColocated=true{(isRetry ? $", retry msSinceLast={msSinceLast:0}" : "")}) — " +
+                        $"[FFG] Fix AH+AJ+AN: at approach anchor via {gatePath}" +
+                        $"{(isRetry ? $" — retry msSinceLast={msSinceLast:0}" : "")} — " +
                         $"acquiring leader's target via PressTargetFocus + PressTargetOfTarget. " +
                         $"Will latch only if bits.Target_Hostile() confirms a hostile acquisition; " +
                         $"otherwise retry after {ApproachTargetAcquireRetryMs:0}ms.");
@@ -1182,11 +1362,41 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     if (bits.Target() && bits.Target_Hostile())
                     {
                         _approachTargetAcquired = true;
+                        _approachTargetLatchedUtc = DateTime.UtcNow;  // Fix AM: record for stale-latch warning
+
                         logger.LogInformation(
                             $"[FFG] Fix AJ: focus-chain confirmed hostile target acquired " +
                             $"(guid={playerReader.TargetGuid}) — latching one-shot. " +
                             $"ATG (cost 8) should win the next plan over FFG (cost 19) " +
                             $"and take over the interact-key approach.");
+
+                        // Fix AM: dump every ATG-gating value FFG can observe.
+                        // This snapshots what FFG sees at the moment the world
+                        // state should be ATG-favorable. If ATG isn't picked
+                        // on the next planner tick, one of these is the reason.
+                        bool diagHasTarget       = bits.Target();
+                        bool diagTargetDead      = bits.Target_Dead();
+                        bool diagTargetIsAlive   = diagHasTarget && !diagTargetDead;
+                        bool diagTargetHostile   = bits.Target_Hostile();
+                        bool diagInCombatRange   = playerReader.WithInCombatRange();
+                        bool diagInBlacklistArea = navigation.IsInBlacklistArea();
+                        bool diagForcedFollow    = chatReader.ForcedFollow;
+                        bool diagHasApproachStart = approachLeader.HasApproachStart;
+                        bool diagBitsCombat      = bits.Combat();
+                        logger.LogInformation(
+                            $"[FFG] Fix AM: ATG-precondition snapshot at latch moment — " +
+                            $"hastarget={diagHasTarget}, targetisalive={diagTargetIsAlive} " +
+                            $"(dead={diagTargetDead}), targethostile={diagTargetHostile}, " +
+                            $"incombatrange={diagInCombatRange}, " +
+                            $"inblacklistarea={diagInBlacklistArea}, " +
+                            $"forcedfollow={diagForcedFollow}, " +
+                            $"HasApproachStart={diagHasApproachStart} (contributes to partyEngaging), " +
+                            $"bits.Combat={diagBitsCombat} (also contributes to partyEngaging via PartyInCombat). " +
+                            $"ATG.AssistFocus requires: partyEngaging=true, forcedfollow=false, " +
+                            $"hastarget=true, targetisalive=true, targethostile=true, " +
+                            $"incombatrange=false, inblacklistarea=false, evadeRecovery=false. " +
+                            $"If ATG is not selected on the next planner tick, the failing precondition " +
+                            $"is the one above whose value is wrong-side of its expectation.");
                     }
                     else
                     {
@@ -1198,6 +1408,57 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             $"Probable cause: WoW client hadn't processed PressTargetFocus " +
                             $"yet when PressTargetOfTarget fired — retry should converge " +
                             $"because the assist's target is now stable for the next chain.");
+                    }
+                }
+            }
+
+            // Fix AM: stale-latch warning. If we successfully latched but
+            // FFG.Update is STILL running well past StaleLatchWarnAfterMs,
+            // the planner has chosen FFG (not ATG) on multiple iterations.
+            // Emit a warning explaining the situation; rate-limited via
+            // _staleLatchLastWarnUtc.
+            if (_approachTargetAcquired
+                && _approachTargetLatchedUtc != DateTime.MinValue
+                && leaderAnchorActive)
+            {
+                double msSinceLatch =
+                    (DateTime.UtcNow - _approachTargetLatchedUtc).TotalMilliseconds;
+                if (msSinceLatch > StaleLatchWarnAfterMs)
+                {
+                    double msSinceLastWarn =
+                        _staleLatchLastWarnUtc == DateTime.MinValue
+                            ? double.MaxValue
+                            : (DateTime.UtcNow - _staleLatchLastWarnUtc).TotalMilliseconds;
+
+                    if (msSinceLastWarn >= StaleLatchWarningCooldownMs)
+                    {
+                        _staleLatchLastWarnUtc = DateTime.UtcNow;
+
+                        // Re-read the gating state for the warning so the operator
+                        // sees the CURRENT values (which may have shifted since
+                        // the latch moment).
+                        bool curHasTarget       = bits.Target();
+                        bool curTargetDead      = bits.Target_Dead();
+                        bool curTargetHostile   = bits.Target_Hostile();
+                        bool curInCombatRange   = playerReader.WithInCombatRange();
+                        bool curInBlacklistArea = navigation.IsInBlacklistArea();
+                        bool curForcedFollow    = chatReader.ForcedFollow;
+                        bool curBitsCombat      = bits.Combat();
+                        logger.LogWarning(
+                            $"[FFG] Fix AM: STALE LATCH WARNING — Fix AJ latched " +
+                            $"{msSinceLatch:0}ms ago (> {StaleLatchWarnAfterMs:0}ms threshold) " +
+                            $"but FFG.Update is still running. ATG was NOT selected by the " +
+                            $"planner. Current ATG-precondition state — " +
+                            $"hastarget={curHasTarget}, targetisalive={curHasTarget && !curTargetDead} " +
+                            $"(dead={curTargetDead}), targethostile={curTargetHostile}, " +
+                            $"incombatrange={curInCombatRange}, " +
+                            $"inblacklistarea={curInBlacklistArea}, " +
+                            $"forcedfollow={curForcedFollow}, " +
+                            $"HasApproachStart=true (still), bits.Combat={curBitsCombat}, " +
+                            $"currentTargetGuid={playerReader.TargetGuid}. " +
+                            $"One of the above values is blocking ATG (cost 8) from winning " +
+                            $"the plan over FFG (cost 19). Next warning in " +
+                            $"{StaleLatchWarningCooldownMs:0}ms if condition persists.");
                     }
                 }
             }
@@ -2534,14 +2795,49 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // assist observes HasApproachStart=false at least once between phases
             // (poll interval ~250ms).
             _approachAnchorColocated = false;
-            // Fix AH: also drop the one-shot focus-chain latch so the next approach
-            // phase re-acquires the leader's (possibly different) target. Same
-            // re-entry safety as above — the HasApproachStart=false observation
-            // between phases clears both latches together.
-            _approachTargetAcquired = false;
-            // Fix AJ: also clear the retry timestamp so the next approach
-            // episode is rate-limited fresh from t=0.
-            _approachTargetLastAttemptUtc = DateTime.MinValue;
+
+            // Fix AN: gate the latch resets on the local-TTL state. The old
+            // unconditional reset would clear _approachTargetAcquired and
+            // _approachTargetLastAttemptUtc every tick HasApproachStart=false,
+            // which was correct before Fix AN. With Fix AN, the focus-chain
+            // block may fire WHILE HasApproachStart=false (via the local-TTL
+            // path), latching _approachTargetAcquired=true. Resetting it on
+            // the very same FFG.Update() tick — GetNavigationTarget is called
+            // from the state-machine code below — would un-latch it, and the
+            // next tick Fix AN would re-fire (rate-limit timestamp was also
+            // just reset). Result: focus-chain spam every ~30ms.
+            //
+            // Solution: only clear the latches once the TTL has fully expired.
+            // Within the TTL window, the latches persist; outside it, they
+            // reset cleanly. This preserves the pre-Fix-AN behavior for the
+            // common case (no local TTL ever active) and correctly handles
+            // the Fix AN case (latches persist while the TTL is fresh).
+            double anchorAgeMs = _lastSeenApproachAnchorUtc == DateTime.MinValue
+                ? double.MaxValue
+                : (DateTime.UtcNow - _lastSeenApproachAnchorUtc).TotalMilliseconds;
+            bool localTtlExpired = anchorAgeMs >= AnchorLocalTtlMs;
+
+            if (localTtlExpired)
+            {
+                // Fix AH: also drop the one-shot focus-chain latch so the next approach
+                // phase re-acquires the leader's (possibly different) target. Same
+                // re-entry safety as above — the HasApproachStart=false observation
+                // between phases clears both latches together.
+                _approachTargetAcquired = false;
+                // Fix AJ: also clear the retry timestamp so the next approach
+                // episode is rate-limited fresh from t=0.
+                _approachTargetLastAttemptUtc = DateTime.MinValue;
+                // Fix AM: clear the latched timestamp + stale-warn cooldown so
+                // diagnostic accounting starts fresh on the next approach.
+                _approachTargetLatchedUtc = DateTime.MinValue;
+                _staleLatchLastWarnUtc = DateTime.MinValue;
+            }
+            // NOTE Fix AN: we deliberately do NOT reset _lastSeenApproachAnchor*
+            // here. The whole purpose of that field is to remember the anchor
+            // AFTER HasApproachStart goes false, so the Fix AN local-TTL logic
+            // can still fire if the assist arrives at the (now-expired) anchor
+            // within AnchorLocalTtlMs. It naturally ages out via the timestamp
+            // comparison in the Fix AH+AJ gating block.
         }
 
         // Priority 1: Waypoint-sharing during patrol.
