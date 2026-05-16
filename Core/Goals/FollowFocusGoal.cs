@@ -363,6 +363,33 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private bool _approachTargetAcquired;
 
     /// <summary>
+    /// Fix AJ (log-75 23:53:44:232 → 23:54:00 window): rate-limit timestamp
+    /// for Fix AH's focus-chain retry. Holds the UTC time of the most recent
+    /// PressTargetFocus + PressTargetOfTarget attempt during the current
+    /// approach phase. Used to throttle retries to no more than once per
+    /// <c>ApproachTargetAcquireRetryMs</c> while
+    /// <c>_approachTargetAcquired</c> is still false.
+    /// <para>
+    /// Reset to <see cref="DateTime.MinValue"/> on every <c>FFG.OnEnter</c>
+    /// and alongside <c>_approachAnchorColocated</c> when the leader leaves
+    /// the approach phase. See Fix AJ in the focus-chain block at the top
+    /// of <c>Update</c> for the full evidence trail.
+    /// </para>
+    /// </summary>
+    private DateTime _approachTargetLastAttemptUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Fix AJ: minimum wall-clock interval between Fix AH focus-chain
+    /// retries. 250 ms gives the WoW client comfortable headroom over typical
+    /// classic round-trip latency (30-100 ms) so that on the retry tick,
+    /// <c>PressTargetFocus</c>'s effect from the previous attempt has settled
+    /// and <c>PressTargetOfTarget</c> can cascade correctly. Higher values
+    /// would extend handoff latency without benefit; lower values risk
+    /// re-triggering the same race the first attempt failed on.
+    /// </summary>
+    private const double ApproachTargetAcquireRetryMs = 250.0;
+
+    /// <summary>
     /// Discriminates the three possible navigation target sources returned by
     /// <see cref="GetNavigationTarget"/>: the fixed approach-start anchor, the
     /// shared patrol waypoint, or the leader's live body (position-chasing).
@@ -575,6 +602,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _lastLeaderHadApproachStart = false;  // force approach-start detection on first UpdateIdle tick
         _approachAnchorColocated = false;     // reset co-located latch on each FFG entry
         _approachTargetAcquired = false;       // Fix AH: reset focus-chain one-shot latch on each FFG entry
+        _approachTargetLastAttemptUtc = DateTime.MinValue;  // Fix AJ: reset focus-chain retry timestamp
         _lastLoggedNavTargetMode = NavTargetMode.PositionChase; // first transition will log
 
         if (input.IsKeyDown(input.ForwardKey))
@@ -896,6 +924,59 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // right behaviour during a flee. Only bits.Combat() remains as an
         // exemption because cast-loop stationarity is genuinely not a stall.
 
+        // ── Fix AJ (log-75 23:53:44 onwards): retry until hostile target acquired ──
+        //
+        // Fix AH as originally shipped latched the one-shot
+        // _approachTargetAcquired UNCONDITIONALLY after pressing the focus
+        // chain. log-75 evidence showed this latches even when the chain
+        // fails:
+        //
+        //   23:53:44:232  Fix AH log line ("acquiring leader's target...")
+        //   23:53:44:294  PageUp (PressTargetFocus) pressed
+        //   23:53:44:355  F     (PressTargetOfTarget) pressed (60ms after)
+        //   23:53:44:355  _approachTargetAcquired = true latched
+        //   23:53:44:355  FFG: Reached follow position (dist=3.6y) — Idle.
+        //   [next 2.68 s: no plan transition; ATG never selected]
+        //   23:53:47:052  FFG: Leader out of range (14.7y) — resuming nav
+        //   ...PositionChase through trees...
+        //   23:53:52:467  Fix AC+AE+AI rejection #1 (angle=151°, legit U-turn)
+        //   23:53:53:037  Fix AC+AE+AI rejection #2 (angle=162°, legit U-turn)
+        //   23:53:53:054  Fix AB-2 projection 10y AWAY from leader (NW direction
+        //                 leader at <-483.57, -4314.54>; bot escapes SE)
+        //
+        // Root cause: WoW Classic round-trip latency is typically 30-100ms.
+        // 60ms between PageUp and F is at the lower edge of that window.
+        // When F is processed by the client BEFORE PageUp's effect lands
+        // (no current target yet), F is a no-op. Then PageUp eventually
+        // arrives: assist's target = focus = leader (friendly). The
+        // unconditional latch then prevented any retry.
+        //
+        // Consequences in ATG's preconditions:
+        //   - targethostile=false  (the leader is friendly)        ← FAILS
+        //   - incombatrange=true   (assist is 3.6y from leader,
+        //                           ≤ 5y melee combat range)        ← FAILS
+        // Either failure alone deselects ATG. Planner stays on FFG, falls
+        // into PositionChase, hits the legitimate U-turn rejections, and
+        // escalates to CantFollow's away-from-leader projection.
+        //
+        // Fix AJ: only LATCH _approachTargetAcquired when the chain actually
+        // produced a hostile target. Retry the chain on subsequent FFG.Update
+        // ticks at a 250ms rate-limit (covers max typical round-trip with
+        // headroom). The retry case is robust because the FAILED first
+        // attempt left the assist's target = leader (focus); on the retry,
+        // PageUp targets the same focus (no-op visible to F), and F now
+        // sees a stable current target and correctly cascades to
+        // leader.target = mob (hostile). Convergence in 1-2 retries.
+        //
+        // The retry stops naturally when either:
+        //   (a) bits.Target() && bits.Target_Hostile() → latch closes the loop
+        //   (b) HasApproachStart goes false (anchor cleared) → block-gate fails
+        //   (c) _approachAnchorColocated resets → block-gate fails
+        //
+        // Why hostile-only as the success criterion:
+        //   targethostile=true is the precondition ATG actually needs. We
+        //   check bits.Target() too so the latch can't accidentally close
+        //   on a stale-from-prior-combat bit (defense-in-depth).
         // ── Fix AH (log-73): focus-chain target acquisition at approach anchor ──
         //
         // Hand off to ApproachTargetGoal at the moment the assist is co-located
@@ -908,12 +989,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // grab it.
         //
         // Solution: press the same focus chain that ATG.Update's AssistFocus
-        // branch presses every tick (PressTargetFocus + PressTargetOfTarget),
-        // ONCE, so the assist acquires the leader's hard target. On the next
-        // planner tick, the world state includes hastarget=true and ATG
-        // (cost 8) outranks FFG (cost 19) — control transfers to ATG, which
-        // then re-presses the focus chain every Update and adds PressApproach
-        // for the interact-key auto-walk.
+        // branch presses every tick (PressTargetFocus + PressTargetOfTarget).
+        // On the next planner tick, the world state includes hastarget=true
+        // and ATG (cost 8) outranks FFG (cost 19) — control transfers to ATG,
+        // which then re-presses the focus chain every Update and adds
+        // PressApproach for the interact-key auto-walk.
         //
         // Gating conditions (all must hold):
         //   - leader != null              we have a fresh broadcast
@@ -921,34 +1001,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         //   - _approachAnchorColocated    the assist is at the anchor; the
         //                                 latch is set by GetNavigationTarget
         //                                 when the bot is within POP_DIST of
-        //                                 the anchor. Co-location is the
-        //                                 right moment to begin interact
-        //                                 traversal — the leader is about
-        //                                 to walk into terrain the pather
-        //                                 cannot route through.
-        //   - !_approachTargetAcquired    one-shot: don't re-press every
-        //                                 tick. ATG owns continuous re-
-        //                                 acquisition after the handoff.
+        //                                 the anchor.
+        //   - !_approachTargetAcquired    not yet succeeded — see Fix AJ
+        //                                 above for the conditional latch.
+        //   - elapsed ≥ ApproachTargetAcquireRetryMs since last attempt
+        //                                 (Fix AJ rate-limit).
         //
         // Placement above the state machine: at the approach anchor the assist
-        // toggles rapidly between Idle (dist < FollowingMaxYards) and
-        // NavigatingToLeader (dist > NavigatingMinYards). Log-73 16:43:37 shows
-        // Idle → NavigatingToLeader → Idle within 15 ms. A check inside any
-        // single state handler would miss most ticks. Placing the check above
-        // the switch makes it state-agnostic.
-        //
-        // Why not also gate on combat: we want to fire DURING the pre-combat
-        // approach window. The whole point is that ATG's partyincombat
-        // precondition prevented selection until combat fired (8.5 s late in
-        // log-73). Fix AH's new partyEngaging key + this acquisition together
-        // unblock the pre-combat path.
-        //
-        // No StopForward / navigation.Stop here — FFG's own pather machinery
-        // continues running normally this tick. ATG.OnEnter (when it takes
-        // over) handles its own navigation setup. The single tick of overlap
-        // is benign: ATG.OnEnter runs PressDisableSoftInteract and resets
-        // its approach timers; FFG's last-tick movement keys remain pressed
-        // briefly but get redirected by ATG's PressApproach on the next tick.
+        // toggles rapidly between Idle and NavigatingToLeader (log-73 shows
+        // <15 ms toggling). A check inside any single state handler would
+        // miss most ticks. Above-the-switch placement is state-agnostic.
         {
             LeaderState? approachLeader = leaderConnection.LastLeaderState;
             if (approachLeader != null
@@ -956,18 +1018,53 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 && _approachAnchorColocated
                 && !_approachTargetAcquired)
             {
-                logger.LogInformation(
-                    $"[FFG] Fix AH: at approach anchor (HasApproachStart=true, " +
-                    $"_approachAnchorColocated=true) — acquiring leader's target via " +
-                    $"PressTargetFocus + PressTargetOfTarget to satisfy ATG's " +
-                    $"hastarget=true precondition. ATG (cost 8) should win the next " +
-                    $"plan over FFG (cost 19) and take over the interact-key approach.");
+                double msSinceLast =
+                    (DateTime.UtcNow - _approachTargetLastAttemptUtc).TotalMilliseconds;
+                bool rateLimitOk =
+                    _approachTargetLastAttemptUtc == DateTime.MinValue ||
+                    msSinceLast >= ApproachTargetAcquireRetryMs;
 
-                input.PressTargetFocus();
-                wait.Update();
-                input.PressTargetOfTarget();
-                wait.Update();
-                _approachTargetAcquired = true;
+                if (rateLimitOk)
+                {
+                    bool isRetry = _approachTargetLastAttemptUtc != DateTime.MinValue;
+                    _approachTargetLastAttemptUtc = DateTime.UtcNow;
+
+                    logger.LogInformation(
+                        $"[FFG] Fix AH+AJ: at approach anchor (HasApproachStart=true, " +
+                        $"_approachAnchorColocated=true{(isRetry ? $", retry msSinceLast={msSinceLast:0}" : "")}) — " +
+                        $"acquiring leader's target via PressTargetFocus + PressTargetOfTarget. " +
+                        $"Will latch only if bits.Target_Hostile() confirms a hostile acquisition; " +
+                        $"otherwise retry after {ApproachTargetAcquireRetryMs:0}ms.");
+
+                    input.PressTargetFocus();
+                    wait.Update();
+                    input.PressTargetOfTarget();
+                    wait.Update();
+
+                    // Fix AJ: verify the chain produced a HOSTILE target before
+                    // latching. See the comment block above for the full
+                    // race-condition analysis and evidence trail from log-75.
+                    if (bits.Target() && bits.Target_Hostile())
+                    {
+                        _approachTargetAcquired = true;
+                        logger.LogInformation(
+                            $"[FFG] Fix AJ: focus-chain confirmed hostile target acquired " +
+                            $"(guid={playerReader.TargetGuid}) — latching one-shot. " +
+                            $"ATG (cost 8) should win the next plan over FFG (cost 19) " +
+                            $"and take over the interact-key approach.");
+                    }
+                    else
+                    {
+                        logger.LogWarning(
+                            $"[FFG] Fix AJ: focus-chain attempt did not produce a hostile " +
+                            $"target (bits.Target={bits.Target()}, bits.Target_Hostile=" +
+                            $"{bits.Target_Hostile()}, currentTargetGuid={playerReader.TargetGuid}). " +
+                            $"Will retry in {ApproachTargetAcquireRetryMs:0}ms. " +
+                            $"Probable cause: WoW client hadn't processed PressTargetFocus " +
+                            $"yet when PressTargetOfTarget fired — retry should converge " +
+                            $"because the assist's target is now stable for the next chain.");
+                    }
+                }
             }
         }
 
@@ -2307,6 +2404,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // re-entry safety as above — the HasApproachStart=false observation
             // between phases clears both latches together.
             _approachTargetAcquired = false;
+            // Fix AJ: also clear the retry timestamp so the next approach
+            // episode is rate-limited fresh from t=0.
+            _approachTargetLastAttemptUtc = DateTime.MinValue;
         }
 
         // Priority 1: Waypoint-sharing during patrol.
