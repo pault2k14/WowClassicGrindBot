@@ -549,7 +549,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// tracking, only mode CHANGES log; in-mode drift updates remain silent
     /// to avoid spam during steady-state chasing.
     /// </summary>
-    private enum NavTargetMode { Anchor, PositionChase, WaypointSharing }
+    private enum NavTargetMode { Anchor, PositionChase, WaypointSharing, RouteWalk }
     private NavTargetMode _currentNavTargetMode = NavTargetMode.PositionChase;
     private NavTargetMode _lastLoggedNavTargetMode = NavTargetMode.PositionChase;
 
@@ -557,6 +557,29 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// Used to detect when the leader advances to a new waypoint so navigation
     /// can be refreshed without spamming SetSingleWaypoint every tick.</summary>
     private Vector3 _lastSharedWaypointW;
+
+    // ── Route-walking migration: Turn 2 (Turn 1 → Turn 2 commit) ──
+    //
+    // _assistRouteIndex tracks the assist's current target waypoint index
+    // in navigation.LoadedRoute. The assist walks LoadedRoute[index] →
+    // LoadedRoute[index+1] etc, capped at (leader's index − 1) for the
+    // trailing-by-one steady state described in the design doc.
+    //
+    // Sentinel −1 means "unsynced" — the next RouteWalk entry will run
+    // FindNearestSafeRouteIndex to pick a starting point near the assist
+    // that's at or before the leader's current index. Reset to −1 on
+    // FFG OnEnter, FFG OnExit, and on any tick where the active mode is
+    // NOT RouteWalk, so that re-entry into RouteWalk after a combat /
+    // loot / rest detour always re-syncs from the assist's current
+    // position rather than continuing from a stale index.
+    //
+    // Reset-on-non-RouteWalk has a small cost (recompute nearest index
+    // on every RouteWalk entry) but avoids subtle drift bugs where the
+    // assist's body moved during PositionChase and the stored index no
+    // longer reflects the assist's actual proximity to route waypoints.
+    // FindNearestSafeRouteIndex is O(LoadedRoute.Length) ≈ 150 ops —
+    // negligible per tick.
+    private int _assistRouteIndex = -1;
 
     // -----------------------------------------------------------------------
     // Navigation active-time timeout
@@ -827,6 +850,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         //   All other fix-firing rates unchanged from log-84 baseline
         navigation.LoadRoute();
 
+        // ── Route-walking migration: Turn 2 ──
+        // Reset waypoint index so the first RouteWalk-engaged tick will
+        // resync from the assist's current position. See _assistRouteIndex
+        // declaration for rationale on reset semantics.
+        _assistRouteIndex = -1;
+
         // ── Architecture migration observability ──
         //
         // Emit a one-line configuration header at every FFG OnEnter so log
@@ -853,8 +882,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // missed a case, or the fix is catching a class of failure
         // wider than its original evidence suggested.
         logger.LogInformation(
-            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=BodyChase " +
-            $"(route-walking not yet enabled). Key thresholds: " +
+            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 2) " +
+            $"— route-walk is now the patrol default when LoadedRoute is " +
+            $"populated AND the leader's published TargetWaypoint maps to a " +
+            $"route index. Anchor mode unchanged (approach phase). " +
+            $"PositionChase used for non-patrol leader states (combat/loot/" +
+            $"rest) AND as fallback when route lookup fails. WaypointSharing " +
+            $"is now dead code reachable only when LoadedRoute is empty. " +
+            $"Key thresholds: " +
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
             $"WaypointUpdateThresholdYards={WaypointUpdateThresholdYards:0.0}y, " +
@@ -1034,6 +1069,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         ResetSetWaypointLoopGuardState();
         input.StepBackwards();
         wait.Update();
+
+        // ── Route-walking migration: Turn 2 ──
+        // Reset waypoint index on FFG exit so the next OnEnter starts
+        // cleanly. The next session may re-engage RouteWalk with the
+        // assist at a different position; force re-sync.
+        _assistRouteIndex = -1;
 
         if (_navState == NavState.NavigatingToLeader)
         {
@@ -3170,6 +3211,86 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // Helpers
     // -----------------------------------------------------------------------
 
+    // ── Route-walking migration: Turn 2 helpers ──
+    //
+    // TryFindLeaderRouteIndex maps the leader's published TargetWaypointW
+    // (a world-space position) back to an index in navigation.LoadedRoute.
+    // The leader publishes the world coordinates of its current patrol
+    // target; the assist needs to know "which route file index is that?"
+    // to compute its own allowed-advance.
+    //
+    // Match tolerance (1.0y) handles minor float precision differences
+    // between the leader's stored route waypoints and the assist's
+    // map-to-world-converted equivalents. If the published waypoint
+    // doesn't match any LoadedRoute entry within tolerance, returns
+    // false — the leader is on a non-route waypoint (rescue, manual
+    // detour, or transient state). Caller falls back to PositionChase.
+    //
+    // O(LoadedRoute.Length) linear scan. With ~150 waypoints per route
+    // and FFG ticking every ~250ms, this is negligible (sub-µs).
+    private bool TryFindLeaderRouteIndex(LeaderState leader, out int leaderIdx)
+    {
+        leaderIdx = -1;
+        Vector3[] route = navigation.LoadedRoute;
+        if (route.Length == 0) return false;
+        if (!leader.HasTargetWaypoint) return false;
+
+        Vector3 leaderWp = new(leader.TargetWaypointWorldX, leader.TargetWaypointWorldY, 0f);
+        const float matchToleranceYards = 1.0f;
+
+        float bestDist = float.MaxValue;
+        int bestIdx = -1;
+        for (int i = 0; i < route.Length; i++)
+        {
+            float d = route[i].WorldDistanceXYTo(leaderWp);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+
+        if (bestDist <= matchToleranceYards)
+        {
+            leaderIdx = bestIdx;
+            return true;
+        }
+        return false;
+    }
+
+    // FindNearestSafeRouteIndex picks an initial index for the assist to
+    // start route-walking from. Constraint: must be ≤ maxIdx (typically
+    // leader's index − 1, so the assist trails). Within that cap, picks
+    // the route waypoint closest to the assist's current position.
+    //
+    // Used for initial sync at RouteWalk entry. The assist may have been
+    // doing PositionChase / Anchor mode immediately prior, so its
+    // physical position is somewhere not-particularly-aligned with any
+    // route waypoint. Picking the nearest one keeps the next leg short.
+    //
+    // If maxIdx is negative or LoadedRoute is empty, returns −1
+    // (caller should fall through to PositionChase).
+    private int FindNearestSafeRouteIndex(Vector3 assistPos, int maxIdx)
+    {
+        Vector3[] route = navigation.LoadedRoute;
+        if (route.Length == 0) return -1;
+        int upper = Math.Min(maxIdx, route.Length - 1);
+        if (upper < 0) return -1;
+
+        float bestDist = float.MaxValue;
+        int bestIdx = 0;
+        for (int i = 0; i <= upper; i++)
+        {
+            float d = route[i].WorldDistanceXYTo(assistPos);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
+    }
+
     private void StartNavigatingToLeader(LeaderState leader)
     {
         Vector3 target = GetNavigationTarget(leader);
@@ -3194,18 +3315,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// <summary>
     /// Selects the navigation target in world-space coordinates.
     ///
-    /// <para><b>Waypoint-sharing mode</b> (when all conditions met):<br/>
-    /// Returns the leader's current patrol waypoint rather than the leader's body.
-    /// Both bots navigate to the same endpoint so their pather paths converge,
-    /// eliminating the systematic gap growth caused by the assist following a
-    /// slightly-longer path to a moving target.</para>
+    /// <para><b>Anchor mode</b> (Priority 0):<br/>
+    /// When the leader is approaching a combat target, returns the published
+    /// approach-start anchor. Both bots converge on the same geographic point
+    /// before the final interact-key approach.</para>
     ///
-    /// <para><b>Position-chasing mode</b> (fallback):<br/>
+    /// <para><b>Route-walk mode</b> (Priority 1, Turn 2):<br/>
+    /// When the leader is patrolling AND <c>navigation.LoadedRoute</c> is
+    /// populated AND the leader's published target waypoint maps to a route
+    /// index, the assist navigates to its own next route waypoint, trailing
+    /// the leader by one waypoint index. Each leg is short and curated;
+    /// pather problems associated with body-chasing through tight terrain
+    /// disappear. See the route-walking design doc for full semantics.</para>
+    ///
+    /// <para><b>Waypoint-sharing mode</b> (Priority 2, fallback for empty LoadedRoute):<br/>
+    /// Legacy behavior: returns the leader's current patrol waypoint
+    /// directly. Only reachable when LoadedRoute is empty (assist class
+    /// config has no PathFilename) or when RouteWalk's index lookup
+    /// fails for an unrelated reason. Marked dormant under route-walking.</para>
+    ///
+    /// <para><b>Position-chasing mode</b> (Priority 3, fallback):<br/>
     /// Returns the world-space position from <see cref="ComputeFollowTargetWorldPos"/>
     /// — the leader's body offset by <see cref="FollowStopShortYards"/> toward
-    /// the assist. This is used when the leader is in combat, looting, resting,
-    /// evading, or the rendezvous has not yet been confirmed after the last
-    /// non-Patrolling state.</para>
+    /// the assist. Used when the leader is in combat, looting, resting,
+    /// evading, or when route-walking explicitly bails (leader on non-route
+    /// waypoint such as a rescue insertion).</para>
     /// </summary>
     private Vector3 GetNavigationTarget(LeaderState leader)
     {
@@ -3328,7 +3462,124 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // comparison in the Fix AH+AJ gating block.
         }
 
-        // Priority 1: Waypoint-sharing during patrol.
+        // ── Route-walking migration: Turn 2 ──
+        //
+        // Priority 1: Route-walking during patrol. The assist navigates its
+        // own next route waypoint (trailing the leader by one index in
+        // LoadedRoute) rather than chasing the leader's body. Eliminates
+        // the moving-target failure mode that caused log-69 / log-83
+        // corridor incidents.
+        //
+        // Engagement conditions (all must hold):
+        //   - leader is Patrolling (not Combat/Loot/Rest/Waiting)
+        //   - navigation.LoadedRoute is populated (Turn 1 LoadRoute()
+        //     succeeded — assist class config has a PathFilename)
+        //   - leader's published TargetWaypointW matches a LoadedRoute
+        //     entry within 1.0y tolerance (the leader is on a known
+        //     route waypoint, not a rescue/manual detour insertion)
+        //   - the resulting leaderIdx − 1 is ≥ 0 (leader has advanced
+        //     past the route's start — otherwise there's nothing for
+        //     the assist to trail to)
+        //
+        // When RouteWalk doesn't engage but the leader is patrolling
+        // with a populated LoadedRoute, fall through to PositionChase
+        // (NOT WaypointSharing) — see code below. WaypointSharing
+        // remains as a safety net only for the empty-LoadedRoute case.
+        //
+        // State management:
+        //   - _assistRouteIndex starts at −1 (unsynced) after OnEnter
+        //     and after any non-RouteWalk mode tick. First RouteWalk
+        //     engagement calls FindNearestSafeRouteIndex to pick the
+        //     closest waypoint at-or-before allowedAdvance.
+        //   - On each RouteWalk tick, if the assist is within
+        //     Navigation.POP_DIST of its current target waypoint AND
+        //     the index can still advance (< allowedAdvance), advance.
+        //     Repeats within a tick if multiple waypoints are within
+        //     POP_DIST (close-packed corner waypoints).
+        //   - If the leader retreated (rare; manual override, rescue
+        //     completion at a behind-position), clamp _assistRouteIndex
+        //     to the new allowedAdvance to prevent the assist from
+        //     overshooting the leader.
+        if (leader.Status == BotStatus.Patrolling &&
+            navigation.LoadedRoute.Length > 0)
+        {
+            if (TryFindLeaderRouteIndex(leader, out int leaderIdx))
+            {
+                int allowedAdvance = leaderIdx - 1;
+                if (allowedAdvance >= 0)
+                {
+                    Vector3[] route = navigation.LoadedRoute;
+
+                    // Initial sync (or re-sync after non-RouteWalk tick).
+                    if (_assistRouteIndex < 0)
+                    {
+                        int syncIdx = FindNearestSafeRouteIndex(playerReader.WorldPos, allowedAdvance);
+                        _assistRouteIndex = syncIdx;
+                        logger.LogInformation(
+                            $"[FFG] [ROUTE-WALK] Initial sync: assist at {playerReader.WorldPos}, " +
+                            $"nearest safe index={syncIdx} of {route.Length} " +
+                            $"(leaderIdx={leaderIdx}, allowedAdvance={allowedAdvance}), " +
+                            $"target wp={route[syncIdx]}, " +
+                            $"distToTarget={playerReader.WorldPos.WorldDistanceXYTo(route[syncIdx]):0.0}y.");
+                    }
+
+                    // Clamp if leader retreated.
+                    if (_assistRouteIndex > allowedAdvance)
+                    {
+                        logger.LogWarning(
+                            $"[FFG] [ROUTE-WALK] Clamping _assistRouteIndex from " +
+                            $"{_assistRouteIndex} to {allowedAdvance} " +
+                            $"(leader retreated? leaderIdx={leaderIdx}).");
+                        _assistRouteIndex = allowedAdvance;
+                    }
+
+                    // Advance if arrived. Loop in case multiple close-packed
+                    // waypoints are within POP_DIST simultaneously.
+                    while (_assistRouteIndex < allowedAdvance)
+                    {
+                        float distToCurrent = playerReader.WorldPos.WorldDistanceXYTo(route[_assistRouteIndex]);
+                        if (distToCurrent > Navigation.POP_DIST)
+                            break;
+                        int prevIdx = _assistRouteIndex;
+                        _assistRouteIndex++;
+                        logger.LogInformation(
+                            $"[FFG] [ROUTE-WALK] Advanced index {prevIdx} → {_assistRouteIndex} " +
+                            $"(reached wp={route[prevIdx]}, dist={distToCurrent:0.0}y, " +
+                            $"new target={route[_assistRouteIndex]}, " +
+                            $"leaderIdx={leaderIdx}, gap={leaderIdx - _assistRouteIndex}).");
+                    }
+
+                    _currentNavTargetMode = NavTargetMode.RouteWalk;
+                    return route[_assistRouteIndex];
+                }
+                // allowedAdvance < 0: leader at start of route. Fall through
+                // to PositionChase below.
+            }
+            // Leader's published waypoint doesn't map to any route entry
+            // (rescue insertion, manual detour). Fall through to PositionChase.
+
+            // Reset index so the next RouteWalk-eligible tick re-syncs from
+            // the assist's then-current position.
+            if (_assistRouteIndex >= 0)
+            {
+                _assistRouteIndex = -1;
+            }
+
+            _currentNavTargetMode = NavTargetMode.PositionChase;
+            return ComputeFollowTargetWorldPos(leader);
+        }
+
+        // Reset index on any non-Patrolling status (combat/loot/rest).
+        // Next RouteWalk engagement will re-sync.
+        if (_assistRouteIndex >= 0)
+        {
+            _assistRouteIndex = -1;
+        }
+
+        // Priority 2: Waypoint-sharing during patrol (LEGACY fallback, only
+        // reachable when LoadedRoute is empty — assist class config has no
+        // PathFilename). Dormant under route-walking but preserved as a
+        // safety net.
         if (_rendezvousConfirmed &&
             leader.Status == BotStatus.Patrolling &&
             leader.HasTargetWaypoint)
