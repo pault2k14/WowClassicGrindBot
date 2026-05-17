@@ -581,6 +581,36 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // negligible per tick.
     private int _assistRouteIndex = -1;
 
+    // ── Route-walking migration: Turn 3 (Turn 2 → Turn 3 commit) ──
+    //
+    // _pendingAnchor holds the approach-start anchor when the assist is
+    // route-walking and the leader publishes an ApproachStart before the
+    // assist has reached its current route waypoint. The assist continues
+    // route-walking to the current waypoint, then transitions Route-walk
+    // → Anchor mode using the stored anchor coords.
+    //
+    // Sentinel default(Vector3) = <0,0,0> means "no pending anchor."
+    // Legitimate anchor positions in Azeroth are at large negative
+    // coordinates, so this sentinel doesn't collide with real values.
+    //
+    // Lifecycle:
+    //   - Set / updated each tick during ApproachStart-while-route-walking.
+    //   - Consumed (cleared + transition fired) when the assist reaches
+    //     its current route waypoint within Navigation.POP_DIST.
+    //   - Cleared without transition when HasApproachStart goes false
+    //     before arrival (mob died early, approach canceled, etc.).
+    //   - Cleared on FFG OnEnter and OnExit.
+    //
+    // The motivation: log-85's corridor incident at 01:56:25-30 happened
+    // because after combat, the assist's pather had to find a path from
+    // an off-route start position back to the leader's body — exactly
+    // the failure mode body-chase fixes (AC+AE+AI+AL, AB-2, BB, AO) were
+    // designed to catch. With combat-handoff, the assist arrives at
+    // combat via the route's curated final-leg geometry, and re-engages
+    // the route from a known route waypoint after combat. Both legs
+    // become route-adjacent rather than off-route.
+    private Vector3 _pendingAnchor = default;
+
     // -----------------------------------------------------------------------
     // Navigation active-time timeout
     // -----------------------------------------------------------------------
@@ -856,6 +886,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // declaration for rationale on reset semantics.
         _assistRouteIndex = -1;
 
+        // ── Route-walking migration: Turn 3 ──
+        // Clear pending anchor in case prior FFG session ended mid-approach
+        // without firing the transition (e.g., bot died or operator
+        // intervened). Stale pending would otherwise trigger an unwanted
+        // transition next time RouteWalk advances to a waypoint.
+        _pendingAnchor = default;
+
         // ── Architecture migration observability ──
         //
         // Emit a one-line configuration header at every FFG OnEnter so log
@@ -882,14 +919,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // missed a case, or the fix is catching a class of failure
         // wider than its original evidence suggested.
         logger.LogInformation(
-            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 2) " +
+            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 3) " +
             $"— route-walk is now the patrol default when LoadedRoute is " +
             $"populated AND the leader's published TargetWaypoint maps to a " +
-            $"route index. Anchor mode unchanged (approach phase). " +
-            $"PositionChase used for non-patrol leader states (combat/loot/" +
-            $"rest) AND as fallback when route lookup fails. WaypointSharing " +
-            $"is now dead code reachable only when LoadedRoute is empty. " +
-            $"Key thresholds: " +
+            $"route index. Anchor mode used for approach phase, BUT now " +
+            $"deferred via _pendingAnchor when route-walking with target " +
+            $"not yet reached (combat handoff: assist completes its route " +
+            $"leg, then transitions Route-walk → Anchor at the route " +
+            $"waypoint). PositionChase used for non-patrol leader states " +
+            $"(combat/loot/rest) AND as fallback when route lookup fails. " +
+            $"WaypointSharing is now dead code reachable only when " +
+            $"LoadedRoute is empty. Key thresholds: " +
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
             $"WaypointUpdateThresholdYards={WaypointUpdateThresholdYards:0.0}y, " +
@@ -1075,6 +1115,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // cleanly. The next session may re-engage RouteWalk with the
         // assist at a different position; force re-sync.
         _assistRouteIndex = -1;
+
+        // ── Route-walking migration: Turn 3 ──
+        // Clear pending anchor on exit. The next FFG session may face
+        // a different approach context (or none); stale pending would
+        // confuse it.
+        _pendingAnchor = default;
 
         if (_navState == NavState.NavigatingToLeader)
         {
@@ -3291,6 +3337,65 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         return bestIdx;
     }
 
+    // ── Route-walking migration: Turn 3 ──
+    //
+    // CheckShouldDefer is a pure read-only predicate: should the
+    // HasApproachStart-true tick continue route-walking (storing the
+    // anchor as pending) rather than entering Anchor mode directly?
+    //
+    // Returns true and sets anchorCoords when ALL of:
+    //   - leader.HasApproachStart is true (else there's no anchor to defer)
+    //   - LoadedRoute is populated
+    //   - leader.Status == Patrolling (the leader's published target
+    //     waypoint is current; non-Patrolling means HasTargetWaypoint
+    //     may be stale or absent and TryFindLeaderRouteIndex would fail)
+    //   - TryFindLeaderRouteIndex succeeds
+    //   - allowedAdvance ≥ 0 (leader past route start)
+    //   - the assist has NOT yet reached its current route target
+    //     (distToCurrent > Navigation.POP_DIST). If the assist is
+    //     already at the target waypoint, deferring would add no
+    //     benefit — Anchor mode transitions immediately via the
+    //     direct branch.
+    //
+    // Pure read-only: does NOT modify _assistRouteIndex or _pendingAnchor.
+    // Caller (the HasApproachStart block) handles state mutation based
+    // on the result.
+    //
+    // O(LoadedRoute.Length) due to TryFindLeaderRouteIndex + optionally
+    // FindNearestSafeRouteIndex. Called once per FFG tick during approach;
+    // negligible cost.
+    private bool CheckShouldDefer(LeaderState leader, out Vector3 anchorCoords)
+    {
+        anchorCoords = default;
+        if (!leader.HasApproachStart) return false;
+        if (navigation.LoadedRoute.Length == 0) return false;
+        if (leader.Status != BotStatus.Patrolling) return false;
+
+        if (!TryFindLeaderRouteIndex(leader, out int leaderIdx)) return false;
+        int allowedAdvance = leaderIdx - 1;
+        if (allowedAdvance < 0) return false;
+
+        // Determine assist's effective current target index. If unsynced,
+        // probe what the initial-sync logic WOULD pick — that's the
+        // waypoint we'd be heading to once route-walking engages.
+        int idx = _assistRouteIndex >= 0
+            ? _assistRouteIndex
+            : FindNearestSafeRouteIndex(playerReader.WorldPos, allowedAdvance);
+        if (idx < 0) return false;
+        if (idx > allowedAdvance) idx = allowedAdvance;
+
+        float distToTarget = playerReader.WorldPos.WorldDistanceXYTo(navigation.LoadedRoute[idx]);
+        if (distToTarget <= Navigation.POP_DIST)
+        {
+            // Already at (or within POP_DIST of) the current target —
+            // no point deferring. The Anchor branch transitions now.
+            return false;
+        }
+
+        anchorCoords = new Vector3(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
+        return true;
+    }
+
     private void StartNavigatingToLeader(LeaderState leader)
     {
         Vector3 target = GetNavigationTarget(leader);
@@ -3351,12 +3456,76 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // the same anchor start the final interact-key approach from the same geographic location.
         if (leader.HasApproachStart)
         {
-            if (_rendezvousConfirmed)
+            // ── Route-walking migration: Turn 3 — combat handoff ──
+            //
+            // Before entering Anchor mode directly, check whether we
+            // should defer the anchor and continue route-walking to the
+            // current route waypoint first. CheckShouldDefer returns
+            // true when we're in steady-state route-walking and have a
+            // route-leg-distance still to cover before reaching the
+            // target waypoint. In that case, store the anchor as
+            // pending and fall through to the RouteWalk block below,
+            // which will continue advancing toward the route target.
+            //
+            // The transition to Anchor mode happens in the RouteWalk
+            // block when the assist arrives at the current route
+            // target (distToCurrent ≤ POP_DIST) AND _pendingAnchor is
+            // set — at that point _pendingAnchor is consumed and the
+            // route waypoint transitions to the Anchor target.
+            //
+            // Why defer at all? Log-85's corridor incident showed that
+            // body-chase (and direct-anchor with off-route start) can
+            // fail in tight terrain because the pather is given a
+            // start position that the route designer didn't curate.
+            // Route-walking keeps the assist on or near a curated
+            // waypoint, so when Anchor mode finally engages the
+            // assist's pather start is geometrically aligned with
+            // the same leg the leader walked into combat.
+            //
+            // CheckShouldDefer returns false when the assist is
+            // already at the current target waypoint — no benefit to
+            // deferring, transition to Anchor immediately via the
+            // direct branch below.
+            if (CheckShouldDefer(leader, out Vector3 deferAnchor))
             {
-                _rendezvousConfirmed = false;
-                _lastSharedWaypointW = default;
-                logger.LogInformation("[FFG] Leader approaching mob — clearing rendezvous, locking to approach-start anchor.");
+                // Store / update pending anchor (the published anchor
+                // may shift if the leader picks a slightly different
+                // approach position on subsequent ticks; rare but
+                // possible).
+                if (_pendingAnchor != deferAnchor)
+                {
+                    Vector3 prev = _pendingAnchor;
+                    _pendingAnchor = deferAnchor;
+                    if (prev == default)
+                    {
+                        logger.LogInformation(
+                            $"[FFG] [COMBAT-HANDOFF] Approach start while route-walking — " +
+                            $"deferring anchor={deferAnchor}. Continue to current route target " +
+                            $"idx={_assistRouteIndex} (or initial-sync if -1) before Anchor mode.");
+                    }
+                    else
+                    {
+                        float shift = prev.WorldDistanceXYTo(deferAnchor);
+                        if (shift > 1.0f)
+                        {
+                            logger.LogInformation(
+                                $"[FFG] [COMBAT-HANDOFF] Pending anchor updated " +
+                                $"({prev} → {deferAnchor}, shift={shift:0.0}y). Still deferring.");
+                        }
+                    }
+                }
+                // Fall through to RouteWalk block below — do not return
+                // here. Skip the rest of the Anchor branch's setup;
+                // RouteWalk handles target selection.
             }
+            else
+            {
+                if (_rendezvousConfirmed)
+                {
+                    _rendezvousConfirmed = false;
+                    _lastSharedWaypointW = default;
+                    logger.LogInformation("[FFG] Leader approaching mob — clearing rendezvous, locking to approach-start anchor.");
+                }
 
             // Latch short-circuit: once the anchor was determined to be co-located in
             // this approach phase, commit to position-chasing for the rest of the phase.
@@ -3407,9 +3576,36 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // negative for Azeroth) and uses it as-is.
             _currentNavTargetMode = NavTargetMode.Anchor;
             return anchor;
+            }
+            // ── Route-walking migration: Turn 3 ──
+            // Reached here only when CheckShouldDefer returned true.
+            // Pending anchor was stored above. Fall through to
+            // RouteWalk block below (skip the !HasApproachStart else
+            // branch's latch resets — we're still in approach phase,
+            // latches should NOT be reset yet).
         }
         else
         {
+            // ── Route-walking migration: Turn 3 ──
+            // Approach phase ended (HasApproachStart=false). If we had
+            // a pending anchor that was never consumed (assist didn't
+            // arrive at its route target before the approach ended —
+            // could be mob died early, operator aborted, leader picked
+            // a different mob, etc.), clear it so the next RouteWalk
+            // tick doesn't accidentally fire a transition from a stale
+            // anchor. The "consume via arrival" path in the RouteWalk
+            // block already clears pending on a successful transition;
+            // this is the only place where pending is cleared without
+            // an arrival transition.
+            if (_pendingAnchor != default)
+            {
+                logger.LogInformation(
+                    $"[FFG] [COMBAT-HANDOFF] Approach ended without arrival at route waypoint — " +
+                    $"clearing pending anchor (was {_pendingAnchor}). " +
+                    $"Resume normal route-walking on next tick.");
+                _pendingAnchor = default;
+            }
+
             // Approach phase ended — reset the latch so the next approach episode
             // (ATG re-entry, possibly on a new mob with a different anchor position)
             // is evaluated fresh. Safe across rapid re-entry: ATG.OnExit always fires
@@ -3547,6 +3743,77 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             $"(reached wp={route[prevIdx]}, dist={distToCurrent:0.0}y, " +
                             $"new target={route[_assistRouteIndex]}, " +
                             $"leaderIdx={leaderIdx}, gap={leaderIdx - _assistRouteIndex}).");
+                    }
+
+                    // ── Route-walking migration: Turn 3 — combat handoff transition ──
+                    //
+                    // After the advance loop, _assistRouteIndex is the
+                    // largest index we can currently occupy (either
+                    // allowedAdvance, or the highest index we've
+                    // reached within POP_DIST). If a pending anchor is
+                    // set AND we're within POP_DIST of the current
+                    // target waypoint, this tick is the transition:
+                    // consume the pending anchor, leave RouteWalk mode,
+                    // and return the anchor target (with inline
+                    // co-location guard mirroring the direct Anchor
+                    // branch's behavior).
+                    //
+                    // The "within POP_DIST" condition handles both
+                    // cases:
+                    //   (a) we just advanced to allowedAdvance and
+                    //       we're standing on it (loop break: dist
+                    //       was <= POP_DIST for the popped waypoint,
+                    //       but if the new target is also close
+                    //       enough, this check sees it as well —
+                    //       conservative re-check on the new target).
+                    //   (b) we hit the cap (idx == allowedAdvance)
+                    //       and the advance loop ran to completion
+                    //       without further pops — we're waiting at
+                    //       allowedAdvance. If we're within POP_DIST,
+                    //       we're parked at the waypoint and ready
+                    //       for the transition.
+                    if (_pendingAnchor != default)
+                    {
+                        float distToTarget = playerReader.WorldPos.WorldDistanceXYTo(route[_assistRouteIndex]);
+                        if (distToTarget <= Navigation.POP_DIST)
+                        {
+                            Vector3 anchorTarget = _pendingAnchor;
+                            _pendingAnchor = default;
+                            int handoffIdx = _assistRouteIndex;
+                            _assistRouteIndex = -1; // leaving RouteWalk mode
+
+                            // Inline co-location guard — mirrors the direct
+                            // Anchor branch. If the route waypoint is
+                            // already within POP_DIST of the anchor (would
+                            // cause SetSingleWaypoint to immediately re-pop
+                            // and oscillate), latch _approachAnchorColocated
+                            // and switch to PositionChase for the remainder
+                            // of this approach phase.
+                            float anchorDist = playerReader.WorldPos.WorldDistanceXYTo(anchorTarget);
+                            if (anchorDist < Navigation.POP_DIST)
+                            {
+                                _approachAnchorColocated = true;
+                                logger.LogWarning(
+                                    $"[FFG] [COMBAT-HANDOFF] Route waypoint idx={handoffIdx} " +
+                                    $"is co-located with anchor ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
+                                    $"latching co-located and switching to PositionChase. " +
+                                    $"Subsequent ticks will use direct Anchor branch's PositionChase path.");
+                                _currentNavTargetMode = NavTargetMode.PositionChase;
+                                return ComputeFollowTargetWorldPos(leader);
+                            }
+
+                            logger.LogInformation(
+                                $"[FFG] [COMBAT-HANDOFF] Reached route waypoint idx={handoffIdx} " +
+                                $"at {route[handoffIdx]}, distToWp={distToTarget:0.0}y; " +
+                                $"transitioning Route-walk → Anchor. " +
+                                $"anchor={anchorTarget}, distToAnchor={anchorDist:0.0}y.");
+                            _currentNavTargetMode = NavTargetMode.Anchor;
+                            return anchorTarget;
+                        }
+                        // Pending anchor set but not yet arrived — keep
+                        // route-walking. The pending anchor stays in
+                        // place; this tick returns the route target
+                        // below.
                     }
 
                     _currentNavTargetMode = NavTargetMode.RouteWalk;
