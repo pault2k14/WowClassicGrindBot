@@ -2162,10 +2162,19 @@ public sealed partial class Navigation : IDisposable
     /// ── Route-walking migration: Turn 1 (log-84 baseline → Turn 1 commit) ──
     ///
     /// Loads the assist's view of the patrol route into <see cref="LoadedRoute"/>
-    /// without affecting the active wayPoints stack. Called by FFG at OnEnter on
-    /// the assist side. The leader's FRG does NOT use this — FRG calls
+    /// from <c>this.pathSettings.Path</c>, without affecting the active
+    /// wayPoints stack. Called by FFG at OnEnter on the assist side. The
+    /// leader's FRG does NOT use this — FRG calls
     /// SetWayPoints(pathSettings.Path) directly because the leader USES the
     /// active stack to navigate.
+    ///
+    /// Why this lives on Navigation rather than FFG: on the assist, the DI
+    /// container can't resolve PathSettings as a direct constructor
+    /// dependency of FFG (PathSettings registration appears scoped to the
+    /// path-aware service tree that Navigation participates in, but not
+    /// goals). Navigation already has pathSettings as a constructor field,
+    /// so we keep the read inside Navigation and expose a parameterless
+    /// method to callers.
     ///
     /// Turn 1 scope: purely additive. LoadedRoute is populated but nothing
     /// reads from it. Verifies the assist can hold route data and the route
@@ -2182,16 +2191,18 @@ public sealed partial class Navigation : IDisposable
     /// warning is logged. The bot continues with body-chase behavior — no
     /// crash, no behavior change.
     /// </summary>
-    public void LoadRoute(Vector3[] routePoints)
+    public void LoadRoute()
     {
+        Vector3[] routePoints = pathSettings.Path;
         if (routePoints == null || routePoints.Length == 0)
         {
             LoadedRoute = Array.Empty<Vector3>();
             logger.LogWarning(
-                "[NAV] [ROUTE-LOAD] empty or null route provided — " +
+                "[NAV] [ROUTE-LOAD] empty or null route in pathSettings.Path — " +
                 "route-walking will be unavailable. Assist will continue " +
-                "with body-chase behavior. Verify pathSettings.Path is " +
-                "populated in the assist class config.");
+                "with body-chase behavior. Verify the assist class config " +
+                "specifies a PathFilename pointing at the same route file " +
+                "the leader uses.");
             return;
         }
 
