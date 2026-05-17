@@ -202,6 +202,27 @@ public sealed partial class Navigation : IDisposable
 
     public Vector3[] TotalRoute { private set; get; } = Array.Empty<Vector3>();
 
+    // ── Route-walking migration: Turn 1 (log-84 baseline → Turn 1 commit) ──
+    //
+    // LoadedRoute is the assist-side mirror of the leader's patrol route,
+    // populated via LoadRoute() at FFG OnEnter. Distinct from TotalRoute
+    // (which is a dynamic snapshot of current per-leg path + remaining
+    // wayPoints stack) — LoadedRoute is the immutable curated route from
+    // pathSettings.Path, normalized to world coords at load time.
+    //
+    // Turn 1 scope (this commit): purely additive. The property is
+    // populated at FFG OnEnter but no code reads from it yet. Validates
+    // that the assist can hold route data via the existing DI-injected
+    // pathSettings and that the route file is loadable from the assist
+    // side. Acceptance: LoadedRoute.Length matches the leader's published
+    // route waypoint count, visible in [FIX-CONFIG] header and
+    // [ROUTE-LOAD] log line.
+    //
+    // Turn 2 scope (future): assist-side index state machine consumes
+    // from LoadedRoute to compute the next route waypoint, replacing
+    // body-chase semantics during patrol.
+    public Vector3[] LoadedRoute { get; private set; } = Array.Empty<Vector3>();
+
     public DateTime LastActive { get; private set; }
 
     public event Action? OnPathCalculated;
@@ -2135,6 +2156,67 @@ public sealed partial class Navigation : IDisposable
                 p.X is >= 0 and <= 100 &&
                 p.Y is >= 0 and <= 100;
         }
+    }
+
+    /// <summary>
+    /// ── Route-walking migration: Turn 1 (log-84 baseline → Turn 1 commit) ──
+    ///
+    /// Loads the assist's view of the patrol route into <see cref="LoadedRoute"/>
+    /// without affecting the active wayPoints stack. Called by FFG at OnEnter on
+    /// the assist side. The leader's FRG does NOT use this — FRG calls
+    /// SetWayPoints(pathSettings.Path) directly because the leader USES the
+    /// active stack to navigate.
+    ///
+    /// Turn 1 scope: purely additive. LoadedRoute is populated but nothing
+    /// reads from it. Verifies the assist can hold route data and the route
+    /// file is accessible. Turn 2 will introduce the waypoint-index state
+    /// machine and consume from LoadedRoute.
+    ///
+    /// Coord conversion: input points may be in map coords (0-100 range) or
+    /// world coords; we normalize to world coords at load time so Turn 2's
+    /// consumption logic doesn't repeat the check. Mirrors the IsMapPoint
+    /// check in <see cref="SetWayPoints"/>.
+    ///
+    /// Safety: if pathSettings.Path is null or empty (e.g., assist class
+    /// config has no route configured), LoadedRoute is set to empty and a
+    /// warning is logged. The bot continues with body-chase behavior — no
+    /// crash, no behavior change.
+    /// </summary>
+    public void LoadRoute(Vector3[] routePoints)
+    {
+        if (routePoints == null || routePoints.Length == 0)
+        {
+            LoadedRoute = Array.Empty<Vector3>();
+            logger.LogWarning(
+                "[NAV] [ROUTE-LOAD] empty or null route provided — " +
+                "route-walking will be unavailable. Assist will continue " +
+                "with body-chase behavior. Verify pathSettings.Path is " +
+                "populated in the assist class config.");
+            return;
+        }
+
+        WorldMapArea wma = playerReader.WorldMapArea;
+        Vector3[] converted = new Vector3[routePoints.Length];
+        int mapConvertedCount = 0;
+        for (int i = 0; i < routePoints.Length; i++)
+        {
+            Vector3 p = routePoints[i];
+            if (p.X is >= 0 and <= 100 && p.Y is >= 0 and <= 100)
+            {
+                p = WorldMapAreaDB.ToWorld_FlipXY(p, wma);
+                mapConvertedCount++;
+            }
+            converted[i] = Nav2D(p);
+        }
+
+        LoadedRoute = converted;
+
+        logger.LogInformation(
+            $"[NAV] [ROUTE-LOAD] Loaded {converted.Length} route waypoints " +
+            $"(mapConverted={mapConvertedCount}). " +
+            $"First=<{converted[0].X:0.0},{converted[0].Y:0.0}>, " +
+            $"Last=<{converted[^1].X:0.0},{converted[^1].Y:0.0}>. " +
+            $"All coords normalized to world space.");
     }
 
     public void ResetStuckParameters()

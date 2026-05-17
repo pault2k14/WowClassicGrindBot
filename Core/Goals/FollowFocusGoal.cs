@@ -181,6 +181,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private readonly AssistStatusProvider assistStatusProvider;
     private readonly LeaderConnectionStatus leaderConnection;
     private readonly LeaderNavigationProvider leaderNavProvider;
+    private readonly PathSettings pathSettings;
 
     // -----------------------------------------------------------------------
     // Nav state machine
@@ -723,7 +724,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         LeaderNavigationProvider leaderNavProvider,
         IOptions<PartyApiConfig> configOptions,
         IMountHandler mountHandler,
-        CastingHandler castingHandler)
+        CastingHandler castingHandler,
+        PathSettings pathSettings)
         : base(nameof(FollowFocusGoal))
     {
         this.input = input;
@@ -739,6 +741,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         this.leaderNavProvider = leaderNavProvider;
         this.castingHandler = castingHandler;
         this.mountHandler = mountHandler;
+        this.pathSettings = pathSettings;
         this.Keys = classConfig.FollowFocusActions.Sequence;
 
         if (classConfig.UnitToFollow == "focus")
@@ -806,6 +809,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         while (restHandler.IsResting())
             wait.Update(1000);
 
+        // ── Route-walking migration: Turn 1 (log-84 baseline → Turn 1 commit) ──
+        //
+        // Load the route file into navigation.LoadedRoute at every FFG OnEnter.
+        // Turn 1 is purely additive — the data sits in LoadedRoute but no code
+        // reads from it yet. Verifies the assist has the same route data the
+        // leader has and that the pathSettings.Path injection path works on
+        // the assist side. Re-loading on every OnEnter is wasteful but cheap
+        // (array clone of ~100 waypoints); Turn 2 may optimize to load-once
+        // semantics if needed.
+        //
+        // Acceptance signals for Turn 1:
+        //   [NAV] [ROUTE-LOAD] log line appears (or warning if route empty)
+        //   [FFG] [FIX-CONFIG] line includes RouteWaypointCount=N
+        //   N matches the leader's published waypoint count
+        //   All other fix-firing rates unchanged from log-84 baseline
+        navigation.LoadRoute(pathSettings.Path);
+
         // ── Architecture migration observability ──
         //
         // Emit a one-line configuration header at every FFG OnEnter so log
@@ -842,6 +862,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"AnchorLocalTtlMs={AnchorLocalTtlMs:0}ms. " +
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB. " +
+            $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
         _stuckCheckLastUtc = DateTime.MinValue;
