@@ -23,6 +23,16 @@ namespace Core.Party;
 /// <c>playerReader.IgnoreTarget</c> for any new entries.
 /// </para>
 ///
+/// <para>
+/// <b>Stuck-rect propagation (Fix AV / Route A):</b>
+/// <see cref="GoapAgent"/> subscribes to <c>Navigation.OnStuckRectAdded</c> and
+/// <c>Navigation.OnStuckRectsCleared</c> (leader mode only) and forwards each
+/// rect into <see cref="AddStuckRect"/> / <see cref="ClearStuckRects"/> here.
+/// <see cref="LeaderStateService"/> reads the snapshot each poll. Assist bots
+/// apply the rects via <c>Navigation.AddPropagatedStuckRect</c> so their
+/// pathfinder routes around the same terrain the leader marked as bad.
+/// </para>
+///
 /// <para>Thread safety: all writes happen on the GOAP/addon thread; reads happen on
 /// the HTTP server thread. The snapshot arrays are replaced atomically with
 /// <see langword="volatile"/> semantics so readers always see a consistent array
@@ -190,5 +200,93 @@ public sealed class LeaderNavigationProvider
 
         _blacklistedGuids.Clear();
         _snapshot = System.Array.Empty<int>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix AV (Route A) — Stuck-rect sharing
+    //
+    // Mirrors the leader's Navigation._stuckWorldRects list so the leader's
+    // current dynamic blacklist rects can be serialized into LeaderState
+    // and consumed by the assist. The leader-side wiring (in GoapAgent)
+    // subscribes to Navigation.OnStuckRectAdded and
+    // Navigation.OnStuckRectsCleared and forwards the events here. Reads
+    // happen on the HTTP server thread when LeaderStateService builds the
+    // snapshot for a poll response.
+    //
+    // Lifetime semantics on this side:
+    //   - AddStuckRect appends if the new center is not already inside an
+    //     existing rect (dedup matches Navigation.AddStuckRect's dedup).
+    //   - ClearStuckRects empties the list (matches
+    //     Navigation.ClearStuckRects). On the next poll the assist sees
+    //     an empty array and lets its propagated rects expire via the
+    //     TTL in Navigation (PropagatedStuckRectTtlSec).
+    //
+    // The leader does NOT need its own TTL here — the leader's rect list
+    // is the source of truth, and the leader's plan transitions
+    // (ATG.OnExit, CombatGoal post-combat) already drive ClearStuckRects
+    // on Navigation, which we mirror.
+    // -----------------------------------------------------------------------
+
+    private readonly List<StuckRectInfo> _stuckRects = new();
+
+    // Snapshot exposed to LeaderStateService / HTTP serialization.
+    // Replaced as a whole reference (volatile) so HTTP readers always
+    // see a consistent array — same pattern as _snapshot above.
+    private volatile StuckRectInfo[] _stuckRectsSnapshot = System.Array.Empty<StuckRectInfo>();
+
+    /// <summary>
+    /// Current set of dynamic stuck rects the leader has added via its
+    /// <c>Navigation.AddStuckRect</c> path. Snapshot is rebuilt on every
+    /// change (add or clear). Consumed by <see cref="LeaderStateService"/>
+    /// when assembling the <see cref="LeaderState.StuckRects"/> field.
+    /// </summary>
+    public StuckRectInfo[] StuckRectsSnapshot => _stuckRectsSnapshot;
+
+    /// <summary>
+    /// Records a stuck rect the leader's Navigation just added. Dedups
+    /// against existing rects (skips if <paramref name="centerX"/>,
+    /// <paramref name="centerY"/> is already inside an existing rect —
+    /// matches the dedup criterion in <c>Navigation.AddStuckRect</c>).
+    /// Rebuilds the snapshot atomically.
+    /// </summary>
+    public void AddStuckRect(float centerX, float centerY, float halfSize)
+    {
+        // Single-writer (GOAP thread) — no lock needed for the list itself,
+        // only the snapshot reference swap needs ordering, which volatile
+        // semantics provide.
+        for (int i = 0; i < _stuckRects.Count; i++)
+        {
+            StuckRectInfo r = _stuckRects[i];
+            if (centerX >= r.CenterX - r.HalfSize && centerX <= r.CenterX + r.HalfSize &&
+                centerY >= r.CenterY - r.HalfSize && centerY <= r.CenterY + r.HalfSize)
+            {
+                return; // already covered — Navigation's own dedup would also skip
+            }
+        }
+
+        _stuckRects.Add(new StuckRectInfo
+        {
+            CenterX = centerX,
+            CenterY = centerY,
+            HalfSize = halfSize
+        });
+        _stuckRectsSnapshot = _stuckRects.ToArray();
+    }
+
+    /// <summary>
+    /// Clears the published stuck-rect list. Called by the leader-side
+    /// subscriber when the leader's <c>Navigation.ClearStuckRects</c> fires
+    /// (plan transitions in ATG/PTG/CombatGoal). On the next assist poll,
+    /// the assist will see an empty array and its locally-tracked
+    /// propagated rects will expire via TTL — see
+    /// <c>Navigation.PropagatedStuckRectTtlSec</c>.
+    /// </summary>
+    public void ClearStuckRects()
+    {
+        if (_stuckRects.Count == 0)
+            return;
+
+        _stuckRects.Clear();
+        _stuckRectsSnapshot = System.Array.Empty<StuckRectInfo>();
     }
 }

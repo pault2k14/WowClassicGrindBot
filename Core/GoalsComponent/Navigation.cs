@@ -103,6 +103,28 @@ public sealed class StaleEmptyPathSnapshot
     /// <summary>Cooldown to apply on escalate (default 2000ms).</summary>
     public int EscalateCooldownMs { get; set; } = 2000;
 
+    /// <summary>
+    /// Fix AX (Route B Part 1): set by a subscriber to request that
+    /// Navigation push a direct one-hop route to <see cref="ActiveRequestEndW"/>
+    /// instead of escalating via <see cref="Navigation.OnPathFailed"/>.
+    /// Uses the same <c>BuildDirectRouteFallback</c> mechanism as
+    /// <see cref="Navigation.HandleRepeatedNoPath"/>'s count==2 branch.
+    /// <para>
+    /// Mutually exclusive with <see cref="Escalate"/>: if the subscriber sets
+    /// both, <see cref="TriggerDirectRoute"/> takes precedence (the direct-
+    /// route push is the more constructive recovery action; the watchdog
+    /// cascade will fire OnPathFailed if the direct route also fails).
+    /// </para>
+    /// <para>
+    /// Used by FollowFocusGoal's Fix AU branch when <c>_activeStuckReported</c>
+    /// is true and a stale-empty matches the active request: the bot is
+    /// stationary AND the pather cannot route from this position, so
+    /// attempting a direct walk toward the target is more likely to recover
+    /// than waiting for another path attempt to succeed.
+    /// </para>
+    /// </summary>
+    public bool TriggerDirectRoute { get; set; }
+
     public StaleEmptyPathSnapshot(Vector3 resultStartW, Vector3 resultEndW,
         Vector3 activeRequestStartW, Vector3 activeRequestEndW)
     {
@@ -214,6 +236,39 @@ public sealed partial class Navigation : IDisposable
     /// <para>Subscribers should re-read TopPublishableWaypointW and rebroadcast.</para>
     /// </summary>
     public event Action? OnTopWaypointChanged;
+
+    // ── Fix AV (Route A: leader→assist StuckRect propagation) ──
+    //
+    // Fired when AddStuckRect successfully adds a new dynamic rect to the
+    // local _stuckWorldRects list (not on dedup/skip, not on AddPropagated-
+    // StuckRect). Designed for a leader-side subscriber (e.g., the leader's
+    // FRG or a dedicated propagation service) to forward the rect over IPC
+    // to peer bots' Navigation instances via AddPropagatedStuckRect.
+    //
+    // Event payload is the FINAL center (already offset by forwardDir if
+    // applicable, see AddStuckRect) and the half-size in world yards. The
+    // subscriber should treat (center, halfSize) as opaque rect identity —
+    // the assist's AddPropagatedStuckRect uses the center for dedup and
+    // applies the same half-size so both bots blacklist the same area.
+    //
+    // Non-subscribers see no behavior change. The assist's Navigation does
+    // not subscribe (it would be a no-op there — assist's locally-added
+    // rects don't need to propagate back to the leader, and the assist has
+    // no peer to forward to in the current 2-bot architecture).
+    public event Action<Vector3, float>? OnStuckRectAdded;  // (center, halfSize)
+
+    // ── Fix AV (Route A) — Stuck-rect cleared notification ──
+    //
+    // Fired when ClearStuckRects empties the local _stuckWorldRects list
+    // (no-op if the list was already empty — matches the existing early
+    // return in ClearStuckRects). The leader-side subscriber forwards
+    // this to LeaderNavigationProvider.ClearStuckRects so the published
+    // snapshot drains on the next assist poll. The assist's own
+    // propagated rects then expire naturally via TTL — see
+    // PropagatedStuckRectTtlSec.
+    //
+    // Pair with OnStuckRectAdded for the full add/clear lifecycle.
+    public event Action? OnStuckRectsCleared;
     public bool SimplifyRouteToWaypoint { get; set; } = true;
 
     private bool active;
@@ -252,6 +307,54 @@ public sealed partial class Navigation : IDisposable
 
     // Runtime stuck rects recorded when the character makes zero movement during an escape.
     private readonly List<BlacklistRect> _stuckWorldRects = new();
+
+    // ── Fix AV (Route A: temporary lifetime for propagated rects) ──
+    //
+    // Parallel to _stuckWorldRects (same index = same rect). Each entry is
+    // either DateTime.MaxValue (rect was discovered locally via TryUnstuck
+    // — no automatic expiry, cleared explicitly via ClearStuckRects on
+    // plan transitions) or a UTC timestamp (rect was propagated from a
+    // peer bot via AddPropagatedStuckRect — auto-pruned by
+    // PruneExpiredStuckRects on Update() ticks once UtcNow >= the entry).
+    //
+    // The two lifetime semantics must coexist because the same Navigation
+    // instance can hold rects from both sources — e.g., the leader has
+    // only locally-discovered rects, but an assist that adds its own
+    // rects via FFG.TickIdleStuckDetection's TryUnstuck path AND also
+    // receives the leader's propagated rects via AddPropagatedStuckRect
+    // ends up with a mix; the parallel-list design preserves the
+    // distinction without changing _stuckWorldRects' element type.
+    private readonly List<DateTime> _stuckRectExpiryUtc = new();
+
+    // How long a propagated stuck rect lives before PruneExpiredStuckRects
+    // removes it. Sized for "both bots approaching the same mob from the
+    // same direction" — the scenario where Route A propagation pays off:
+    //
+    //   t=0    Leader's ATG hits no-range-progress, TryUnstuck adds rect
+    //          and fires OnStuckRectAdded → leader-side service publishes
+    //          to assist on the next broadcast cycle (~500 ms).
+    //   t≈0.5  Assist's poll picks up the rect, calls AddPropagated-
+    //          StuckRect, rect enters assist's _areaBlacklist for pather.
+    //   t≈3-10 Assist begins approach navigation; pather routes around
+    //          the rect (the win condition for Route A).
+    //   t≈3-15 Leader's combat begins; assist's combat begins shortly
+    //          after. Both bots are near the rect.
+    //   t≈15-30 Combat ends. Assist's post-combat navigation back to
+    //          leader; pather still avoids the rect.
+    //   t≈30-50 Rendezvous completes. Both bots resume patrol away
+    //          from the rect area.
+    //
+    // 90 s gives margin for extended combat (3-mob pulls, runner mobs,
+    // adds) while preventing the rect from polluting later patrol
+    // passes through the same area on subsequent route loops. The
+    // leader's own rect lifetime is bounded by ClearStuckRects on ATG/
+    // CombatGoal plan transitions (much shorter than 90 s in normal
+    // flow); a leader-side service that re-publishes each cycle while
+    // the rect remains in the leader's list will refresh the assist's
+    // TTL (see AddPropagatedStuckRect's dedup-refresh path), so the
+    // assist's effective lifetime tracks the leader's actual rect
+    // lifetime plus a 90 s cool-down tail.
+    private const double PropagatedStuckRectTtlSec = 90.0;
 
     // Half-size in world yards of the dynamically-added stuck rect.
     // Bottom edge is 1y ahead of the player, top edge is 5y ahead (4y deep).
@@ -1149,6 +1252,15 @@ public sealed partial class Navigation : IDisposable
         if (!active)
             return;
 
+        // Fix AV (Route A): prune propagated stuck rects whose TTL has
+        // elapsed. Locally-discovered rects (TryUnstuck path) have
+        // DateTime.MaxValue expiry and are never pruned here — they are
+        // cleared by ClearStuckRects on plan transitions. Cheap O(n) on
+        // rect count (typically 0–3); placed at the top of Update so the
+        // _areaBlacklist seen by all downstream logic this tick reflects
+        // the most up-to-date rect set.
+        PruneExpiredStuckRects();
+
         NavDbg($"STATE enter active={active} " +
                $"wp={wayPoints.Count} route={routeToNextWaypoint.Count} " +
                $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
@@ -2026,6 +2138,132 @@ public sealed partial class Navigation : IDisposable
     }
 
     /// <summary>
+    /// Shared add-or-dedupe core for both <see cref="AddStuckRect"/> (locally-
+    /// discovered, <c>expiryUtc == DateTime.MaxValue</c>) and
+    /// <see cref="AddPropagatedStuckRect"/> (propagated, finite TTL).
+    ///
+    /// <para><b>Fix AW (Guards 1+2) — applies to Route A propagation safety.</b></para>
+    ///
+    /// <para>
+    /// <b>Guard 1 — skip-if-inside (propagated only):</b> If the player is
+    /// currently inside the proposed rect, refuse to add. Locally-discovered
+    /// rects compute <c>center</c> forward of the player by construction
+    /// (see <see cref="AddStuckRect"/>'s forward-offset math), so this
+    /// guard is a no-op for the local path. For propagated rects the assist
+    /// may be at arbitrary terrain when the rect arrives — and if the rect
+    /// lands on top of the assist, adding it would force PPather to reject
+    /// the assist's start position on every subsequent path request, which
+    /// can suppress the assist's own stuck-detection from upgrading the
+    /// rect's lifetime (Guard 2 below). The leader keeps republishing each
+    /// poll cycle, so this is a retry-friendly skip: once the assist moves
+    /// out, the next propagation succeeds.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Guard 2 — upgrade propagated → local on overlap:</b> If a local
+    /// stuck event lands inside a rect that is currently propagated (finite
+    /// expiry), promote that rect's expiry to <see cref="DateTime.MaxValue"/>.
+    /// The local detection is authoritative — the assist's own
+    /// <c>TickIdleStuckDetection</c> has now confirmed the terrain is bad —
+    /// so the rect's lifetime should be governed by
+    /// <see cref="ClearStuckRects"/> (plan transitions), not by the 90 s
+    /// propagation TTL. Without this guard, the rect could expire while
+    /// the assist is still struggling at the same spot, and the assist's
+    /// own confirmation would be silently lost to dedup.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Dedup matrix on overlap:</b><br/>
+    ///   local → local           : keep existing (Info log — legacy behavior preserved).<br/>
+    ///   local → propagated      : <i>Guard 2</i> upgrade existing to MaxValue (Info log).<br/>
+    ///   propagated → local      : silent no-op (local owns the area; this is just the leader re-broadcasting).<br/>
+    ///   propagated → propagated : refresh existing TTL to <paramref name="expiryUtc"/> (Debug log).
+    /// </para>
+    ///
+    /// <para>
+    /// Returns <c>true</c> iff a new rect was appended to <see cref="_stuckWorldRects"/>.
+    /// Append-only path also rebuilds <see cref="_areaBlacklist"/>.
+    /// </para>
+    /// </summary>
+    private bool TryAddStuckRectInternal(Vector3 center, float halfSize, DateTime expiryUtc)
+    {
+        bool isLocal = expiryUtc == DateTime.MaxValue;
+
+        // Guard 1: skip-if-inside (propagated only). Local rects are produced
+        // forward of the player and cannot collide with the player's current
+        // position; locally-added rects never trigger this guard.
+        if (!isLocal)
+        {
+            Vector3 playerPos = playerReader.WorldPos;
+            if (MathF.Abs(playerPos.X - center.X) <= halfSize &&
+                MathF.Abs(playerPos.Y - center.Y) <= halfSize)
+            {
+                logger.LogWarning(
+                    $"[NAV] Propagated rect REJECTED (Guard 1): bot is currently inside " +
+                    $"the proposed rect (player={playerPos}, center={center}, ±{halfSize}y). " +
+                    $"Will retry on next propagation cycle once the bot moves out.");
+                return false;
+            }
+        }
+
+        // Dedup against existing rects.
+        for (int i = 0; i < _stuckWorldRects.Count; i++)
+        {
+            if (_stuckWorldRects[i].Contains(new System.Numerics.Vector2(center.X, center.Y)))
+            {
+                DateTime existingExpiry = _stuckRectExpiryUtc[i];
+                bool existingIsLocal = existingExpiry == DateTime.MaxValue;
+
+                if (isLocal && !existingIsLocal)
+                {
+                    // Guard 2: local stuck event overlapping a propagated rect.
+                    // Promote the existing entry's lifetime to permanent.
+                    _stuckRectExpiryUtc[i] = DateTime.MaxValue;
+                    logger.LogInformation(
+                        $"[NAV] StuckRect dedup (Guard 2): existing propagated rect [{i}] " +
+                        $"promoted to local — bot's own stuck detection confirms the " +
+                        $"terrain at center={center} (was expiring at {existingExpiry:HH:mm:ss.fff}).");
+                }
+                else if (!isLocal && !existingIsLocal)
+                {
+                    // Propagated → propagated: refresh TTL so the rect stays
+                    // alive as long as the leader keeps republishing.
+                    _stuckRectExpiryUtc[i] = expiryUtc;
+                    if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
+                    {
+                        logger.LogDebug(
+                            $"[NAV] StuckRect dedup: refreshed TTL on existing propagated " +
+                            $"rect [{i}] (center={center}, new expiry={expiryUtc:HH:mm:ss.fff}).");
+                    }
+                }
+                else if (isLocal && existingIsLocal)
+                {
+                    // Local → local: legacy log preserved (pre-Fix AW behavior).
+                    logger.LogInformation(
+                        $"[NAV] StuckRect skipped: center={center} already inside existing " +
+                        $"rect [{i}] — no new rect added (total={_stuckWorldRects.Count}).");
+                }
+                // else: propagated → local. Silent no-op. Local rect owns
+                // the terrain — this is just the leader re-broadcasting
+                // something we've already locally confirmed and promoted.
+
+                return false;
+            }
+        }
+
+        // No overlap — append.
+        var rect = new BlacklistRect(
+            center.X - halfSize, center.Y - halfSize,
+            center.X + halfSize, center.Y + halfSize
+        ).Normalized();
+
+        _stuckWorldRects.Add(rect);
+        _stuckRectExpiryUtc.Add(expiryUtc);
+        _areaBlacklist = new CompositeAreaBlacklist(_staticAreaBlacklist, new RectBlacklist(_stuckWorldRects));
+        return true;
+    }
+
+    /// <summary>
     /// Boxes a region around the stuck position as a blacklisted area so the pather
     /// routes around it on future requests.
     /// </summary>
@@ -2046,27 +2284,25 @@ public sealed partial class Navigation : IDisposable
             }
         }
 
-        var rect = new BlacklistRect(
-            center.X - StuckRectHalfSizeY, center.Y - StuckRectHalfSizeY,
-            center.X + StuckRectHalfSizeY, center.Y + StuckRectHalfSizeY
-        ).Normalized();
+        // Fix AW: dedup + append + Guard 2 (propagated→local upgrade) live
+        // in the shared helper. AddStuckRect is the local-path entry —
+        // expiry is always MaxValue. Guard 1 is bypassed for local adds
+        // (the helper checks `isLocal` first).
+        bool added = TryAddStuckRectInternal(center, StuckRectHalfSizeY, DateTime.MaxValue);
 
-        // Deduplicate — don't add if we already have an overlapping rect.
-        for (int i = 0; i < _stuckWorldRects.Count; i++)
+        if (added)
         {
-            if (_stuckWorldRects[i].Contains(new System.Numerics.Vector2(center.X, center.Y)))
-            {
-                logger.LogInformation(
-                    $"[NAV] StuckRect skipped: center={center} already inside existing rect [{i}] — no new rect added (total={_stuckWorldRects.Count}).");
-                return;
-            }
-        }
+            logger.LogWarning(
+                $"[NAV] StuckRect added: center={center} (player={posW}) ±{StuckRectHalfSizeY}y " +
+                $"(total={_stuckWorldRects.Count})");
 
-        _stuckWorldRects.Add(rect);
-        _areaBlacklist = new CompositeAreaBlacklist(_staticAreaBlacklist, new RectBlacklist(_stuckWorldRects));
-        logger.LogWarning(
-            $"[NAV] StuckRect added: center={center} (player={posW}) ±{StuckRectHalfSizeY}y " +
-            $"(total={_stuckWorldRects.Count})");
+            // Fix AV: notify subscribers (intended: leader-side propagation
+            // service) so the rect can be forwarded to the assist via IPC.
+            // Fires ONLY on actual append — Guard 2 promotions and dedup
+            // skips do not re-broadcast (the leader would either already
+            // know about the area or not need to know).
+            OnStuckRectAdded?.Invoke(center, StuckRectHalfSizeY);
+        }
     }
 
     public bool TryUnstuck(CancellationToken token = default)
@@ -3406,16 +3642,10 @@ public sealed partial class Navigation : IDisposable
                 }
 
                 logger.LogWarning(
-                    $"[NAV] No-path fallback: building direct route start={startW} end={endW} dist={dist:0.00}");
+                    $"[NAV] No-path fallback: building direct route via shared helper " +
+                    $"(count=2 branch). start={startW} end={endW} dist={dist:0.00}");
 
-                routeToNextWaypoint.Clear();
-                routeToNextWaypoint.Push(Nav2D(endW));
-                stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(endW));
-                ResetChaseProgressWatchdog(Nav2D(endW));
-                ResetNoProgressWatchdog(Nav2D(endW));
-                UpdateTotalRoute();
-
-                noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
+                BuildDirectRouteFallback(endW);
                 return true;
             }
 
@@ -3444,6 +3674,41 @@ public sealed partial class Navigation : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Fix AX (Route B Part 1): shared direct-route push, extracted from
+    /// <see cref="HandleRepeatedNoPath"/>'s count==2 branch so the
+    /// stale-empty callback path in <see cref="PathCalculatedCallback"/>
+    /// can invoke the same recovery mechanism when the subscriber sets
+    /// <see cref="StaleEmptyPathSnapshot.TriggerDirectRoute"/>.
+    ///
+    /// <para>
+    /// Pushes <paramref name="endW"/> as the next waypoint directly,
+    /// bypassing the pather entirely. The chase-progress and no-progress
+    /// watchdogs are reset against <paramref name="endW"/> so that if the
+    /// bot is physically wedged and cannot walk forward, the watchdogs
+    /// fire <see cref="OnPathFailed"/> within their normal cascade time
+    /// (~15s) and FFG's <c>Navigation_OnPathFailed</c> handles rewind/
+    /// CantFollow.
+    /// </para>
+    ///
+    /// <para>
+    /// Applies a 500 ms <c>noPathCooldownUntilUtc</c> so the next path
+    /// request is delayed slightly, giving the bot a moment to start
+    /// moving on the direct route before another stale-empty might fire.
+    /// </para>
+    /// </summary>
+    private void BuildDirectRouteFallback(Vector3 endW)
+    {
+        routeToNextWaypoint.Clear();
+        routeToNextWaypoint.Push(Nav2D(endW));
+        stuckDetector.SetTargetLocation(StuckOwnerId, Nav2D(endW));
+        ResetChaseProgressWatchdog(Nav2D(endW));
+        ResetNoProgressWatchdog(Nav2D(endW));
+        UpdateTotalRoute();
+
+        noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
     }
 
     private void PathCalculatedCallback(long requestId, PathResult result)
@@ -3487,7 +3752,26 @@ public sealed partial class Navigation : IDisposable
                         result.StartW, result.EndW,
                         lastRequestStart, lastRequestEnd);
                     OnStaleEmptyPathMatchesActive?.Invoke(snap);
-                    if (snap.Escalate)
+
+                    // Fix AX (Route B Part 1): subscriber-requested direct-route
+                    // recovery for a stale-empty matching active. Takes precedence
+                    // over Escalate — direct-route is the more constructive
+                    // response; if it fails (bot physically wedged), the
+                    // chase/no-progress watchdogs will fire OnPathFailed within
+                    // ~15s, which routes through Navigation_OnPathFailed →
+                    // rewind/CantFollow. Subscriber (FFG Fix AU) bounds the
+                    // number of attempts per cycle.
+                    if (snap.TriggerDirectRoute)
+                    {
+                        float dist = lastRequestStart.WorldDistanceXYTo(lastRequestEnd);
+                        logger.LogWarning(
+                            $"[NAV] Stale-empty match: subscriber requested direct-route " +
+                            $"recovery (Fix AX). start={lastRequestStart} end={lastRequestEnd} " +
+                            $"dist={dist:0.00}y. Pushing one-hop route via " +
+                            $"BuildDirectRouteFallback.");
+                        BuildDirectRouteFallback(lastRequestEnd);
+                    }
+                    else if (snap.Escalate)
                     {
                         noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(snap.EscalateCooldownMs);
                         OnPathFailed?.Invoke(result.StartW, result.EndW);
@@ -4313,8 +4597,124 @@ public sealed partial class Navigation : IDisposable
 
         int count = _stuckWorldRects.Count;
         _stuckWorldRects.Clear();
+        // Fix AV: clear the parallel expiry list in lockstep with the rect
+        // list. Both locally-discovered (MaxValue) and propagated (finite)
+        // entries are cleared — explicit ClearStuckRects calls (from ATG/
+        // CombatGoal plan transitions) deliberately reset all dynamic
+        // state, including any propagated rects whose TTL hadn't yet
+        // elapsed. The next propagation cycle will re-apply them if the
+        // peer is still publishing.
+        _stuckRectExpiryUtc.Clear();
         _areaBlacklist = _staticAreaBlacklist;
         logger.LogInformation($"[NAV] ClearStuckRects: {count} dynamic stuck rect(s) cleared — restoring static blacklist only.");
+
+        // Fix AV: notify subscribers (intended: leader-side propagation
+        // service) so the published snapshot drains on the next poll. The
+        // assist's already-propagated rects then expire naturally via TTL.
+        // Fires only on actual clear (post early-return when list was
+        // empty) — symmetric with OnStuckRectAdded which fires only on
+        // successful add.
+        OnStuckRectsCleared?.Invoke();
+    }
+
+    /// <summary>
+    /// Adds a stuck rect that originated on a peer bot (typically the
+    /// leader's Navigation) and was propagated to this Navigation instance
+    /// over IPC. Designed to be called from a subscriber that polls the
+    /// leader's broadcast (see <c>GoapAgent.GoapThread</c>'s AssistFocus
+    /// branch) — see Fix AV commentary at the
+    /// <see cref="_stuckRectExpiryUtc"/> field and
+    /// <see cref="OnStuckRectAdded"/> event.
+    ///
+    /// <para>
+    /// Unlike <see cref="AddStuckRect(Vector3, Vector3)"/>, propagated
+    /// rects have a finite lifetime (<see cref="PropagatedStuckRectTtlSec"/>)
+    /// and are pruned by <see cref="PruneExpiredStuckRects"/> on each
+    /// Update tick. They do NOT fire <see cref="OnStuckRectAdded"/> —
+    /// otherwise a propagation loop would form (assist would publish a
+    /// rect it just received).
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Fix AW (Guards 1+2):</b> Dedup/append/refresh logic lives in
+    /// <see cref="TryAddStuckRectInternal"/>, shared with
+    /// <see cref="AddStuckRect"/>. Three skip conditions exist on this
+    /// path:
+    /// <list type="bullet">
+    /// <item><description><b>Guard 1</b>: bot currently inside the proposed rect — refuse
+    ///   to add (avoids start-in-blacklist failures on the next path
+    ///   request). Retry-friendly: leader keeps republishing each poll.</description></item>
+    /// <item><description><b>Dedup vs. propagated</b>: refresh existing TTL.</description></item>
+    /// <item><description><b>Dedup vs. local</b>: silent no-op — local rect owns the
+    ///   terrain and outlives propagation.</description></item>
+    /// </list>
+    /// </para>
+    ///
+    /// <para>
+    /// Returns <c>true</c> only if a new rect was appended. Both Guard 1
+    /// rejection and dedup-skip return <c>false</c> — the caller can
+    /// treat any <c>false</c> as "no new state change needed."
+    /// </para>
+    /// </summary>
+    public bool AddPropagatedStuckRect(Vector3 center, float halfSize = StuckRectHalfSizeY)
+    {
+        DateTime newExpiry = DateTime.UtcNow.AddSeconds(PropagatedStuckRectTtlSec);
+
+        // Fix AW: dedup, Guard 1 (skip-if-inside), and TTL refresh on
+        // existing propagated rect all live in the shared helper. Returns
+        // true only if a new rect was actually appended — Guard 1 rejection
+        // and dedup-skip both return false.
+        bool added = TryAddStuckRectInternal(center, halfSize, newExpiry);
+
+        if (added)
+        {
+            logger.LogInformation(
+                $"[NAV] Propagated stuck rect added: center={center} ±{halfSize}y, " +
+                $"expires in {PropagatedStuckRectTtlSec:0}s at {newExpiry:HH:mm:ss.fff} " +
+                $"(total={_stuckWorldRects.Count})");
+        }
+
+        return added;
+    }
+
+    /// <summary>
+    /// Removes propagated stuck rects whose TTL has elapsed. Locally-
+    /// discovered rects (expiry == DateTime.MaxValue) are never pruned by
+    /// this method — they are cleared explicitly via
+    /// <see cref="ClearStuckRects"/> on plan transitions.
+    ///
+    /// <para>
+    /// Called once per <see cref="Update"/> tick. Cheap because
+    /// <see cref="_stuckWorldRects"/> is typically 0–3 entries. Walks
+    /// the list in reverse to allow safe RemoveAt during iteration.
+    /// </para>
+    /// </summary>
+    private void PruneExpiredStuckRects()
+    {
+        if (_stuckWorldRects.Count == 0)
+            return;
+
+        DateTime now = DateTime.UtcNow;
+        int removed = 0;
+        for (int i = _stuckWorldRects.Count - 1; i >= 0; i--)
+        {
+            if (_stuckRectExpiryUtc[i] < now)
+            {
+                _stuckWorldRects.RemoveAt(i);
+                _stuckRectExpiryUtc.RemoveAt(i);
+                removed++;
+            }
+        }
+
+        if (removed > 0)
+        {
+            _areaBlacklist = _stuckWorldRects.Count > 0
+                ? new CompositeAreaBlacklist(_staticAreaBlacklist, new RectBlacklist(_stuckWorldRects))
+                : _staticAreaBlacklist;
+            logger.LogInformation(
+                $"[NAV] PruneExpiredStuckRects: removed {removed} expired propagated rect(s) " +
+                $"(remaining={_stuckWorldRects.Count})");
+        }
     }
 
     private bool IsBlacklistedPoint(Vector3 worldPoint)

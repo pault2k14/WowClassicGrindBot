@@ -559,6 +559,40 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const int StaleEmptyResultsBeforeOnPathFailed = 3;
 
     // -----------------------------------------------------------------------
+    // Fix AX (Route B Part 1) — direct-route attempts per NavigatingToLeader
+    // cycle.
+    //
+    // When _activeStuckReported is true and a stale-empty matches the active
+    // request, Navigation_OnStaleEmptyPathMatchesActive (Fix AU branch)
+    // requests Navigation to push a direct one-hop route to the unreachable
+    // target instead of escalating to CantFollow immediately. This counter
+    // bounds the number of times we'll attempt direct-route within a single
+    // NavigatingToLeader cycle — after the limit is hit, the Fix AU branch
+    // falls through to EnterCantFollow as the original (pre-Fix-AX) behavior
+    // would have done.
+    //
+    // Rationale for MAX=1: a single attempt either succeeds (bot walks, becomes
+    // un-stuck, _activeStuckReported clears, counter resets on next nav cycle)
+    // or fails (bot is physically wedged in geometry, direct-route push didn't
+    // help). The watchdog cascade (chase progress, no-progress) will fire
+    // OnPathFailed within ~15s if the bot doesn't move on the direct route,
+    // routing through Navigation_OnPathFailed for rewind/CantFollow. Allowing
+    // a second attempt would only repeat the same push at the same position
+    // with the same outcome — better to give up and let CantFollow's escape
+    // sequence (Projection10/20/30) try a different recovery.
+    //
+    // Worst-case delay vs pre-Fix-AX behavior: ~10s (the typical interval
+    // between stale-empty arrivals in log-81 — PPather queue cycle time).
+    // First stale-empty triggers direct-route; if direct-route doesn't help,
+    // next stale-empty (~10s later) sees attempts >= max and CantFollow fires.
+    // Net effect:
+    //   - Success case: ~3s recovery vs ~30s CantFollow + escape (huge win).
+    //   - Failure case: ~10s CantFollow vs ~3s (small regression, bounded).
+    // -----------------------------------------------------------------------
+    private int _directRouteAttemptsInCycle;
+    private const int MaxDirectRouteAttemptsPerCycle = 1;
+
+    // -----------------------------------------------------------------------
     // Active-navigation stuck reporting
     //
     // Detects a stationary assist while in NavigatingToLeader and reports
@@ -747,6 +781,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _staleEmptySameCount = 0;
         _staleEmptyLastStartW = default;
         _staleEmptyLastEndW = default;
+
+        // Fix AX: reset direct-route attempt counter so a previous follow
+        // session's exhausted attempts don't immediately escalate to
+        // CantFollow on the new session's first stuck event.
+        _directRouteAttemptsInCycle = 0;
 
         // Always reset rendezvous on goal entry — the assist must re-confirm
         // proximity to the leader before waypoint-sharing mode activates.
@@ -3562,6 +3601,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _lastNavigatedToLeaderWorldPos = default;
         _activeStuckSinceUtc = DateTime.MinValue;
         _activeStuckReported = false;
+
+        // Fix AX: direct-route attempts are scoped per NavigatingToLeader
+        // cycle. Reset here so each new cycle gets a fresh attempt budget
+        // — without this, a long-running follow session could exhaust the
+        // counter and then never recover even if the failure mode is
+        // genuinely intermittent (different (start, end) on each stuck).
+        _directRouteAttemptsInCycle = 0;
     }
 
     // -----------------------------------------------------------------------
@@ -4429,6 +4475,206 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"{StaleEmptyResultsBeforeOnPathFailed} for active (start, end). " +
             $"start={snap.ResultStartW} end={snap.ResultEndW}");
 
+        // ── Fix AU (log-81 16:00:19:837 → 16:00:47:157) ──
+        //
+        // COMPOUND STUCK + STALE-EMPTY ESCALATION
+        //
+        // When TickActiveStuckDetection has already set _activeStuckReported
+        // = true (bot moved < ActiveStuckMinMovementWorld in
+        // ActiveStuckThresholdSec — confirmed real-world stationary) AND
+        // Fix AB-1 has just observed a stale empty-path matching the
+        // currently-active in-flight request's (start, end) within 1y
+        // (pather-side evidence that the bot's current position is not
+        // routable to its current target), the bot will not recover by
+        // waiting. Escalate directly to CantFollow without the 3-count
+        // gate or the 30 s TickNavActiveTimeout wall.
+        //
+        // Evidence (log-81 mob 2 post-combat sequence):
+        //   16:00:14:939  leader Consume Corpse (combat ends).
+        //   16:00:15:054  assist plan: Combat → Follow Focus.
+        //   16:00:15:085  Path 95 enqueued from <-750.13, -4275.64>
+        //                 to <-756.81, -4277.68>. Returns pathLen=53
+        //                 (long curved route). Bot navigates north.
+        //   16:00:16:104  Path 96 from <-751.48, -4271.68>.
+        //                 Returns pathLen=7. Fix AA drops 1 rear node.
+        //   16:00:17:305  Path 97 enqueued from <-755.22, -4272.88>
+        //                 to <-761.46, -4275.77> (6.88 y SW). PPather
+        //                 will throw NullReferenceException on this
+        //                 request (and every subsequent request from
+        //                 the bot's eventual stuck position).
+        //   16:00:19:837  FFG: "Stuck while navigating — moved only
+        //                 0.00 y in 2.5 s at <-755.4346, -4272.968, 0>"
+        //                 — TickActiveStuckDetection fires;
+        //                 _activeStuckReported = true; status = Stuck.
+        //   16:00:20:317  First Path-wait timeout (3 s elapsed since
+        //                 Path 97 enqueue with no callback). Re-enqueue
+        //                 reqId 98 with identical (start, end).
+        //   16:00:23:327, 16:00:26:335, 16:00:29:346, 16:00:32:361,
+        //                 16:00:35:370, 16:00:38:381, 16:00:41:391,
+        //                 16:00:44:399  Same 3 s re-enqueue cycle
+        //                 repeats. Bot has not moved (still
+        //                 <-755.43, -4272.97>); _activeStuckReported
+        //                 stays true (no 3 y resume movement, not in
+        //                 combat, NavState unchanged, no ResetNavState).
+        //   16:00:27:306  PPatherService logs
+        //                 "Object reference not set to an instance of
+        //                 an object." PathFinderThread "processes" the
+        //                 oldest queued request (reqId 97 from 10 s
+        //                 earlier) and emits a stale empty result.
+        //   16:00:27:323  Navigation: "Ignoring stale path result
+        //                 reqId=97 waitingReqId=100 activeReqId=100"
+        //                 — but Fix AB-1's pre-check matches the
+        //                 stale empty's (start, end) against the
+        //                 active (start, end) within 1 y and fires
+        //                 OnStaleEmptyPathMatchesActive.
+        //   16:00:27:324  Fix AB-1: "stale no-path #1/3 for active
+        //                 (start, end). start=<-755.22, -4272.88>
+        //                 end=<-761.46, -4275.77>".
+        //   16:00:37:317  Fix AB-1: "stale no-path #2/3" — second
+        //                 stale empty for the same (start, end), 10 s
+        //                 later (one full PPather queue cycle).
+        //   16:00:47:157  TickNavActiveTimeout fires (30.0 s without
+        //                 NavigationProgressResetYards of movement);
+        //                 escalates to CantFollow. Fix AB-1 would
+        //                 have hit #3/3 at approximately the same
+        //                 instant — the 3-count gate provided no
+        //                 benefit over the timeout.
+        //
+        // Without Fix AU, the bot sat at <-755.43, -4272.97> for
+        // 27.3 seconds after FFG reported Stuck, doing nothing
+        // productive — every 3 s re-enqueue produced the same
+        // un-routable (start, end), every 10 s PPather call threw
+        // NRE, and the chase watchdog (TickChaseWatchdog, 15 s on
+        // Navigation.ChaseSinceBestSec) was silent because chase
+        // tracking only updates when a route is active, and the
+        // bot had no route the entire time.
+        //
+        // With Fix AU, escalation fires at 16:00:27:324 — the
+        // FIRST Fix AB-1 hit observed while _activeStuckReported
+        // is true. CantFollow starts ~19.8 s earlier; the leader's
+        // AssistRequestReturn rising edge fires ~20 s earlier;
+        // rendezvous shifts ~20 s earlier. From a user-visible
+        // standpoint, the "long stuck" window collapses from
+        // 32 s (Stuck flag → escape exit → still walking back)
+        // down to ~12 s.
+        //
+        // Why count == 1 is safe (no false positives):
+        //   - _activeStuckReported requires 2.5 s of < 1 y movement
+        //     before it sets true. That is real-world position
+        //     evidence — not a heuristic, the bot has actually
+        //     been stationary.
+        //   - Fix AB-1 firing requires the stale empty-path
+        //     result's (start, end) to match the CURRENTLY ACTIVE
+        //     in-flight request's (start, end) within 1 y.
+        //     Navigation pre-computes the match and only raises
+        //     the event when true. That is pather-side evidence
+        //     the bot's current position cannot be routed to its
+        //     current target.
+        //   - Both signals are independently strong. Together,
+        //     they prove the bot will not recover by waiting:
+        //     waiting requires either the bot moving (it isn't)
+        //     or the pather succeeding for the same (start, end)
+        //     it just failed on (it won't, the bot is stationary
+        //     so the failing input is unchanged).
+        //   - The existing 3-count gate (StaleEmptyResults-
+        //     BeforeOnPathFailed = 3) is itself a stationarity
+        //     proxy — requiring "same (start, end) within 1 y
+        //     for 3 consecutive failures" implies the bot hasn't
+        //     moved much. With _activeStuckReported already
+        //     proving stationarity directly, count = 1 carries
+        //     the same evidentiary weight as count = 3 without
+        //     the Stuck flag.
+        //
+        // Why this is additive (doesn't break existing logic):
+        //   - When the bot is moving (Stuck flag not set) and
+        //     the pather keeps failing for near-stationary
+        //     positions, the existing 3-count path still fires:
+        //     snap.Escalate → Navigation.OnPathFailed →
+        //     Navigation_OnPathFailed rewinds to LastSafeAnchor
+        //     on first failure, EnterCantFollow on second. This
+        //     branch is unchanged.
+        //   - When the bot is Stuck and Fix AB-1 fires, Fix AU
+        //     short-circuits to CantFollow. The OnPathFailed
+        //     rewind path would not help here anyway —
+        //     LastSafeAnchor is typically <10 y from the stuck
+        //     position, and PPather's NRE is local to the area
+        //     (in log-81, paths from <-755.43, -4272.97> failed
+        //     for every target; paths from <-740.10, -4259.93>
+        //     after escape succeeded in 15 ms). Walking the bot
+        //     a few yards backward then forward again would
+        //     just re-enter the same NRE region.
+        //
+        // Counter reset matches the existing 3-count escalation
+        // path — both clear _staleEmptySameCount + last-start/end
+        // so the next NavigatingToLeader cycle (after CantFollow
+        // exit via Fix AO / leader-arrived / segment-clear /
+        // 120 s timeout) starts fresh.
+        //
+        // Note: OnEnter (FFG) and Update transitions to
+        // NavigatingToLeader do not currently reset the Fix AB-1
+        // counter explicitly; OnEnter clears it via lines
+        // 745-749, ResetNavState does not. Since Fix AU resets
+        // here on fire and the existing 3-count branch resets
+        // on fire, the only way the counter persists across a
+        // NavigatingToLeader cycle is if neither branch fires
+        // during the cycle — which means there were < 3 stale
+        // empties and Stuck was never reported, i.e. the bot
+        // was navigating successfully. The counter being stale
+        // in that case is harmless because the same-as-last
+        // check at the top of this function will reset it as
+        // soon as a different (start, end) appears.
+        if (_activeStuckReported)
+        {
+            // Fix AX (Route B Part 1): try direct-route recovery before
+            // escalating to CantFollow. The first attempt per cycle pushes
+            // a direct one-hop route via Navigation.BuildDirectRouteFallback;
+            // if the bot can physically walk, this typically recovers within
+            // a few seconds. If it can't (subsequent stale-empties arrive
+            // with bot still stationary), the counter exhausts and we fall
+            // through to the original Fix AU CantFollow path.
+            _directRouteAttemptsInCycle++;
+
+            if (_directRouteAttemptsInCycle <= MaxDirectRouteAttemptsPerCycle)
+            {
+                logger.LogWarning(
+                    $"[FFG] Fix AX: assist stationary (_activeStuckReported=true) " +
+                    $"AND stale-empty matches active. Requesting direct-route " +
+                    $"recovery (attempt #{_directRouteAttemptsInCycle}/" +
+                    $"{MaxDirectRouteAttemptsPerCycle}). Setting " +
+                    $"snap.TriggerDirectRoute=true — Navigation will push a " +
+                    $"one-hop route to the unreachable target via " +
+                    $"BuildDirectRouteFallback. If the bot doesn't move, " +
+                    $"chase/no-progress watchdogs will fire OnPathFailed within " +
+                    $"~15s. start={snap.ResultStartW} end={snap.ResultEndW}");
+                _staleEmptySameCount = 0;
+                _staleEmptyLastStartW = default;
+                _staleEmptyLastEndW = default;
+                snap.TriggerDirectRoute = true;
+                return;
+            }
+
+            // Counter exhausted — fall back to the original Fix AU behavior
+            // (CantFollow at first stale-empty when stuck). Direct-route did
+            // not recover the bot; the position is unrecoverable by walking.
+            logger.LogError(
+                $"[FFG] Fix AU (after Fix AX exhausted): assist already in " +
+                $"active Stuck state AND pather has returned a stale empty-path " +
+                $"matching the active (start, end) within 1y. Direct-route " +
+                $"recovery was attempted {_directRouteAttemptsInCycle - 1} " +
+                $"time(s) earlier this cycle (max=" +
+                $"{MaxDirectRouteAttemptsPerCycle}) and did not recover. " +
+                $"Escalating directly to CantFollow at stale-empty count " +
+                $"#{_staleEmptySameCount} — skipping the 3-count gate " +
+                $"(StaleEmptyResultsBeforeOnPathFailed={StaleEmptyResultsBeforeOnPathFailed}) " +
+                $"AND the {NavigationActiveTimeoutSec:0}s TickNavActiveTimeout " +
+                $"wall. start={snap.ResultStartW} end={snap.ResultEndW}");
+            _staleEmptySameCount = 0;
+            _staleEmptyLastStartW = default;
+            _staleEmptyLastEndW = default;
+            EnterCantFollow();
+            return;
+        }
+
         if (_staleEmptySameCount >= StaleEmptyResultsBeforeOnPathFailed)
         {
             logger.LogError(
@@ -4499,6 +4745,67 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         const float DirectRouteMaxSafeYards = 5.0f;
         if (snap.DistYards > DirectRouteMaxSafeYards)
         {
+            // Fix AY (Route B Part 2): the original Fix AD veto exists to
+            // prevent the dangerous "walk-into-terrain" case (log-70b: bot
+            // walked from a navigable corridor into a navmesh dead zone
+            // when the pather failed twice at 8.16y). The veto is correct
+            // when the bot is still actively navigating — there's no reason
+            // to abandon careful pathing if the bot can keep trying.
+            //
+            // BUT when the bot is _activeStuckReported (TickActiveStuck-
+            // Detection has confirmed < 1y movement in 2.5s), the bot's
+            // current position is unrecoverable by waiting for the pather
+            // to succeed: the pather will keep failing for the same (start,
+            // end) until the bot moves, and the bot won't move without a
+            // route. In that case the trade-off inverts: walking blindly
+            // toward the target risks walking into terrain (bounded by the
+            // chase/no-progress watchdog cascade, ~15s), but doing nothing
+            // guarantees a 30s TickNavActiveTimeout → CantFollow cycle from
+            // a dead position where the escape sequence has fewer options.
+            //
+            // log-81 evidence (mob 2 post-combat): bot at <-755.43, -4272.97>,
+            // target <-761.46, -4275.77>, dist 6.65y. PPather threw NRE on
+            // every request. Bot was _activeStuckReported. The 6.65y > 5y
+            // case would have been vetoed by Fix AD — walking forward 6.65y
+            // would have exited the NRE-prone area (paths from <-740.10,
+            // -4259.93> after the eventual escape succeeded in 15ms),
+            // delivering ~20s of recovery savings vs the actual 32s stuck.
+            //
+            // Watchdog cascade as the safety net: if walking toward the
+            // target rams the bot into terrain (log-70b case), the chase
+            // and no-progress watchdogs fire OnPathFailed within ~15s,
+            // routing through Navigation_OnPathFailed → rewind to
+            // LastSafeAnchor or CantFollow. The original Fix AD path
+            // (veto → 1s cooldown → OnPathFailed → rewind/CantFollow)
+            // takes ~1-2s longer in the bot-moving case, but in the bot-
+            // stationary case the watchdog is the SAME safety mechanism
+            // that would catch a bad direct-route push.
+            //
+            // Why the bypass is safe (no regression on log-70b):
+            //   - log-70b had the bot in a NAVIGABLE corridor walking
+            //     normally; the navmesh briefly hiccupped and direct-route
+            //     would have pushed the bot off the corridor into the dead
+            //     zone. In that scenario, _activeStuckReported would be
+            //     FALSE because the bot had been moving fine — the Fix AY
+            //     bypass doesn't fire and the Fix AD veto still triggers.
+            //   - The bypass only activates when the bot has ALREADY been
+            //     stationary for 2.5s (the TickActiveStuckDetection
+            //     threshold), meaning we're in the "nothing else has
+            //     worked" regime where extra risk is justified by greater
+            //     potential upside.
+            if (_activeStuckReported)
+            {
+                logger.LogWarning(
+                    $"[FFG] Fix AY: bypassing Fix AD veto on direct-route push " +
+                    $"because bot is stationary (_activeStuckReported=true). " +
+                    $"count={snap.SameNoPathCount} dist={snap.DistYards:0.0}y " +
+                    $"> {DirectRouteMaxSafeYards:0.0}y. Walking from a dead " +
+                    $"position is preferable to waiting; chase/no-progress " +
+                    $"watchdogs will catch a bad direct-route push within ~15s. " +
+                    $"start={snap.StartW} end={snap.EndW}");
+                return; // no veto, allow Navigation's direct-route push
+            }
+
             logger.LogWarning(
                 $"[FFG] Fix AD: signalling Veto on direct-route push " +
                 $"(count={snap.SameNoPathCount} dist={snap.DistYards:0.0}y > " +

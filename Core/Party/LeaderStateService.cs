@@ -80,6 +80,14 @@ public sealed class LeaderStateService
 
             // Mob blacklist — cumulative for the session.
             BlacklistedMobGuids = leaderNavProvider.BlacklistedMobGuidsSnapshot,
+
+            // Fix AV (Route A): dynamic stuck-rect propagation. The
+            // assist applies each entry via Navigation.AddPropagatedStuckRect
+            // every poll cycle — duplicates are deduped on overlap and
+            // refresh a TTL so the rects stay alive on the assist as long
+            // as the leader keeps republishing them. Empty array when the
+            // leader has no current dynamic rects (between plan transitions).
+            StuckRects = leaderNavProvider.StuckRectsSnapshot,
         };
     }
 

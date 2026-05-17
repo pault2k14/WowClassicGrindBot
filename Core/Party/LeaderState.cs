@@ -76,6 +76,38 @@ public sealed class LeaderState
     public int[] BlacklistedMobGuids { get; set; } = System.Array.Empty<int>();
 
     // ------------------------------------------------------------------
+    // Fix AV (Route A) — Stuck-rect propagation from leader to assist.
+    //
+    // The leader's Navigation can add dynamic blacklist rects via its
+    // TryUnstuck path (ATG no-range-progress, CombatGoal stalls). These
+    // mark "bot got stuck here" terrain so the leader's pather routes
+    // around the area on future requests. Without propagation, the
+    // assist's Navigation has no equivalent knowledge — it computes
+    // paths through the same bad terrain and gets stuck there (see
+    // log-81 mob 2: leader added rect at <-751.02, -4282.16> at
+    // 15:59:55:232, assist followed into the same general area and
+    // spent 30 s post-combat unable to compute a path out).
+    //
+    // The leader publishes its full current set of dynamic rects each
+    // poll cycle. The assist applies them via
+    // Navigation.AddPropagatedStuckRect, which dedups on overlap and
+    // refreshes a TTL on re-application. Once the leader clears its
+    // own rects (ClearStuckRects on plan transitions), the published
+    // list empties and the assist's propagated rects expire naturally
+    // via the TTL — see PropagatedStuckRectTtlSec in Navigation.cs.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Snapshot of dynamic stuck rects the leader's Navigation has added
+    /// during this session via its TryUnstuck path. Each entry's
+    /// (CenterX, CenterY) is in world-space coordinates and HalfSize is
+    /// in world yards. Assist bots apply each entry via
+    /// <c>Navigation.AddPropagatedStuckRect</c> on every poll cycle —
+    /// duplicates are deduped on overlap and TTL-refreshed.
+    /// </summary>
+    public StuckRectInfo[] StuckRects { get; set; } = System.Array.Empty<StuckRectInfo>();
+
+    // ------------------------------------------------------------------
     // Convenience — not serialised, reconstructed on the consumer side.
     // ------------------------------------------------------------------
 
@@ -92,4 +124,30 @@ public sealed class LeaderState
     /// detect stale data (leader process crash / network loss).</summary>
     [JsonIgnore]
     public double AgeMs => (DateTime.UtcNow - Timestamp).TotalMilliseconds;
+}
+
+/// <summary>
+/// Fix AV (Route A): wire-format DTO for a single propagated stuck rect.
+/// Mirrors the geometry that the leader's <c>Navigation.AddStuckRect</c>
+/// would have produced locally — center (already forward-offset if the
+/// leader supplied a direction at add time) plus axis-aligned half-size.
+/// The assist reconstructs the rect via <c>Navigation.AddPropagatedStuckRect</c>.
+/// <para>
+/// Uses flat floats for the same reason the rest of <see cref="LeaderState"/>
+/// does — to keep JSON serialization free of any Vector3Converter dependency.
+/// Mutable properties (rather than a record) because <c>System.Text.Json</c>
+/// handles property setters most predictably across the build's net runtime.
+/// </para>
+/// </summary>
+public sealed class StuckRectInfo
+{
+    /// <summary>World-space X of the rect center.</summary>
+    public float CenterX { get; set; }
+
+    /// <summary>World-space Y of the rect center.</summary>
+    public float CenterY { get; set; }
+
+    /// <summary>Axis-aligned half-size in world yards. Matches
+    /// <c>Navigation.StuckRectHalfSizeY</c> at add time.</summary>
+    public float HalfSize { get; set; }
 }

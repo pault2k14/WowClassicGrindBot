@@ -237,6 +237,29 @@ public sealed partial class GoapAgent : IDisposable
         this.assistStatusProvider = assistStatusProvider;
         this.leaderNavProvider = leaderNavProvider;
 
+        // ── Fix AV (Route A): leader-side StuckRect propagation ──
+        //
+        // Subscribe to Navigation's stuck-rect lifecycle events and forward
+        // each change into LeaderNavigationProvider, which the HTTP layer
+        // serializes into LeaderState.StuckRects on the next poll so the
+        // assist can apply them via Navigation.AddPropagatedStuckRect.
+        //
+        // Gated on PartyLeader mode because:
+        //   - Only the leader publishes outbound state (the assist's
+        //     LeaderNavigationProvider instance exists but isn't read by
+        //     anyone — the HTTP server runs on the leader process).
+        //   - The assist's own rect additions (FFG.TickIdleStuckDetection
+        //     → TryUnstuck → AddStuckRect) should NOT propagate back; the
+        //     channel is strictly leader → assist in the current 2-bot
+        //     architecture.
+        //
+        // Unsubscribed in Dispose, matching the combatLog handler pair.
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            navigation.OnStuckRectAdded += OnNavigationStuckRectAdded;
+            navigation.OnStuckRectsCleared += OnNavigationStuckRectsCleared;
+        }
+
         combatLog.KillCredit += OnKillCredit;
         combatLog.PlayerDeath += PlayerDied;
 
@@ -279,6 +302,14 @@ public sealed partial class GoapAgent : IDisposable
 
         combatLog.KillCredit -= OnKillCredit;
         combatLog.PlayerDeath -= PlayerDied;
+
+        // Fix AV: mirror the constructor subscription. Mode-gated for the
+        // same reason — the assist instance never subscribed.
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            navigation.OnStuckRectAdded -= OnNavigationStuckRectAdded;
+            navigation.OnStuckRectsCleared -= OnNavigationStuckRectsCleared;
+        }
     }
 
     private void GoapThread()
@@ -467,6 +498,36 @@ public sealed partial class GoapAgent : IDisposable
                             HandleGoapEvent(new EvadeBlacklistEvent(guid));
                             assistStatusProvider.CantFollow = true;
                         }
+                    }
+                }
+
+                // ── Fix AV (Route A): apply propagated stuck rects ──
+                //
+                // The leader publishes its current set of dynamic stuck
+                // rects in LeaderState.StuckRects each poll cycle. We
+                // re-apply the full list every GoapThread iteration so
+                // the assist's Navigation tracks the leader's authoritative
+                // set with at most one poll-interval of latency.
+                //
+                // Navigation.AddPropagatedStuckRect deduplicates by
+                // spatial overlap and refreshes the per-rect TTL on
+                // re-application — so calling every iteration is
+                // safe-and-cheap (no-op for known rects, TTL bump for
+                // continuing rects, new addition for newly-published
+                // rects). When the leader's set goes empty (ATG/PTG/
+                // CombatGoal calls ClearStuckRects on plan transition,
+                // OnStuckRectsCleared fires, LeaderNavigationProvider's
+                // snapshot drains), this loop body is skipped on the
+                // Length==0 guard and the assist's already-applied
+                // rects age out via Navigation.PruneExpiredStuckRects
+                // (TTL = PropagatedStuckRectTtlSec, default 90 s).
+                if (leaderState != null && leaderState.StuckRects is { Length: > 0 })
+                {
+                    foreach (StuckRectInfo r in leaderState.StuckRects)
+                    {
+                        navigation.AddPropagatedStuckRect(
+                            new Vector3(r.CenterX, r.CenterY, 0f),
+                            r.HalfSize);
                     }
                 }
             }
@@ -1746,6 +1807,33 @@ public sealed partial class GoapAgent : IDisposable
     public void SendPartyNotInCombat()
     {
         BroadcastGoapEvent(GoapKey.partyincombat, false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix AV (Route A) — Navigation.OnStuckRect{Added,Cleared} handlers
+    //
+    // Both subscribed in the constructor (PartyLeader mode only) and
+    // unsubscribed in Dispose. The leader's Navigation drives these via
+    // its TryUnstuck path (AddStuckRect inside ApproachEscape) and via
+    // explicit ClearStuckRects calls from ATG/PTG/CombatGoal on plan
+    // transitions. The forwarded state ends up in
+    // LeaderNavigationProvider.StuckRectsSnapshot, which the HTTP server
+    // includes in the next LeaderState response so the assist can apply
+    // it via Navigation.AddPropagatedStuckRect.
+    //
+    // Handlers are intentionally minimal (single forwarding call) —
+    // dedup, TTL refresh, and snapshot rebuild all live in
+    // LeaderNavigationProvider.AddStuckRect / ClearStuckRects.
+    // -----------------------------------------------------------------------
+
+    private void OnNavigationStuckRectAdded(Vector3 center, float halfSize)
+    {
+        leaderNavProvider.AddStuckRect(center.X, center.Y, halfSize);
+    }
+
+    private void OnNavigationStuckRectsCleared()
+    {
+        leaderNavProvider.ClearStuckRects();
     }
 
     #region Logging
