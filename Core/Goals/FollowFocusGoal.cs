@@ -611,6 +611,45 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // become route-adjacent rather than off-route.
     private Vector3 _pendingAnchor = default;
 
+    // ── Route-walking migration: Turn 3.5 (Turn 3 → Turn 3.5 commit) ──
+    //
+    // _cachedLeaderRouteIdx + _cachedLeaderRouteIdxUtc cache the most
+    // recent route index we successfully matched to the leader's
+    // published TargetWaypoint. Used as a fallback in
+    // TryFindLeaderRouteIndex when the leader's HasTargetWaypoint is
+    // false (i.e., the leader has cleared its patrol target — observed
+    // during the approach phase when ATG takes over from FRG, and
+    // briefly post-combat before FRG re-publishes).
+    //
+    // Why this is necessary: log-86 analysis showed that Turn 3's
+    // CheckShouldDefer fired ZERO times across 57 approach events
+    // because the leader's HasTargetWaypoint went false at the exact
+    // moment HasApproachStart went true — a structural mutual
+    // exclusion in the leader's state machine. Without a cache,
+    // TryFindLeaderRouteIndex always fails during approach, defer
+    // never engages, and Turn 3 is dead code.
+    //
+    // Cache update policy:
+    //   - Refreshed (value + timestamp) on every successful match via
+    //     leader.HasTargetWaypoint + 1.0y tolerance.
+    //   - NOT updated when leader.HasTargetWaypoint=true but no match
+    //     within tolerance (rescue insertion, transient non-route
+    //     waypoint). Preserves the last KNOWN route index.
+    //
+    // Cache use policy:
+    //   - Used as fallback when (a) leader.HasTargetWaypoint=false, OR
+    //     (b) HasTargetWaypoint=true but no waypoint matched.
+    //   - TTL of CachedLeaderRouteIdxMaxAgeSec; treated as stale beyond
+    //     that to avoid using ancient indices after a long combat
+    //     break, rescue, etc.
+    //
+    // Lifecycle:
+    //   - Sentinel -1 = "no cached value yet."
+    //   - Reset to -1 on FFG OnEnter and OnExit (fresh session).
+    private int _cachedLeaderRouteIdx = -1;
+    private DateTime _cachedLeaderRouteIdxUtc = DateTime.MinValue;
+    private const double CachedLeaderRouteIdxMaxAgeSec = 30.0;
+
     // -----------------------------------------------------------------------
     // Navigation active-time timeout
     // -----------------------------------------------------------------------
@@ -893,6 +932,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // transition next time RouteWalk advances to a waypoint.
         _pendingAnchor = default;
 
+        // ── Route-walking migration: Turn 3.5 ──
+        // Clear cached leader route index — the next session may have
+        // a different starting state, and stale cache could mislead
+        // the very first defer attempt.
+        _cachedLeaderRouteIdx = -1;
+        _cachedLeaderRouteIdxUtc = DateTime.MinValue;
+
         // ── Architecture migration observability ──
         //
         // Emit a one-line configuration header at every FFG OnEnter so log
@@ -919,17 +965,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // missed a case, or the fix is catching a class of failure
         // wider than its original evidence suggested.
         logger.LogInformation(
-            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 3) " +
+            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 3.5) " +
             $"— route-walk is now the patrol default when LoadedRoute is " +
             $"populated AND the leader's published TargetWaypoint maps to a " +
-            $"route index. Anchor mode used for approach phase, BUT now " +
-            $"deferred via _pendingAnchor when route-walking with target " +
-            $"not yet reached (combat handoff: assist completes its route " +
-            $"leg, then transitions Route-walk → Anchor at the route " +
-            $"waypoint). PositionChase used for non-patrol leader states " +
-            $"(combat/loot/rest) AND as fallback when route lookup fails. " +
-            $"WaypointSharing is now dead code reachable only when " +
-            $"LoadedRoute is empty. Key thresholds: " +
+            $"route index OR a recent cached index is available. Anchor mode " +
+            $"used for approach phase, BUT now deferred via _pendingAnchor " +
+            $"when route-walking with target not yet reached (combat handoff: " +
+            $"assist completes its route leg, then transitions Route-walk → " +
+            $"Anchor at the route waypoint). PositionChase used for non-patrol " +
+            $"leader states (combat/loot/rest) AND as fallback when route " +
+            $"lookup fails. WaypointSharing is now dead code reachable only " +
+            $"when LoadedRoute is empty. Turn 3.5: leader route index cache " +
+            $"(30s TTL) unblocks CheckShouldDefer when HasTargetWaypoint goes " +
+            $"false during approach. Fix BB threshold raised 15y → 25y to " +
+            $"catch corridor catch-up scenarios where leader is further than " +
+            $"15y. Key thresholds: " +
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
             $"WaypointUpdateThresholdYards={WaypointUpdateThresholdYards:0.0}y, " +
@@ -1121,6 +1171,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // a different approach context (or none); stale pending would
         // confuse it.
         _pendingAnchor = default;
+
+        // ── Route-walking migration: Turn 3.5 ──
+        // Clear cached leader route index on exit. Symmetric with
+        // OnEnter; ensures no leak across FFG sessions.
+        _cachedLeaderRouteIdx = -1;
+        _cachedLeaderRouteIdxUtc = DateTime.MinValue;
 
         if (_navState == NavState.NavigatingToLeader)
         {
@@ -3196,7 +3252,35 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // not 20y away. AssistRequestReturn rescue (which fires from
         // the leader side at status=CantFollow) can resolve from the
         // close position much faster than the original 20y-away spot.
-        const float FixBBLeaderProximityYards = 15.0f;
+        // ── Turn 3.5 update (log-86 evidence) ──
+        // Raised FixBBLeaderProximityYards from 15.0f to 25.0f. The 15y
+        // value was too aggressive for corridor scenarios where the
+        // assist trails further behind the leader during catch-up:
+        //
+        // Log-86 trace (03:05:02-15): the assist was at <-521.60,
+        // -4429.37> with the leader 20.9y away ("segment to leader is
+        // now clear (20.9y, no BL rect blocks)"). Fix AB-2 fired with
+        // basis=away-from-leader, projecting the bot WEST while the
+        // leader was EAST. Cumulative AB-2 firings (23 in the session)
+        // walked the bot ~13y west of the corridor entrance, then
+        // rotated through ±120° projections, ending 18y NORTH of the
+        // corridor at <-521.60,-4429.37>. Stuck for 50s.
+        //
+        // BB was supposed to override this by flipping the projection
+        // TOWARD the leader, but BB only fired when leader was ≤ 15y.
+        // At 20.9y, BB stayed silent and AB-2's wrong-direction
+        // projection ran unimpeded.
+        //
+        // 25y covers all observed corridor-stuck scenarios (log-83,
+        // log-84, log-85, log-86 — leader was ≤ 25y in every case).
+        // Trade-off: BB may now flip in scenarios where the leader is
+        // farther away and the away-from-leader direction WAS correct
+        // (e.g., escaping a wide blacklist rect). But BB still
+        // requires _lastPathFailureWasRejection=true, which is
+        // specifically the corridor-style failure — not the
+        // blacklist-rect escape. The two conditions together remain
+        // a tight signature for the corridor failure mode.
+        const float FixBBLeaderProximityYards = 25.0f;
         if (usingLeaderDirection && _lastPathFailureWasRejection)
         {
             float distLeader = pos.WorldDistanceXYTo(leader!.WorldPos);
@@ -3274,33 +3358,96 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     //
     // O(LoadedRoute.Length) linear scan. With ~150 waypoints per route
     // and FFG ticking every ~250ms, this is negligible (sub-µs).
+    //
+    // ── Turn 3.5 update ──
+    // Now caches successful matches in _cachedLeaderRouteIdx +
+    // _cachedLeaderRouteIdxUtc. Falls back to the cached value when:
+    //   (a) leader.HasTargetWaypoint=false (observed when ATG takes
+    //       over from FRG — leader's patrol waypoint cleared while
+    //       HasApproachStart=true), OR
+    //   (b) HasTargetWaypoint=true but no match within 1.0y tolerance
+    //       (rescue insertion, blacklist detour, etc.).
+    //
+    // Cache TTL is CachedLeaderRouteIdxMaxAgeSec (30s); older values
+    // are treated as stale and rejected.
+    //
+    // Log-86 root cause: this function previously returned false on
+    // HasTargetWaypoint=false, which made CheckShouldDefer return
+    // false during every approach event (HasApproachStart and
+    // HasTargetWaypoint are mutually exclusive in the leader's
+    // state machine — see log-86 evidence "Leader resumed patrol/
+    // started approaching ... waypointPublished=False,
+    // approachStarted=True"). With the cache fallback, the previous
+    // route index is available when ApproachStart fires, so
+    // CheckShouldDefer can engage.
     private bool TryFindLeaderRouteIndex(LeaderState leader, out int leaderIdx)
     {
         leaderIdx = -1;
         Vector3[] route = navigation.LoadedRoute;
         if (route.Length == 0) return false;
-        if (!leader.HasTargetWaypoint) return false;
 
-        Vector3 leaderWp = new(leader.TargetWaypointWorldX, leader.TargetWaypointWorldY, 0f);
-        const float matchToleranceYards = 1.0f;
-
-        float bestDist = float.MaxValue;
-        int bestIdx = -1;
-        for (int i = 0; i < route.Length; i++)
+        // Primary path: leader has a published target waypoint we can match.
+        if (leader.HasTargetWaypoint)
         {
-            float d = route[i].WorldDistanceXYTo(leaderWp);
-            if (d < bestDist)
+            Vector3 leaderWp = new(leader.TargetWaypointWorldX, leader.TargetWaypointWorldY, 0f);
+            const float matchToleranceYards = 1.0f;
+
+            float bestDist = float.MaxValue;
+            int bestIdx = -1;
+            for (int i = 0; i < route.Length; i++)
             {
-                bestDist = d;
-                bestIdx = i;
+                float d = route[i].WorldDistanceXYTo(leaderWp);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    bestIdx = i;
+                }
             }
+
+            if (bestDist <= matchToleranceYards)
+            {
+                leaderIdx = bestIdx;
+                // Update cache. Log only on transition (new index value),
+                // not on every tick where the leader is still at the same
+                // waypoint — avoids per-tick spam.
+                if (_cachedLeaderRouteIdx != leaderIdx)
+                {
+                    int prevIdx = _cachedLeaderRouteIdx;
+                    _cachedLeaderRouteIdx = leaderIdx;
+                    _cachedLeaderRouteIdxUtc = DateTime.UtcNow;
+                    if (prevIdx < 0)
+                    {
+                        logger.LogInformation(
+                            $"[FFG] [ROUTE-WALK] Cache initialized: leaderIdx={leaderIdx} " +
+                            $"at {route[leaderIdx]}.");
+                    }
+                    // Quiet on update — happens often during patrol.
+                }
+                else
+                {
+                    // Same index — just refresh timestamp.
+                    _cachedLeaderRouteIdxUtc = DateTime.UtcNow;
+                }
+                return true;
+            }
+            // HasTargetWaypoint=true but no match within tolerance.
+            // Could be a rescue insertion or non-route waypoint. Fall
+            // through to cache fallback below — preserve last known
+            // route index rather than failing outright.
         }
 
-        if (bestDist <= matchToleranceYards)
+        // Fallback path: cached value, if still fresh.
+        if (_cachedLeaderRouteIdx >= 0 && _cachedLeaderRouteIdx < route.Length)
         {
-            leaderIdx = bestIdx;
-            return true;
+            double ageSec = (DateTime.UtcNow - _cachedLeaderRouteIdxUtc).TotalSeconds;
+            if (ageSec <= CachedLeaderRouteIdxMaxAgeSec)
+            {
+                leaderIdx = _cachedLeaderRouteIdx;
+                return true;
+            }
+            // Stale — let it expire silently. Caller treats as "no leader idx."
         }
+
         return false;
     }
 
