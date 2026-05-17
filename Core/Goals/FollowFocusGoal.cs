@@ -993,7 +993,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // missed a case, or the fix is catching a class of failure
         // wider than its original evidence suggested.
         logger.LogInformation(
-            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 3.5b) " +
+            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 3.5d) " +
             $"— route-walk is now the patrol default when LoadedRoute is " +
             $"populated AND the leader's published TargetWaypoint maps to a " +
             $"route index OR a recent cached index is available. Anchor mode " +
@@ -1005,13 +1005,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"lookup fails. WaypointSharing is now dead code reachable only " +
             $"when LoadedRoute is empty. Turn 3.5: leader route index cache " +
             $"(30s TTL) unblocks CheckShouldDefer when HasTargetWaypoint goes " +
-            $"false during approach. Fix BB threshold raised 15y → 25y to " +
-            $"catch corridor catch-up scenarios. Turn 3.5b: parked-RouteWalk " +
-            $"co-located targets now skip the position-chase fallback (which " +
-            $"caused SetWaypoint loop guard → CantFollow → AB-2 away-from-" +
-            $"leader projections in log-87). Cache-fallback transition logs " +
-            $"added for diagnostic visibility during rescue events. Key " +
-            $"thresholds: " +
+            $"false during approach. Fix BB threshold raised 15y → 25y. " +
+            $"Turn 3.5b: parked-RouteWalk co-located targets skip position-" +
+            $"chase fallback (eliminated SetWaypoint loop guard escalations). " +
+            $"Turn 3.5c (Fix BD): AB-2 projection basis prefers nearest " +
+            $"LoadedRoute waypoint over away-from-leader (route waypoints are " +
+            $"pre-validated terrain). Turn 3.5d (Fix BC): Fix AA's rear-node " +
+            $"drop gated by bot's facing — only drops snap-back artifacts " +
+            $"when facing is forward-aligned with path direction; preserves " +
+            $"legitimate turnaround arcs when bot is about to reverse direction. " +
+            $"Key thresholds: " +
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
             $"WaypointUpdateThresholdYards={WaypointUpdateThresholdYards:0.0}y, " +
@@ -1019,7 +1022,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"ChaseWatchdogCantFollowSec={ChaseWatchdogCantFollowSec:0.0}s, " +
             $"AnchorLocalTtlMs={AnchorLocalTtlMs:0}ms. " +
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
-            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB. " +
+            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -3166,39 +3169,140 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // progress and EscalateEscapePhase fires normally. Behaviour is
         // strictly improved over the pre-fix collapse: we get up to 3
         // directional attempts where previously we got 0.
+        // ── Turn 3.5c / Fix BD (log-88 evidence) ──
+        // PREFER ROUTE WAYPOINT AS PROJECTION BASIS
+        //
+        // The original AB-2 basis was "away-from-leader" with the rationale
+        // that the bot's arrival path is the safest reverse direction. That
+        // assumption only holds when the arrival path itself was navmesh-
+        // valid. In log-88's hill incident, the bot's arrival was a chain
+        // of body-chase + previous AB-2 escapes through terrain whose
+        // navmesh-collision agreement was poor. AB-2 then projected 10y
+        // further away-from-leader, walking the bot deeper into the same
+        // terrain class. Result: bot drifted UP a hill, ended completely
+        // stuck at the hilltop where the WoW client's character collision
+        // blocked all lateral movement; leader rescue was required.
+        //
+        // The LoadedRoute, by contrast, contains pre-validated terrain
+        // — the route author walked it during creation, every waypoint
+        // is by construction physically traversable, every leg between
+        // adjacent waypoints is by construction walkable. Projecting
+        // toward the nearest route waypoint heads the bot toward
+        // known-good ground regardless of what terrain class the bot
+        // is currently standing on.
+        //
+        // The ±120° rotations on subsequent escalation phases (20y, 30y)
+        // still apply, but rotate around the toward-route axis rather
+        // than the away-from-leader axis. If the direct route approach
+        // is blocked by an obstacle, the ±120° sweep still gives three
+        // angles to try.
+        //
+        // Fallback: if LoadedRoute is empty (no patrol route loaded) OR
+        // the nearest route waypoint is co-located with the bot (within
+        // 1.0y), keep the existing away-from-leader / reversed-facing
+        // logic.
+        //
+        // Interaction with Fix BB: BB flips the direction TOWARD the
+        // leader when (a) we were using the leader-direction basis AND
+        // (b) CantFollow was caused by path-rejection AND (c) leader is
+        // ≤ 25y. With Fix BD, the leader-direction branch fires only
+        // when route is unavailable. So BB still applies its flip there.
+        // When route IS available, BD's toward-route direction is
+        // already pointed at known-good ground; BB's flip is unnecessary
+        // (and is skipped because usingLeaderDirection=false).
+        //
+        // Naming note: this fix retains the AB-2 log message (the
+        // projection geometry itself is unchanged — same 10/20/30y
+        // phases, same ±120° rotation), but adds a new basis label
+        // "toward-route" to the existing log line. The fix-fire
+        // identifier BD logs separately when the route direction is
+        // chosen, so we can track its rate of engagement.
+        float fdx = 0f;
+        float fdy = 0f;
+        bool usingLeaderDirection = false;
+        bool usingRouteDirection = false;
+
+        // Hoisted so Fix BB (below, ~line 3442) can reference it. When BD's
+        // route direction is in use, usingLeaderDirection stays false and BB
+        // won't fire — the leader variable is unused in that path.
         LeaderState? leader = leaderConnection.LastLeaderState;
-        bool leaderFresh = leader != null &&
-                           leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs;
 
-        float fdx, fdy;
-        bool usingLeaderDirection;
-
-        if (leaderFresh)
+        Vector3[] loadedRoute = navigation.LoadedRoute;
+        if (loadedRoute.Length > 0)
         {
-            fdx = pos.X - leader!.WorldPos.X;
-            fdy = pos.Y - leader.WorldPos.Y;
-            float lenSq = fdx * fdx + fdy * fdy;
-            if (lenSq < 0.001f)
+            float bestDist = float.MaxValue;
+            int bestIdx = -1;
+            for (int i = 0; i < loadedRoute.Length; i++)
+            {
+                float d = pos.WorldDistanceXYTo(loadedRoute[i]);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    bestIdx = i;
+                }
+            }
+
+            // Only use the route direction if the nearest waypoint is more
+            // than 1y away. Co-located waypoint would produce a near-zero
+            // direction vector that degenerates the projection.
+            if (bestIdx >= 0 && bestDist >= 1.0f)
+            {
+                Vector3 wp = loadedRoute[bestIdx];
+                float dxw = wp.X - pos.X;
+                float dyw = wp.Y - pos.Y;
+                float lenSqW = dxw * dxw + dyw * dyw;
+                if (lenSqW > 0.001f)
+                {
+                    float lenW = MathF.Sqrt(lenSqW);
+                    fdx = dxw / lenW;
+                    fdy = dyw / lenW;
+                    usingRouteDirection = true;
+                    logger.LogInformation(
+                        $"[FFG] [FIX-FIRE] BD: AB-2 projection basis = toward " +
+                        $"nearest LoadedRoute waypoint idx={bestIdx} at {wp} " +
+                        $"({bestDist:0.0}y away). Route waypoints are pre-validated " +
+                        $"terrain — heading toward route guarantees the projection " +
+                        $"target sits on traversable ground, even if the bot's " +
+                        $"current position is on terrain where navmesh and " +
+                        $"character collision disagree. Original away-from-leader " +
+                        $"basis suppressed for this CantFollow cycle.");
+                }
+            }
+        }
+
+        // Fallback: route unavailable or co-located. Use existing logic.
+        if (!usingRouteDirection)
+        {
+            bool leaderFresh = leader != null &&
+                               leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs;
+
+            if (leaderFresh)
+            {
+                fdx = pos.X - leader!.WorldPos.X;
+                fdy = pos.Y - leader.WorldPos.Y;
+                float lenSq = fdx * fdx + fdy * fdy;
+                if (lenSq < 0.001f)
+                {
+                    float facing = playerReader.Direction;
+                    fdx = -MathF.Cos(facing);
+                    fdy = -MathF.Sin(facing);
+                    usingLeaderDirection = false;
+                }
+                else
+                {
+                    float len = MathF.Sqrt(lenSq);
+                    fdx /= len;
+                    fdy /= len;
+                    usingLeaderDirection = true;
+                }
+            }
+            else
             {
                 float facing = playerReader.Direction;
                 fdx = -MathF.Cos(facing);
                 fdy = -MathF.Sin(facing);
                 usingLeaderDirection = false;
             }
-            else
-            {
-                float len = MathF.Sqrt(lenSq);
-                fdx /= len;
-                fdy /= len;
-                usingLeaderDirection = true;
-            }
-        }
-        else
-        {
-            float facing = playerReader.Direction;
-            fdx = -MathF.Cos(facing);
-            fdy = -MathF.Sin(facing);
-            usingLeaderDirection = false;
         }
 
         // ── Fix BB (log-83 20:17:59:688 → 20:18:05:005) ──
@@ -3392,7 +3496,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         logger.LogInformation(
             $"[FFG] [FIX-FIRE] AB-2: no BL rect contains assist — directional fallback projection " +
             $"{yards:0}y (offset={angleOffset * 180f / MathF.PI:+0.0;-0.0;0}°, " +
-            $"basis={(usingLeaderDirection ? "away-from-leader" : "reversed-facing")}) → " +
+            $"basis={(usingRouteDirection ? "toward-route" : usingLeaderDirection ? "away-from-leader" : "reversed-facing")}) → " +
             $"{fallbackTarget} (pos={pos}).");
 
         return fallbackTarget;

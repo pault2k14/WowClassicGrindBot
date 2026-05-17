@@ -4108,6 +4108,94 @@ public sealed partial class Navigation : IDisposable
             0f);
         float forwardLenSq = forward.X * forward.X + forward.Y * forward.Y;
 
+        // ── Turn 3.5d / Fix BC (log-88 evidence) ──
+        // FACING-AWARE GATE ON FIX AA's REAR-NODE DROP
+        //
+        // Fix AA above drops path nodes within 3y of start that are in the
+        // rear half-plane (dot ≤ 0 vs path forward). This was correct for
+        // log-67b's snap-back scenario: the bot was moving forward, the
+        // pather snapped the start position to a polygon center 1-2y
+        // behind, creating a spurious rear node that would have caused a
+        // useless 180° U-turn.
+        //
+        // It is WRONG when the bot is in a terrain pocket and needs to
+        // back out to reach a target on the other side. The pather
+        // LEGITIMATELY returns rear-pointing first nodes — they're the
+        // turnaround arc the bot must follow to clear an obstacle.
+        // AA's dot test cannot distinguish "spurious snap-back artifact"
+        // from "legitimate exit-the-pocket detour."
+        //
+        // log-88 evidence at 05:06:43:045:
+        //   Bot at <-466.84, -4372.64>, just finished moving NW under
+        //   AB-2 Projection10 chase. Facing roughly NW.
+        //   New target after re-plan: <-462.11, -4377.96> (SE — back
+        //   toward leader). Path forward = SE.
+        //   Pather returned 8 nodes. First 2 nodes were NE of bot
+        //   (1.04y N and 2.56y NE) — the turnaround arc to swing the
+        //   bot from facing-NW to heading-SE around an obstacle.
+        //   AA dropped both as "rear-pointing." Bot turned to face the
+        //   remaining first node (now SE of bot, past where the dropped
+        //   nodes would have routed). Bot held UpArrow and ran SE
+        //   directly into the obstacle the dropped nodes were
+        //   supposed to route around. Bot drifted UP the hill via
+        //   subsequent AB-2 escapes and ended completely stuck at the
+        //   hilltop; leader rescue required.
+        //
+        // AA fired on ~23% of all path computations in log-88, and
+        // disproportionately on catch-up paths (where the bot needs
+        // to navigate around obstacles back to the leader). This is
+        // a high-frequency, silent path corruption — the symptom is
+        // "bot runs into terrain" exactly as the operator reported.
+        //
+        // Discriminator: the bot's CURRENT FACING direction.
+        //   - Facing roughly aligned with path forward (dot > 0):
+        //     the bot is continuing in its current direction. The
+        //     pather's rear-pointing first node is a snap-back
+        //     artifact. Apply AA (original behavior — drop the
+        //     spurious node).
+        //   - Facing roughly opposite path forward (dot ≤ 0):
+        //     the bot is about to REVERSE direction. The pather's
+        //     rear-pointing first nodes are the legitimate
+        //     turnaround maneuver. SKIP AA — preserve all nodes.
+        //
+        // Threshold of 0 (facing within 90° cone of forward triggers
+        // drop) mirrors AA's own dot ≤ 0 cutoff. Edge cases at the
+        // ±90° boundary fall on the "preserve nodes" side, which is
+        // the safer choice — preserving an unneeded node costs at
+        // most one extra waypoint pop; dropping a needed node costs
+        // navigation failure.
+        //
+        // Log-67b's original snap-back: bot was walking forward (say
+        // toward route waypoint), facing aligned with path forward,
+        // pather added snap-back behind. Dot > 0 — AA applies, fix
+        // preserved.
+        //
+        // The check is per-path (computed once, applied to all nodes
+        // of this path), so no per-node overhead.
+        bool applyRearDrop = true;
+        if (forwardLenSq > 0.0001f)
+        {
+            float facing = playerReader.Direction;
+            float facingX = MathF.Cos(facing);
+            float facingY = MathF.Sin(facing);
+            float invForwardLen = 1f / MathF.Sqrt(forwardLenSq);
+            float facingVsForward = (facingX * forward.X + facingY * forward.Y) * invForwardLen;
+            if (facingVsForward <= 0f)
+            {
+                applyRearDrop = false;
+                logger.LogInformation(
+                    $"[NAV] [FIX-FIRE] BC: bot facing ({facing:0.00}rad) is in the " +
+                    $"rear half-plane of path forward direction " +
+                    $"(facing·forward = {facingVsForward:0.00}). " +
+                    $"Bot is about to reverse direction; rear-pointing path nodes " +
+                    $"are the legitimate turnaround arc, NOT snap-back artifacts. " +
+                    $"Skipping Fix AA's rear-node drop for this path — all nodes " +
+                    $"preserved. Without this gate, AA would drop the turnaround " +
+                    $"nodes and the bot would walk straight forward into the " +
+                    $"obstacle the pather was routing around (log-88 hill incident).");
+            }
+        }
+
         routeToNextWaypoint.Clear();
 
         Vector3 start2D = Nav2D(result.StartW);
@@ -4119,8 +4207,8 @@ public sealed partial class Navigation : IDisposable
             if (p.WorldDistanceXYTo(start2D) < MIN_FIRST_STEP_DIST)
                 continue;
 
-            // Fix AA: rear-half-plane filter.
-            if (forwardLenSq > 0.0001f)
+            // Fix AA: rear-half-plane filter (gated by Fix BC).
+            if (applyRearDrop && forwardLenSq > 0.0001f)
             {
                 float toNodeX = p.X - start2D.X;
                 float toNodeY = p.Y - start2D.Y;
