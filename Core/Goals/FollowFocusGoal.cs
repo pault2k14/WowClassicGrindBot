@@ -650,6 +650,29 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private DateTime _cachedLeaderRouteIdxUtc = DateTime.MinValue;
     private const double CachedLeaderRouteIdxMaxAgeSec = 30.0;
 
+    // ── Route-walking migration: Turn 3.5b (Turn 3.5 → 3.5b commit) ──
+    //
+    // _cacheFallbackInUse tracks whether the most recent call to
+    // TryFindLeaderRouteIndex returned via the cache fallback path
+    // (rather than the primary HasTargetWaypoint-match path). Used
+    // only for transition logging — flips true/false trigger an Info
+    // log, intermediate ticks are silent.
+    //
+    // Why we need this: log-87 revealed that during the leader's
+    // rescue-in-progress windows (104 AssistRequestReturn events!),
+    // the leader's TargetWaypointWorldX/Y is published as the
+    // rescue-insertion coords, NOT a route waypoint. Primary match
+    // fails. Cache fallback fires. Without a transition log, this
+    // is invisible — the only symptom is "_assistRouteIndex stuck at
+    // the same index for many seconds" which is hard to distinguish
+    // from "leader paused at next waypoint" (the legitimate case).
+    //
+    // The transition log makes the diagnostic visible in the future:
+    // log-88 should show, near each rescue event, a "Cache fallback
+    // engaged" log followed (when rescue ends) by "Cache primary
+    // resumed."
+    private bool _cacheFallbackInUse = false;
+
     // -----------------------------------------------------------------------
     // Navigation active-time timeout
     // -----------------------------------------------------------------------
@@ -939,6 +962,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _cachedLeaderRouteIdx = -1;
         _cachedLeaderRouteIdxUtc = DateTime.MinValue;
 
+        // ── Route-walking migration: Turn 3.5b ──
+        // Reset the cache-fallback-in-use flag so the first transition
+        // (primary → cache or cache → primary) in this session logs.
+        _cacheFallbackInUse = false;
+
         // ── Architecture migration observability ──
         //
         // Emit a one-line configuration header at every FFG OnEnter so log
@@ -965,7 +993,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // missed a case, or the fix is catching a class of failure
         // wider than its original evidence suggested.
         logger.LogInformation(
-            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 3.5) " +
+            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 3.5b) " +
             $"— route-walk is now the patrol default when LoadedRoute is " +
             $"populated AND the leader's published TargetWaypoint maps to a " +
             $"route index OR a recent cached index is available. Anchor mode " +
@@ -978,8 +1006,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"when LoadedRoute is empty. Turn 3.5: leader route index cache " +
             $"(30s TTL) unblocks CheckShouldDefer when HasTargetWaypoint goes " +
             $"false during approach. Fix BB threshold raised 15y → 25y to " +
-            $"catch corridor catch-up scenarios where leader is further than " +
-            $"15y. Key thresholds: " +
+            $"catch corridor catch-up scenarios. Turn 3.5b: parked-RouteWalk " +
+            $"co-located targets now skip the position-chase fallback (which " +
+            $"caused SetWaypoint loop guard → CantFollow → AB-2 away-from-" +
+            $"leader projections in log-87). Cache-fallback transition logs " +
+            $"added for diagnostic visibility during rescue events. Key " +
+            $"thresholds: " +
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
             $"WaypointUpdateThresholdYards={WaypointUpdateThresholdYards:0.0}y, " +
@@ -1177,6 +1209,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // OnEnter; ensures no leak across FFG sessions.
         _cachedLeaderRouteIdx = -1;
         _cachedLeaderRouteIdxUtc = DateTime.MinValue;
+
+        // ── Route-walking migration: Turn 3.5b ──
+        _cacheFallbackInUse = false;
 
         if (_navState == NavState.NavigatingToLeader)
         {
@@ -2381,6 +2416,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (!navigation.HasWaypoint() && !navigation.HasNext() && !navigation.IsApproachEscapeActive
             && dist > NavigatingMinYards)
         {
+            // ── Turn 3.5b fix (log-87 evidence) ──
+            // If we're in RouteWalk mode and navigation has popped our route
+            // waypoint (because IsAtFinalWaypoint at 3.35y reach fires when
+            // bot arrives), the fallback below would call GetNavigationTarget,
+            // get the same route waypoint back, see it's co-located, fall back
+            // to body-chase, and SetWaypoint. On the next tick the same thing
+            // happens. After 10 sets in 100ms the SetWaypoint loop guard
+            // escalates to CantFollow → AB-2 projects away from leader.
+            //
+            // Sister of the OnDestinationReached fix (~line 5000). Same
+            // failure mode, same resolution: when route-walking, the popped
+            // route waypoint means "I'm parked at my trailing-by-one cap."
+            // Skip the fallback entirely. The next leader pop refreshes the
+            // cache, allowedAdvance advances, and the next time
+            // GetNavigationTarget runs in the main FFG loop the new target
+            // will be > POP_DIST away (drift gate fires SetWaypoint).
+            //
+            // Silent: this branch can fire many times per second while
+            // parked. Logging every tick would spam. The mode flag
+            // _currentNavTargetMode = RouteWalk, set by the most recent
+            // GetNavigationTarget call, is the diagnostic record.
+            if (_currentNavTargetMode == NavTargetMode.RouteWalk)
+            {
+                return;
+            }
+
             logger.LogWarning(
                 "[FFG] No active waypoint but still far from leader — refreshing waypoint.");
             Vector3 fallbackTarget = GetNavigationTarget(leader);
@@ -3428,6 +3489,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     // Same index — just refresh timestamp.
                     _cachedLeaderRouteIdxUtc = DateTime.UtcNow;
                 }
+                // ── Turn 3.5b: cache-fallback transition log ──
+                // We're returning via the primary path. If we were previously
+                // on cache fallback, log the transition back. This pairs with
+                // the "Cache fallback engaged" log below.
+                if (_cacheFallbackInUse)
+                {
+                    logger.LogInformation(
+                        $"[FFG] [ROUTE-WALK] Cache primary resumed: leader's published " +
+                        $"TargetWaypoint matches route[{leaderIdx}] within tolerance.");
+                    _cacheFallbackInUse = false;
+                }
                 return true;
             }
             // HasTargetWaypoint=true but no match within tolerance.
@@ -3443,9 +3515,37 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             if (ageSec <= CachedLeaderRouteIdxMaxAgeSec)
             {
                 leaderIdx = _cachedLeaderRouteIdx;
+                // ── Turn 3.5b: cache-fallback transition log ──
+                // Log only on entry (transition from primary). Subsequent
+                // ticks where we keep using the cache are silent.
+                if (!_cacheFallbackInUse)
+                {
+                    string reason = leader.HasTargetWaypoint
+                        ? "HasTargetWaypoint=true but no route match within 1.0y tolerance " +
+                          "(likely rescue insertion or non-route waypoint)"
+                        : "HasTargetWaypoint=false (likely ApproachStart-mutex or " +
+                          "leader transient state)";
+                    logger.LogInformation(
+                        $"[FFG] [ROUTE-WALK] Cache fallback engaged: using leaderIdx=" +
+                        $"{leaderIdx} (cached age={ageSec:0.0}s). Reason: {reason}. " +
+                        $"Will revert to primary when leader publishes a route-matching " +
+                        $"waypoint or cache exceeds {CachedLeaderRouteIdxMaxAgeSec:0}s TTL.");
+                    _cacheFallbackInUse = true;
+                }
                 return true;
             }
             // Stale — let it expire silently. Caller treats as "no leader idx."
+            if (_cacheFallbackInUse)
+            {
+                // Was on fallback, now expired. Log the expiry so it doesn't
+                // look like the leaderIdx silently vanished.
+                logger.LogInformation(
+                    $"[FFG] [ROUTE-WALK] Cache fallback expired: " +
+                    $"age={ageSec:0.0}s > {CachedLeaderRouteIdxMaxAgeSec:0}s TTL. " +
+                    $"TryFindLeaderRouteIndex now returns false; caller will fall " +
+                    $"back to PositionChase.");
+                _cacheFallbackInUse = false;
+            }
         }
 
         return false;
@@ -5001,6 +5101,59 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         float retryDist = playerReader.WorldPos.WorldDistanceXYTo(retryTarget);
         if (retryDist < Navigation.POP_DIST)
         {
+            // ── Turn 3.5b fix (log-87 evidence) ──
+            // If we're in RouteWalk mode, the co-located target is EXPECTED —
+            // we're parked at our allowed_advance route waypoint, waiting for
+            // the leader to advance (cache update on next leader pop will
+            // unblock the advance loop). The legacy fallback below (revert to
+            // body-chase via ComputeFollowTargetWorldPos) is wrong here:
+            //
+            // Log-87 trace at 03:53:01:294-372:
+            //   - Bot reaches LoadedRoute[10] at <-710.94,-4167.58>.
+            //   - dist to leader = 15.5y (> NavigatingMinYards 14y).
+            //   - OnDestinationReached retry path fires.
+            //   - GetNavigationTarget returns route[10] AGAIN (cache=11,
+            //     _assistRouteIndex=10, can't advance because at cap).
+            //   - retryDist = 3.3y < POP_DIST 3.6y → "co-located" check.
+            //   - Falls back to ComputeFollowTargetWorldPos at <-715.39,
+            //     -4176.62> (Fix Z far branch, 7y from bot).
+            //   - SetWaypoint(body-chase target).
+            //   - Main FFG drift tick (15ms later): GetNavigationTarget
+            //     returns route[10] (drift 10y from body-chase target) →
+            //     SetWaypoint(route[10]). Navigation pops immediately
+            //     (IsAtFinalWaypoint within 3.35y reach).
+            //   - "No active waypoint but still far" fallback fires →
+            //     same co-located dance → SetWaypoint(body-chase) again.
+            //   - 10 SetWaypoint calls in 78ms → SetWaypoint loop guard
+            //     escalates to CantFollow → AB-2 projection 10y away from
+            //     leader (wrong direction).
+            //
+            // Across log-87 the pattern fired 26 times, every one followed
+            // by AB-2 (79 firings total). AB-2 walked the bot 6-20y away
+            // from the leader. AO cumulative cap (20y) eventually exited
+            // CantFollow, and the cycle repeated. This is the "back and
+            // forth movement after combat" the user reported.
+            //
+            // The fix: when route-walking, the co-located target means
+            // "I'm at my trailing-by-one cap and waiting." Don't refresh
+            // navigation; don't fall back to body-chase. Just return.
+            // The next leader pop updates the cache, allowedAdvance moves
+            // forward, and the advance loop in GetNavigationTarget will
+            // pick the new target naturally.
+            //
+            // Sit-in-place is correct only when route-walking. The legacy
+            // WaypointSharing fallback (the else branch below) remains for
+            // that code path.
+            if (_currentNavTargetMode == NavTargetMode.RouteWalk)
+            {
+                logger.LogInformation(
+                    $"[FFG] [ROUTE-WALK] Parked at route waypoint idx={_assistRouteIndex} " +
+                    $"(retryDist={retryDist:0.0}y, leader {dist:0.0}y away). " +
+                    $"Trailing-by-one cap reached; waiting for leader to advance. " +
+                    $"Skipping waypoint refresh — no SetWaypoint, no loop-guard escalation.");
+                return;
+            }
+
             logger.LogWarning(
                 $"[FFG] Retry target co-located ({retryDist:0.0}y < {Navigation.POP_DIST}y) — " +
                 "stale shared waypoint; reverting to position-chasing.");
