@@ -1972,34 +1972,131 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             bool suppressRefresh = false;
             if (navigation.HasWaypoint())
             {
-                Vector3 existingWp = navigation.TopWaypointW;
-                Vector3 botPos = playerReader.WorldPos;
-
-                float ax = existingWp.X - botPos.X;
-                float ay = existingWp.Y - botPos.Y;
-                float nx = currentNavigationTarget.X - botPos.X;
-                float ny = currentNavigationTarget.Y - botPos.Y;
-
-                float aLen = MathF.Sqrt(ax * ax + ay * ay);
-                float nLen = MathF.Sqrt(nx * nx + ny * ny);
-
-                // aLen > 0.001 guards against the degenerate case where the bot has
-                // already arrived at the existing waypoint (zero-length vector → cos
-                // undefined). nLen >= aLen ensures the new target really is "further
-                // along" — if the new target is closer to the bot than the existing
-                // waypoint, the existing route overshoots and should be refreshed
-                // (e.g., leader pivoted and now is between bot and old wpTop).
-                if (aLen > 0.001f && nLen > 0.001f && nLen >= aLen)
+                // ── Fix AZ (log-82 19:06:54:442 → 19:06:55:229) ──
+                //
+                // ROUTEESCAPE OWNERSHIP OF THE WAYPOINT
+                //
+                // When Navigation's RouteEscape state machine is mid-execution
+                // (IsRouteEscapeActive=true), the current waypoint is owned by
+                // RouteEscape — it's the tactical escape target (10y at 0°, 20y
+                // at +120°, or 30y at −120° from the bot's facing direction at
+                // attempt-start). RouteEscape sets the waypoint via
+                // SetSingleWaypoint(escapeW) when an attempt fires (Navigation
+                // TryRouteUnstuck line ~2720) and expects to retain it for the
+                // duration of the attempt (up to RouteEscapeNoMovementSec=3.0s
+                // or per-yard timeout).
+                //
+                // The alignment check below was designed for normal patrol /
+                // leader-pursuit transitions where the new target is in roughly
+                // the same direction as the old waypoint (just further along).
+                // Escape targets are INTENTIONALLY in a different direction —
+                // they aim away from the obstacle that caused the stuck, which
+                // is by definition not aligned with the leader. So the cos > 0.7
+                // test ALWAYS fails for escape targets, suppressRefresh stays
+                // false, and FFG overwrites the escape route on its next drift-
+                // gate tick (~250-700ms cadence).
+                //
+                // Evidence (log-82, mob N post-combat):
+                //   19:06:54:442  Navigation: RouteEscape attempt 30y →
+                //                 <-757.52, -4265.19>. offset=-120°, target NW.
+                //                 SetSingleWaypoint(escapeW). _routeEscapeActive
+                //                 = true.
+                //   19:06:54:443  SetWayPoints(count=1) — wpTop=<-757.52, -4265.19>.
+                //   19:06:54:473  REFILL fires with escape target.
+                //   19:06:54:503  Path 130 computed: pathLen=33 (long curve around
+                //                 the hill SE of the bot). routeCount=5 after
+                //                 SimplifyRouteToWaypoint.
+                //   19:06:54:504  ROUTESET reqId=130. Bot starts walking along curve
+                //                 — Right arrow pressed 664ms.
+                //   19:06:55:229  SetWayPoints(count=1) AGAIN — wpTop=<-735.20,
+                //                 -4288.27>, the 7y leader-pursuit target. Curve
+                //                 escape OVERWRITTEN after 787ms.
+                //   19:06:55:245  Path 131 computed (pathLen=15, due east toward
+                //                 leader). Bot walks east — Left arrow 858ms.
+                //   19:06:58:878  Stuck AGAIN at <-740.87, -4290.86> (same spot
+                //                 as the original stuck, 1y away from start of
+                //                 the 30y curve).
+                //
+                // User observation: "as it cleared the hill going in a curve, the
+                // assist moved right back to where it was." Verified: the 30y
+                // curve had pathLen=33 (winding around the obstacle), bot got
+                // 787ms of movement along it before FFG yanked the wp back to
+                // leader-pursuit, then walked straight back into the same
+                // stuck terrain.
+                //
+                // Fix: when navigation.IsRouteEscapeActive=true, suppress the
+                // refresh unconditionally. The escape route runs to completion
+                // (target reached → IsRouteEscapeActive=false naturally) or to
+                // failure (RouteEscape's own no-progress/timeout logic in
+                // TryRouteUnstuck escalates 10y→20y→30y, or
+                // "all pather attempts exhausted" → ResetRouteEscape, also
+                // clearing IsRouteEscapeActive). Either way, FFG resumes normal
+                // refresh cadence as soon as RouteEscape relinquishes ownership.
+                //
+                // Why this is additive (doesn't break existing logic):
+                //   - The alignment-based check only fires for leader-pursuit /
+                //     anchor / waypoint-sharing scenarios where the bot is
+                //     actively navigating toward the leader. Those scenarios
+                //     don't intersect with RouteEscape (mutually exclusive: bot
+                //     is either escaping OR pursuing).
+                //   - During RouteEscape, the leader-pursuit "currentNavigation-
+                //     Target" still gets computed each tick (line ~1910), but
+                //     suppression prevents it from being applied. _lastNavigated-
+                //     ToLeaderWorldPos still gets updated below so the drift
+                //     baseline stays fresh; when escape ends, the next tick
+                //     uses the current leader position naturally without
+                //     re-triggering the drift gate from a stale baseline.
+                //
+                // Inter-attempt gap: _routeEscapeActive briefly flips to false
+                // between attempts (after one attempt's no-progress/timeout but
+                // before the next attempt fires at +200ms cooldown). During that
+                // ~1-2 second window FFG may overwrite the stale wp with leader-
+                // pursuit. Acceptable because the next escape attempt overwrites
+                // it back, and the brief leader-pursuit doesn't have time to
+                // route the bot far before the escape resumes. Could be tightened
+                // with a separate "IsRouteEscapeInProgress" (includes inter-
+                // attempt) flag if logs show it matters.
+                if (navigation.IsRouteEscapeActive)
                 {
-                    float cosAngle = (ax * nx + ay * ny) / (aLen * nLen);
-                    if (cosAngle > 0.7f)
+                    suppressRefresh = true;
+                    logger.LogDebug(
+                        $"[FFG] Path-preservation suppression (RouteEscape active): " +
+                        $"existing wp at {navigation.TopWaypointW} is owned by " +
+                        $"Navigation's RouteEscape. Suppressing FFG nav refresh " +
+                        $"until escape completes (target reached or all attempts " +
+                        $"exhausted).");
+                }
+                else
+                {
+                    Vector3 existingWp = navigation.TopWaypointW;
+                    Vector3 botPos = playerReader.WorldPos;
+
+                    float ax = existingWp.X - botPos.X;
+                    float ay = existingWp.Y - botPos.Y;
+                    float nx = currentNavigationTarget.X - botPos.X;
+                    float ny = currentNavigationTarget.Y - botPos.Y;
+
+                    float aLen = MathF.Sqrt(ax * ax + ay * ay);
+                    float nLen = MathF.Sqrt(nx * nx + ny * ny);
+
+                    // aLen > 0.001 guards against the degenerate case where the bot has
+                    // already arrived at the existing waypoint (zero-length vector → cos
+                    // undefined). nLen >= aLen ensures the new target really is "further
+                    // along" — if the new target is closer to the bot than the existing
+                    // waypoint, the existing route overshoots and should be refreshed
+                    // (e.g., leader pivoted and now is between bot and old wpTop).
+                    if (aLen > 0.001f && nLen > 0.001f && nLen >= aLen)
                     {
-                        suppressRefresh = true;
-                        logger.LogDebug(
-                            $"[FFG] Path-preservation suppression ({_currentNavTargetMode}): " +
-                            $"existing wp at {existingWp} ({aLen:0.0}y) still aligned with " +
-                            $"new target {currentNavigationTarget} ({nLen:0.0}y), cos={cosAngle:0.00}. " +
-                            "Keeping existing route.");
+                        float cosAngle = (ax * nx + ay * ny) / (aLen * nLen);
+                        if (cosAngle > 0.7f)
+                        {
+                            suppressRefresh = true;
+                            logger.LogDebug(
+                                $"[FFG] Path-preservation suppression ({_currentNavTargetMode}): " +
+                                $"existing wp at {existingWp} ({aLen:0.0}y) still aligned with " +
+                                $"new target {currentNavigationTarget} ({nLen:0.0}y), cos={cosAngle:0.00}. " +
+                                "Keeping existing route.");
+                        }
                     }
                 }
             }

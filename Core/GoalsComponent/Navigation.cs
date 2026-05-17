@@ -442,6 +442,34 @@ public sealed partial class Navigation : IDisposable
     public float ApproachEscapeCurrentYards => _approachEscapeCurrentYards;
     public DateTime ApproachEscapeStartUtc => _approachEscapeStartUtc;
     public DateTime ApproachEscapeLastAttemptUtc => _approachEscapeLastAttemptUtc;
+
+    /// <summary>
+    /// Fix AZ (log-82, mob N post-combat 19:06:54:442 → 19:07:36:990):
+    /// True when <see cref="TryRouteUnstuck"/> has an active escape attempt
+    /// in progress — i.e., it has called <see cref="SetSingleWaypoint"/> with
+    /// a tactical escape target (10y/20y/30y at some directional offset) and
+    /// the bot is currently navigating that route, prior to the attempt
+    /// reaching its target, timing out, or being declared no-progress.
+    ///
+    /// <para>
+    /// Designed to be consumed by FFG's path-preservation logic in
+    /// <c>StartNavigatingToLeader</c>'s drift gate. When this is true, FFG
+    /// must NOT overwrite the existing waypoint with the leader-pursuit
+    /// target — RouteEscape owns the waypoint and is in the middle of
+    /// routing the bot around an obstacle. Overwriting cancels the escape
+    /// mid-execution and routes the bot back through the same bad terrain
+    /// that caused the original stuck. See FFG's path-preservation block
+    /// for the full evidence trail and rationale.
+    /// </para>
+    ///
+    /// <para>
+    /// This flag is briefly false (~200 ms) during inter-attempt escalation
+    /// (when one attempt has ended and the next hasn't yet fired). During
+    /// that window FFG may overwrite the stale wp, but the next escape
+    /// attempt overwrites it back. Brief and self-correcting.
+    /// </para>
+    /// </summary>
+    public bool IsRouteEscapeActive => _routeEscapeActive;
     public int StuckRectCount => _stuckWorldRects.Count;
 
     /// <summary>
@@ -529,6 +557,14 @@ public sealed partial class Navigation : IDisposable
     private Vector3 _routeEscapeStartPos;
     private Vector3 _routeEscapeLastProgressPos;
     private DateTime _routeEscapeLastProgressUtc = DateTime.MinValue;
+
+    // Fix BA (log-82 19:06:37:899): the escape target of the current RouteEscape
+    // attempt, captured at attempt-fire so the failed direction can be
+    // reconstructed in the physTrapped branch (TryRouteUnstuck). Used by
+    // AddStuckRect call to mark the bad terrain 5y in the failed direction
+    // so future paths through the area route around. Cleared in
+    // ResetRouteEscape alongside the other escape state.
+    private Vector3 _routeEscapeAttemptTarget;
 
     // Fix B (log-34b 03:43:43:444): independent watchdog for unreachable RouteEscape
     // targets. The existing TryRouteUnstuck no-progress check (RouteEscapeNoMovementSec)
@@ -2567,6 +2603,76 @@ public sealed partial class Navigation : IDisposable
                 {
                     logger.LogWarning("[NAV] RouteEscape: physically trapped — injecting jump + reverse to escape.");
                     TryPhysicalUnstuck();
+
+                    // ── Fix BA (log-82 19:06:37:899 → 19:06:40:984) ──
+                    //
+                    // ROUTE-ESCAPE STUCK-RECT ADDITION ON PHYSTRAPPED
+                    //
+                    // When a RouteEscape attempt finishes with displacement < 0.5y
+                    // (physTrapped=True), the bot was unable to move at all in
+                    // the attempted direction. This is strong evidence that the
+                    // immediate terrain in that direction is blocked. Without
+                    // marking it, the pather has no memory of the failure: the
+                    // next path request from the area happily routes through
+                    // the same bad terrain and the bot gets stuck again at the
+                    // same spot.
+                    //
+                    // Evidence (log-82, mob N post-combat):
+                    //   19:06:37:431  FFG: Stuck while navigating at <-740.48,
+                    //                 -4290.48>. Reporting Stuck so leader pauses.
+                    //   19:06:37:899  RouteEscape attempt 10y → <-736.08, -4299.46>
+                    //                 (facing=5.17rad, offset=0°). Direction = SE.
+                    //   19:06:40:984  RouteEscape: escape stuck (no progress for
+                    //                 3.1s) — displacement=0.00y physTrapped=True.
+                    //                 Escalating. → physical-unstuck (jump+reverse)
+                    //                 fires.
+                    //   19:06:42:695  FFG: Movement resumed (displaced 4.72y via
+                    //                 jump+reverse). Reverts to NavigatingToLeader.
+                    //                 → normal nav resumes, leader-pursuit path
+                    //                 routes back through the same bad terrain.
+                    //   19:06:48:598  Stuck AGAIN at <-740.56, -4290.56> (0.1y from
+                    //                 the original stuck position).
+                    //
+                    // The same pattern repeated 3 more times across the 65-second
+                    // stuck window (Stuck at <-740.87,-4290.86>, <-740.10,-4290.10>,
+                    // <-739.52,-4289.51>) before the leader gave up at 19:07:36:990.
+                    //
+                    // Fix: when physTrapped fires, call AddStuckRect with the bot's
+                    // attempt-start position and the failed direction (escape
+                    // target − start position). AddStuckRect's existing semantics
+                    // offset the rect center 5y in the supplied forward direction,
+                    // matching how ATG's ApproachEscape places its rects: the bot's
+                    // current position is NOT inside the rect, only the immediate
+                    // terrain ahead.
+                    //
+                    // Multiple physTrapped failures within the same escape ladder
+                    // produce multiple rects (one per failed direction). The
+                    // existing dedup in AddStuckRect handles overlapping rects.
+                    //
+                    // Why physTrapped < 0.5y specifically (not non-physTrapped
+                    // failures): non-physTrapped failures (e.g., displacement=4.5y
+                    // but didn't reach escape target) often indicate FFG-overwrite
+                    // (Fix AZ covers this) or pather-finds-suboptimal-route, NOT
+                    // bad terrain. physTrapped is the conclusive "this direction
+                    // is blocked" signal — the bot pressed forward keys for 3s and
+                    // didn't budge.
+                    //
+                    // Why offset 5y in failed direction (not at start position):
+                    //   - At-start would put the rect AROUND the bot's escape-anchor
+                    //     position. Future paths starting from there would have
+                    //     start-inside-rect → pather rejects → no path computed.
+                    //   - 5y forward marks where the obstacle is (the bot was
+                    //     pressing into it for 3s). Paths through the area route
+                    //     around the obstacle without rejecting the start position.
+                    //
+                    // Pairs with Fix AZ: Fix AZ prevents FFG from overwriting the
+                    // CURRENT escape route mid-execution. Fix BA prevents future
+                    // paths from being computed through the same bad terrain. Both
+                    // are needed: without AZ, the escape can't complete; without BA,
+                    // the escape completes but the next nav cycle immediately routes
+                    // back into the stuck zone.
+                    Vector3 failedDir = _routeEscapeAttemptTarget - _routeEscapeStartPos;
+                    AddStuckRect(_routeEscapeStartPos, failedDir);
                 }
 
                 return false;
@@ -2683,6 +2789,12 @@ public sealed partial class Navigation : IDisposable
 
         SetSingleWaypoint(escapeW);
         _routeEscapeActive = true;
+        // Fix BA (log-82 19:06:37:899): record the escape target so the
+        // physTrapped branch in TryRouteUnstuck can reconstruct the failed
+        // direction (escapeW − startPos) when adding a stuck rect. Stored
+        // here at attempt-fire because escapeW is a local computed value;
+        // the rect-add site in the failure branch needs to know it.
+        _routeEscapeAttemptTarget = escapeW;
         _routeEscapeStartUtc = now;
         _routeEscapeStartPos = playerW;
         // ── Fix AT (log-80 15:07:25:070 → 15:07:29:812+) ──
@@ -2750,6 +2862,7 @@ public sealed partial class Navigation : IDisposable
         _routeEscapeStartPos = default;
         _routeEscapeLastProgressPos = default;
         _routeEscapeLastProgressUtc = DateTime.MinValue;
+        _routeEscapeAttemptTarget = default; // Fix BA: clear with the rest of escape state
     }
 
     /// <summary>
