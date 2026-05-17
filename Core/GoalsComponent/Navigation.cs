@@ -1565,7 +1565,7 @@ public sealed partial class Navigation : IDisposable
                 if (dWp <= wpReach)
                 {
                     logger.LogWarning(
-                        $"[NAV] Fix AQ: route-pop stalled (sinceBest={sinceBestSec_atWp:0.00}s " +
+                        $"[NAV] [FIX-FIRE] AQ: route-pop stalled (sinceBest={sinceBestSec_atWp:0.00}s " +
                         $">= {AtWpStallThresholdSec:0.00}s threshold) but bot is within reach " +
                         $"({dWp:0.00}y <= {wpReach:0.00}y) of final waypoint {finalWp}. " +
                         $"Accepting arrival, clearing {routeToNextWaypoint.Count} unreachable " +
@@ -2672,6 +2672,11 @@ public sealed partial class Navigation : IDisposable
                     // the escape completes but the next nav cycle immediately routes
                     // back into the stuck zone.
                     Vector3 failedDir = _routeEscapeAttemptTarget - _routeEscapeStartPos;
+                    logger.LogWarning(
+                        $"[NAV] [FIX-FIRE] BA: adding StuckRect after physTrapped — " +
+                        $"startPos={_routeEscapeStartPos} attemptTarget={_routeEscapeAttemptTarget} " +
+                        $"failedDir=<{failedDir.X:0.00},{failedDir.Y:0.00}>. " +
+                        $"Future paths through this terrain will route around.");
                     AddStuckRect(_routeEscapeStartPos, failedDir);
                 }
 
@@ -3641,7 +3646,7 @@ public sealed partial class Navigation : IDisposable
         if (drained > 0)
         {
             logger.LogInformation(
-                $"[NAV] Fix AG: drained {drained} stale queued path request(s) " +
+                $"[NAV] [FIX-FIRE] AG: drained {drained} stale queued path request(s) " +
                 $"(reason={reason}). Their reqIds are all < activePathRequestId={Volatile.Read(ref activePathRequestId)}, " +
                 "so results would have been stale-ignored on completion; draining " +
                 "frees the PathFinderThread to process the newest request without " +
@@ -4033,7 +4038,7 @@ public sealed partial class Navigation : IDisposable
                     if (dot <= 0f)
                     {
                         logger.LogInformation(
-                            $"[NAV] Fix AA: dropping rear-pointing path node {p} " +
+                            $"[NAV] [FIX-FIRE] AA: dropping rear-pointing path node {p} " +
                             $"(dist={MathF.Sqrt(toNodeLenSq):0.00}y from start, " +
                             $"dot={dot:0.00} <= 0 against path forward direction). " +
                             $"Would have caused a U-turn rotation toward a navmesh-snap node behind the bot.");

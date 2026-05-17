@@ -241,6 +241,42 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private Vector3 _escapePhaseStartPos;
     private Vector3 _escapeTargetW;
     private bool _escapeUnstuckUsed;
+
+    // -----------------------------------------------------------------------
+    // Fix BB (log-83 20:17:59:688 → 20:18:05:005) — path-rejection-cause flag
+    //
+    // Tracks whether the most recent path-failure event was caused by Fix
+    // AC+AE+AI+AL rejection (i.e., the pather returned a path but FFG's
+    // inspection refused it as a "complex U-turn into navmesh dead zone").
+    // This flag is consumed by ComputeAwayFromRectWaypoint's Path-2 (Fix
+    // AB-2) fallback to differentiate two distinct CantFollow root causes:
+    //
+    //   • Stuck-displacement: bot is physically wedged in terrain near an
+    //     unreachable leader. Fix AB-2's original "back away from leader
+    //     along the natural arrival reverse" assumption is correct here.
+    //   • Path-rejection: bot is at a navmesh-valid position but the pather
+    //     keeps returning U-turn paths. The bot is NOT wedged. Backing
+    //     away from leader makes the routing problem worse — the bot ends
+    //     up further from any clear navmesh, increasing pathLen and the
+    //     likelihood of further rejections. In this failure mode the
+    //     escape direction should be TOWARD leader (a direct walk that
+    //     either reaches leader via physical terrain or stumbles into an
+    //     obstacle the chase watchdog catches).
+    //
+    // Set true at the line where snap.Reject = true (path-rejection branch
+    // of Navigation_OnPathResultInspected). Set false in the success branch
+    // of the same handler (path accepted) so a transient rejection followed
+    // by a successful path doesn't carry the flag forward. Also cleared in
+    // OnEnter so a fresh FFG cycle starts with a clean slate.
+    //
+    // The flag is NOT cleared by ResetEscapeState — it must persist from
+    // path-inspection time through to Projection10's call to
+    // ComputeAwayFromRectWaypoint (~hundreds of ms later, after the rewind/
+    // retry cascade in Navigation_OnPathFailed). ResetEscapeState fires
+    // BEFORE Projection10 fires (at EnterCantFollow), so clearing there
+    // would lose the signal.
+    // -----------------------------------------------------------------------
+    private bool _lastPathFailureWasRejection;
     // Per-phase budget. 3 s is enough for navigation to either reach a
     // 10-30 y target on flat terrain or determine that it's stuck and
     // we should escalate. LastSafeAnchor gets a larger budget because
@@ -770,6 +806,44 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         while (restHandler.IsResting())
             wait.Update(1000);
 
+        // ── Architecture migration observability ──
+        //
+        // Emit a one-line configuration header at every FFG OnEnter so log
+        // analysis can correlate fix-firing rates against the active
+        // architecture mode and threshold set. As the route-walking
+        // migration progresses, additional config flags will appear here
+        // and old ones (anchor-drift behavior, rendezvous-confirmation
+        // gating) will flip. The header serves as a per-session ground
+        // truth: "what configuration was running when this log was
+        // captured?"
+        //
+        // Pair this header with [FIX-FIRE] tags throughout the codebase
+        // for the migration's primary observability primitive:
+        //   grep -c "FIX-FIRE\] AC"   → rate of complex-rejection firings
+        //   grep -c "FIX-FIRE\] AB-2" → rate of away-from-leader fallbacks
+        //   grep -c "FIX-FIRE\] BB"   → rate of toward-leader flips
+        //   grep -oE "FIX-FIRE\] [A-Z+0-9-]+" log.txt | sort | uniq -c
+        //                              → histogram of all firings
+        //
+        // Body-chase-specific fixes (AC+AE+AI+AL, AB-2, BB, AO escape
+        // ladder, AY direct-route push) are expected to silence as
+        // route-walking matures; if they continue firing in route-
+        // walking sessions, that's a signal — either the migration
+        // missed a case, or the fix is catching a class of failure
+        // wider than its original evidence suggested.
+        logger.LogInformation(
+            $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=BodyChase " +
+            $"(route-walking not yet enabled). Key thresholds: " +
+            $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
+            $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
+            $"WaypointUpdateThresholdYards={WaypointUpdateThresholdYards:0.0}y, " +
+            $"MaxEscapeDisplacementYards={MaxEscapeDisplacementYards:0.0}y, " +
+            $"ChaseWatchdogCantFollowSec={ChaseWatchdogCantFollowSec:0.0}s, " +
+            $"AnchorLocalTtlMs={AnchorLocalTtlMs:0}ms. " +
+            $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
+            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB. " +
+            $"navHash={navigation.GetHashCode()}.");
+
         _stuckCheckLastUtc = DateTime.MinValue;
         _activeStuckSinceUtc = DateTime.MinValue;
         _activeStuckReported = false;
@@ -786,6 +860,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // session's exhausted attempts don't immediately escalate to
         // CantFollow on the new session's first stuck event.
         _directRouteAttemptsInCycle = 0;
+
+        // Fix BB: reset the path-rejection-cause flag so a stale flag from
+        // a previous FFG session doesn't influence the first CantFollow
+        // escape direction in the new session. The flag tracks within-
+        // session pather behavior; new session = fresh slate.
+        _lastPathFailureWasRejection = false;
 
         // Always reset rendezvous on goal entry — the assist must re-confirm
         // proximity to the leader before waypoint-sharing mode activates.
@@ -1425,7 +1505,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                           $"{AnchorLocalTtlMs:0}ms at last-seen position)";
 
                     logger.LogInformation(
-                        $"[FFG] Fix AH+AJ+AN: at approach anchor via {gatePath}" +
+                        $"[FFG] [FIX-FIRE] AH+AJ+AN: at approach anchor via {gatePath}" +
                         $"{(isRetry ? $" — retry msSinceLast={msSinceLast:0}" : "")} — " +
                         $"acquiring leader's target via PressTargetFocus + PressTargetOfTarget. " +
                         $"Will latch only if bits.Target_Hostile() confirms a hostile acquisition; " +
@@ -1445,7 +1525,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         _approachTargetLatchedUtc = DateTime.UtcNow;  // Fix AM: record for stale-latch warning
 
                         logger.LogInformation(
-                            $"[FFG] Fix AJ: focus-chain confirmed hostile target acquired " +
+                            $"[FFG] [FIX-FIRE] AJ: focus-chain confirmed hostile target acquired " +
                             $"(guid={playerReader.TargetGuid}) — latching one-shot. " +
                             $"ATG (cost 8) should win the next plan over FFG (cost 19) " +
                             $"and take over the interact-key approach.");
@@ -1464,7 +1544,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         bool diagHasApproachStart = approachLeader.HasApproachStart;
                         bool diagBitsCombat      = bits.Combat();
                         logger.LogInformation(
-                            $"[FFG] Fix AM: ATG-precondition snapshot at latch moment — " +
+                            $"[FFG] [FIX-FIRE] AM: ATG-precondition snapshot at latch moment — " +
                             $"hastarget={diagHasTarget}, targetisalive={diagTargetIsAlive} " +
                             $"(dead={diagTargetDead}), targethostile={diagTargetHostile}, " +
                             $"incombatrange={diagInCombatRange}, " +
@@ -1481,7 +1561,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     else
                     {
                         logger.LogWarning(
-                            $"[FFG] Fix AJ: focus-chain attempt did not produce a hostile " +
+                            $"[FFG] [FIX-FIRE] AJ: focus-chain attempt did not produce a hostile " +
                             $"target (bits.Target={bits.Target()}, bits.Target_Hostile=" +
                             $"{bits.Target_Hostile()}, currentTargetGuid={playerReader.TargetGuid}). " +
                             $"Will retry in {ApproachTargetAcquireRetryMs:0}ms. " +
@@ -1525,7 +1605,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         bool curForcedFollow    = chatReader.ForcedFollow;
                         bool curBitsCombat      = bits.Combat();
                         logger.LogWarning(
-                            $"[FFG] Fix AM: STALE LATCH WARNING — Fix AJ latched " +
+                            $"[FFG] [FIX-FIRE] AM: STALE LATCH WARNING — Fix AJ latched " +
                             $"{msSinceLatch:0}ms ago (> {StaleLatchWarnAfterMs:0}ms threshold) " +
                             $"but FFG.Update is still running. ATG was NOT selected by the " +
                             $"planner. Current ATG-precondition state — " +
@@ -2060,7 +2140,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 {
                     suppressRefresh = true;
                     logger.LogDebug(
-                        $"[FFG] Path-preservation suppression (RouteEscape active): " +
+                        $"[FFG] [FIX-FIRE] AZ: Path-preservation suppression (RouteEscape active): " +
                         $"existing wp at {navigation.TopWaypointW} is owned by " +
                         $"Navigation's RouteEscape. Suppressing FFG nav refresh " +
                         $"until escape completes (target reached or all attempts " +
@@ -2368,7 +2448,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 float distToLeader =
                     playerReader.WorldPos.WorldDistanceXYTo(leader!.WorldPos);
                 logger.LogWarning(
-                    $"[FFG] Fix AO: cumulative escape displacement {displacementFromEntry:0.0}y " +
+                    $"[FFG] [FIX-FIRE] AO: cumulative escape displacement {displacementFromEntry:0.0}y " +
                     $"exceeded cap ({MaxEscapeDisplacementYards}y) from entry at {_cantFollowEnteredPos}. " +
                     $"Exiting CantFollow to re-attempt navigation to leader (currently {distToLeader:0.0}y " +
                     $"at {leader.WorldPos}). If path still fails, CantFollow will re-fire from current position.");
@@ -2895,6 +2975,140 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             usingLeaderDirection = false;
         }
 
+        // ── Fix BB (log-83 20:17:59:688 → 20:18:05:005) ──
+        //
+        // CLOSE-LEADER PATH-REJECTION OVERRIDE: FLIP DIRECTION TOWARD LEADER
+        //
+        // Original Fix AB-2 (this function, Path-2) projects AWAY from the
+        // leader's body on the assumption that the leader is "where we want
+        // to go but can't reach" — i.e., the bot is physically stuck in
+        // terrain near an unreachable leader, and the bot's arrival path
+        // is the safest reverse direction. That assumption is correct for
+        // displacement-based stuck scenarios.
+        //
+        // It is WRONG for the path-rejection failure mode: Fix AC+AE+AI+AL
+        // refuses paths whose first major segment is a U-turn (angle > 150°,
+        // simplified ≥ 8 nodes). When this rejection fires twice in a row
+        // and escalates to CantFollow, the bot is at a navmesh-VALID position
+        // (it just walked there); the rejection is a routing quirk where
+        // the pather returns a long winding detour for a short straight-line
+        // distance. The bot is not wedged — backing away from leader simply
+        // moves it further from any clean navmesh route, deepening the
+        // routing problem.
+        //
+        // Evidence (log-83, mob 1 approach):
+        //   20:17:57:807  Assist starts navigating to approach-start anchor
+        //                 <-510.83, -4448.26>. Bot at <-523.32, -4442.74>.
+        //   20:17:57:992  Path 195 computed cleanly: pathLen=12. Bot walks SE
+        //                 through Durotar corridor between hill and tree.
+        //   20:17:59:487  Bot arrives at anchor area (Fix AN tolerance match).
+        //                 Bot ends Y=-4446.69 — 1.6y NORTH of corridor
+        //                 centerline (Y≈-4448) due to navmesh-snap drift.
+        //   20:17:59:626  FFG refreshes wp to new leader-pursuit target
+        //                 <-503.99, -4448.80> (8.5y SE of bot).
+        //   20:17:59:688  Path 196 computed: pathLen=145 for 9y straight-line
+        //                 distance. Simplified=16, routeTop=<-516, -4444.8>
+        //                 at 163° behind forward dir. The bot's 1.6y-off-
+        //                 axis position forces the pather to wind through
+        //                 the tight tree/hill navmesh, producing a long
+        //                 detour whose first major segment goes NW first.
+        //                 Fix AC+AE+AI+AL rejects (matches log-69 profile).
+        //   20:17:59:689  Rewind to LastSafeAnchor (<-513.01, -4446.62> —
+        //                 0.4y away, useless: bot already there).
+        //   20:17:59:703  Rewind reached; retry leader target.
+        //   20:18:00:260  Path 197: same 145-node path. Rejected again.
+        //   20:18:00:261  Path failed after retry → CantFollow.
+        //   20:18:00:277  ╔════════════════════════════════════════════╗
+        //                 ║ Fix AB-2 directional fallback projection   ║
+        //                 ║ 10y AWAY from leader → <-522.25, -4444.74> ║
+        //                 ║ (10y WEST of bot, AWAY from leader EAST).  ║
+        //                 ║                                            ║
+        //                 ║ Bot follows this Projection10 target,      ║
+        //                 ║ then Projection10 fires again on arrival   ║
+        //                 ║ at 20:18:02:903 (another 10y WEST), then   ║
+        //                 ║ again at 20:18:03:877 (third 10y WEST).    ║
+        //                 ║ Total westward travel: 20y before Fix AO   ║
+        //                 ║ caps cumulative displacement.              ║
+        //                 ╚════════════════════════════════════════════╝
+        //   20:18:05:005  Fix AO cap (20y) — exit CantFollow at <-532.58,
+        //                 -4451.25>. Leader has moved on, now 64.4y east.
+        //                 Net result: assist walked 20y in the WRONG
+        //                 direction, leader had to rescue.
+        //
+        // User-visible behavior matches the log: "the assist followed half
+        // way through the corridor, then stopped, turned around and ran in
+        // the opposite direction." The "turned around" event is the
+        // SetSingleWaypoint(Projection10 target = 10y west) at 20:18:00:277
+        // — exactly when the bot's wp flipped from <-503.99, -4448.80>
+        // (leader, east) to <-522.25, -4444.74> (10y west).
+        //
+        // Fix: when CantFollow is entered due to recent path-rejection
+        // (_lastPathFailureWasRejection=true, set at the snap.Reject=true
+        // line in Navigation_OnPathResultInspected) AND the leader is
+        // close (≤ FixBBLeaderProximityYards), AND we have a fresh leader
+        // position (usingLeaderDirection=true), NEGATE the direction
+        // vector. Projection10's 0° rotation then points TOWARD leader
+        // (straight at, where the bot was already heading); Projection20's
+        // +120° and Projection30's -120° still apply on top, so the sweep
+        // is over the FORWARD half-plane instead of the rear.
+        //
+        // For log-83 geometry: leader 9y SE, fdx initial ≈ (-0.973, +0.230)
+        // (10y NW). After flip: fdx ≈ (+0.973, -0.230) (10y SE). Projection10
+        // → <-503.04, -4448.74>: 0.95y short of the leader, in the corridor.
+        // Even if the navmesh blocks the route, the bot's CURRENT heading
+        // doesn't flip (the wp is in the same direction the bot was
+        // already going). The "turned around" symptom is fully eliminated.
+        //
+        // Why 15y threshold:
+        //   - FollowingMaxYards = 14y is the dead-band's outer edge —
+        //     "within follow range" is roughly bounded by this.
+        //   - 15y gives 1y of margin for jitter; covers the log-83 case
+        //     (leader was 8.5y) and similar close-leader scenarios.
+        //   - Beyond 15y, the bot may legitimately be in a different
+        //     "stuck-far-from-leader" failure mode where the original AB-2
+        //     reverse-arrival heuristic is correct. Don't override there.
+        //
+        // Why not just disable the flip when bot is wedged: the wedged
+        // case sets _lastPathFailureWasRejection=false (rejection didn't
+        // fire — bot was stuck due to displacement). The flag-based gate
+        // already distinguishes these failure modes correctly without
+        // needing additional condition checks.
+        //
+        // Recovery if the flipped direction also fails: the bot walks
+        // toward the leader's last known position; if it hits real
+        // terrain (the hill or tree the pather was routing around), the
+        // chase/no-progress watchdog fires within ~3s and Projection10
+        // escalates to Projection20 (which adds +120° from the flipped
+        // basis, still in the forward half-plane). Eventually the
+        // CantFollow phase exhausts and LastSafeAnchor / PhysicalUnstuck
+        // / Exhausted fire as today. Worst-case: 9-12s of forward-
+        // attempt cycling before the bot is back to today's recovery
+        // path — and during those 9-12s the bot stays NEAR the leader,
+        // not 20y away. AssistRequestReturn rescue (which fires from
+        // the leader side at status=CantFollow) can resolve from the
+        // close position much faster than the original 20y-away spot.
+        const float FixBBLeaderProximityYards = 15.0f;
+        if (usingLeaderDirection && _lastPathFailureWasRejection)
+        {
+            float distLeader = pos.WorldDistanceXYTo(leader!.WorldPos);
+            if (distLeader <= FixBBLeaderProximityYards)
+            {
+                logger.LogWarning(
+                    $"[FFG] [FIX-FIRE] BB: CantFollow caused by path-rejection " +
+                    $"(_lastPathFailureWasRejection=true) AND leader is close " +
+                    $"(dist={distLeader:0.0}y ≤ {FixBBLeaderProximityYards:0.0}y). " +
+                    $"Flipping Fix AB-2 direction TOWARD leader instead of " +
+                    $"away. Original (away) basis would have sent the bot " +
+                    $"further from any clean navmesh; toward-leader keeps the " +
+                    $"bot pointed in the direction it was already trying to go. " +
+                    $"Projection10 will fire at 0° (straight toward leader); " +
+                    $"Projection20/30 sweep ±120° over the forward half-plane. " +
+                    $"pos={pos} leader={leader!.WorldPos}.");
+                fdx = -fdx;
+                fdy = -fdy;
+            }
+        }
+
         // ±120° rotation. yards is always 10/20/30 (the three Projection
         // phases pass these constants explicitly). Use >25/>15 thresholds
         // so the test is robust to future constant adjustments without
@@ -2922,7 +3136,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             0f);
 
         logger.LogInformation(
-            $"[FFG] Fix AB-2: no BL rect contains assist — directional fallback projection " +
+            $"[FFG] [FIX-FIRE] AB-2: no BL rect contains assist — directional fallback projection " +
             $"{yards:0}y (offset={angleOffset * 180f / MathF.PI:+0.0;-0.0;0}°, " +
             $"basis={(usingLeaderDirection ? "away-from-leader" : "reversed-facing")}) → " +
             $"{fallbackTarget} (pos={pos}).");
@@ -4449,7 +4663,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     float angleDeg = MathF.Acos(cosA) * (180f / MathF.PI);
 
                     logger.LogError(
-                        $"[FFG] Fix AC+AE+AI+AL: rejecting strongly-rear-curving COMPLEX path " +
+                        $"[FFG] [FIX-FIRE] AC+AE+AI+AL: rejecting strongly-rear-curving COMPLEX path " +
                         $"(angle > 150° AND simplified route count ≥ {COMPLEX_WRAPAROUND_MIN_ROUTECOUNT}). " +
                         $"Simplified routeTop {snap.SimplifiedRouteTop} is {topDist:0.00}y " +
                         $"from start with dot={dot:0.00} cos={cosA:0.000} " +
@@ -4460,6 +4674,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         $"Signalling Reject — Navigation will clear route and fire OnPathFailed.");
                     snap.Reject = true;
                     snap.RejectCooldownMs = 500;
+                    // Fix BB (log-83): mark that the most recent path failure
+                    // was a rejection (not a stuck-displacement or no-path).
+                    // ComputeAwayFromRectWaypoint's Path-2 fallback consults
+                    // this flag at Projection10 time (~hundreds of ms later
+                    // via the rewind/retry → EnterCantFollow → StartEscapePhase
+                    // chain) to flip the escape direction from AWAY-from-leader
+                    // to TOWARD-leader when the leader is close. See the field
+                    // doc comment near _lastPathFailureWasRejection for full
+                    // rationale and evidence.
+                    _lastPathFailureWasRejection = true;
                     return;
                 }
                 else if (angleExceedsThreshold)
@@ -4477,7 +4701,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     float angleDeg = MathF.Acos(cosA) * (180f / MathF.PI);
 
                     logger.LogWarning(
-                        $"[FFG] Fix AL: angle would have triggered rejection " +
+                        $"[FFG] [FIX-FIRE] AL: angle would have triggered rejection " +
                         $"(angle={angleDeg:0.0}°, cos={cosA:0.000}) but path is a " +
                         $"short simple detour (simplified routeCount={snap.SimplifiedRouteCount} " +
                         $"< {COMPLEX_WRAPAROUND_MIN_ROUTECOUNT}); accepting. " +
@@ -4498,6 +4722,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _staleEmptySameCount = 0;
         _staleEmptyLastStartW = default;
         _staleEmptyLastEndW = default;
+
+        // Fix BB: a successful path acceptance means the pather is no
+        // longer stuck on the U-turn problem that drove the most recent
+        // rejection (if any). Clear the rejection-cause flag so a later
+        // CantFollow (e.g., from a future stuck-displacement scenario)
+        // doesn't spuriously inherit the toward-leader override.
+        _lastPathFailureWasRejection = false;
     }
 
     /// <summary>
@@ -4568,7 +4799,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _staleEmptySameCount++;
 
         logger.LogWarning(
-            $"[FFG] Fix AB-1: stale no-path #{_staleEmptySameCount}/" +
+            $"[FFG] [FIX-FIRE] AB-1: stale no-path #{_staleEmptySameCount}/" +
             $"{StaleEmptyResultsBeforeOnPathFailed} for active (start, end). " +
             $"start={snap.ResultStartW} end={snap.ResultEndW}");
 
@@ -4734,7 +4965,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             if (_directRouteAttemptsInCycle <= MaxDirectRouteAttemptsPerCycle)
             {
                 logger.LogWarning(
-                    $"[FFG] Fix AX: assist stationary (_activeStuckReported=true) " +
+                    $"[FFG] [FIX-FIRE] AX: assist stationary (_activeStuckReported=true) " +
                     $"AND stale-empty matches active. Requesting direct-route " +
                     $"recovery (attempt #{_directRouteAttemptsInCycle}/" +
                     $"{MaxDirectRouteAttemptsPerCycle}). Setting " +
@@ -4754,7 +4985,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // (CantFollow at first stale-empty when stuck). Direct-route did
             // not recover the bot; the position is unrecoverable by walking.
             logger.LogError(
-                $"[FFG] Fix AU (after Fix AX exhausted): assist already in " +
+                $"[FFG] [FIX-FIRE] AU: (after Fix AX exhausted) assist already in " +
                 $"active Stuck state AND pather has returned a stale empty-path " +
                 $"matching the active (start, end) within 1y. Direct-route " +
                 $"recovery was attempted {_directRouteAttemptsInCycle - 1} " +
@@ -4775,7 +5006,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (_staleEmptySameCount >= StaleEmptyResultsBeforeOnPathFailed)
         {
             logger.LogError(
-                $"[FFG] Fix AB-1: pather failed {_staleEmptySameCount} consecutive " +
+                $"[FFG] [FIX-FIRE] AB-1: pather failed {_staleEmptySameCount} consecutive " +
                 $"times for the same (start, end) — signalling Escalate. " +
                 $"Navigation will fire OnPathFailed. start={snap.ResultStartW} end={snap.ResultEndW}");
             _staleEmptySameCount = 0;
@@ -4893,7 +5124,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             if (_activeStuckReported)
             {
                 logger.LogWarning(
-                    $"[FFG] Fix AY: bypassing Fix AD veto on direct-route push " +
+                    $"[FFG] [FIX-FIRE] AY: bypassing Fix AD veto on direct-route push " +
                     $"because bot is stationary (_activeStuckReported=true). " +
                     $"count={snap.SameNoPathCount} dist={snap.DistYards:0.0}y " +
                     $"> {DirectRouteMaxSafeYards:0.0}y. Walking from a dead " +
@@ -4904,7 +5135,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
 
             logger.LogWarning(
-                $"[FFG] Fix AD: signalling Veto on direct-route push " +
+                $"[FFG] [FIX-FIRE] AD: signalling Veto on direct-route push " +
                 $"(count={snap.SameNoPathCount} dist={snap.DistYards:0.0}y > " +
                 $"{DirectRouteMaxSafeYards:0.0}y). Pather has failed twice for " +
                 $"this (start, end) at a non-trivial distance; a direct walk " +
