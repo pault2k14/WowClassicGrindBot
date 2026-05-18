@@ -1046,7 +1046,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"drop gated by bot's facing — only drops snap-back artifacts " +
             $"when facing is forward-aligned with path direction; preserves " +
             $"legitimate turnaround arcs when bot is about to reverse direction. " +
-            $"Turn 4a (Fix BE): SetWaypointLoopGuarded now attempts a route-span " +
+            $"Turn 4a (Fix BE, BE-2): SetWaypointLoopGuarded now attempts a route-span " +
             $"push (SetWayPoints with multi-waypoint span) before falling back " +
             $"to SetSingleWaypoint. When target is near the leader (<25y), " +
             $"a span [route[assistIdx..leaderIdx], target] is pushed, causing " +
@@ -1054,7 +1054,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"default), which keeps Navigation.cs:3548's usePather=false for " +
             $"typical route legs and reduces pathfinder invocation by ~10x. " +
             $"Duplicate-refill suppression (RouteSpanSuppressionMs={RouteSpanSuppressionMs}ms) " +
-            $"prevents every-tick re-pushes. Mirrors FRG's RefillWaypoints pattern. " +
+            $"prevents every-tick re-pushes; BE-2 refinement (log-90 evidence) " +
+            $"suppresses on route-prefix identity (firstWp + length) alone " +
+            $"— trailing-target drift is bounded and re-pushed naturally on " +
+            $"assistIdx advance. Mirrors FRG's RefillWaypoints pattern. " +
             $"Key thresholds: " +
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
@@ -1064,7 +1067,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"AnchorLocalTtlMs={AnchorLocalTtlMs:0}ms, " +
             $"RouteSpanLeaderProximityYards={RouteSpanLeaderProximityYards:0.0}y. " +
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
-            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE. " +
+            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, BE-2. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -4880,10 +4883,30 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         Vector3 firstWp = route[assistIdx];
         Vector3 trailing = targetIsAtLeaderWp ? default : target;
 
-        // Duplicate suppression — same first WP, same length, same trailing,
-        // recent enough → skip the push. Return true so caller treats this
-        // as handled. Critical: WITHOUT this, every-tick re-pushes would
-        // thrash navigation's waypoint stack.
+        // Duplicate suppression — same first WP and same length, recent
+        // enough → skip the push. Return true so caller treats this as
+        // handled. Critical: WITHOUT this, every-tick re-pushes would
+        // thrash navigation's waypoint stack — every SetWayPoints call
+        // CLEARS the existing stack and rebuilds from the span's first
+        // element, so re-pushing the same span causes the bot to restart
+        // its walk from the first waypoint each tick. Log-90 evidence:
+        // with trailing-target included in the duplicate check, the
+        // body-chase target's natural drift (the offset point shifts as
+        // the bot moves, even when the leader is stationary) caused
+        // re-pushes every ~300ms. The bot oscillated between route[6]
+        // and route[7] for 22 seconds because each re-push reset
+        // navigation's progress.
+        //
+        // Fix BE-2 (Turn 4a refinement): suppress on route-prefix identity
+        // alone (firstWp + length). The trailing target's drift is
+        // bounded by the bot's own movement and the leader's movement,
+        // both small per tick. By the time the bot has walked through
+        // the route portion of the span (15+ waypoints), the trailing
+        // target will have been re-pushed many times via natural
+        // assistIdx advancement (when the bot's nearest route waypoint
+        // changes, firstWp changes, suppression breaks, push happens
+        // with fresh trailing target). For staleness within a single
+        // span execution, the bounded drift is acceptable.
         DateTime now = DateTime.UtcNow;
         if (_lastRouteSpanUtc != DateTime.MinValue)
         {
@@ -4892,10 +4915,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             {
                 bool sameFirst = firstWp.WorldDistanceXYTo(_lastRouteSpanFirstWp) < RouteSpanSuppressionYards;
                 bool sameLength = totalLen == _lastRouteSpanLength;
-                bool sameTrailing = targetIsAtLeaderWp
-                    ? _lastRouteSpanTrailing == default
-                    : trailing.WorldDistanceXYTo(_lastRouteSpanTrailing) < RouteSpanSuppressionYards;
-                if (sameFirst && sameLength && sameTrailing)
+                if (sameFirst && sameLength)
                 {
                     outcome = $"duplicate-suppressed (elapsed={elapsedMs:0}ms, firstWp={firstWp}, len={totalLen})";
                     return true;
