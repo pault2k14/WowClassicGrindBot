@@ -3928,8 +3928,89 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         float distToTarget = playerReader.WorldPos.WorldDistanceXYTo(navigation.LoadedRoute[idx]);
         if (distToTarget <= Navigation.POP_DIST)
         {
-            // Already at (or within POP_DIST of) the current target —
-            // no point deferring. The Anchor branch transitions now.
+            // ── Fix BI-1 (log-94 post-kill rotation thrash) ─────────────
+            //
+            // When the bot is parked at its trailing-by-one cap
+            // (idx == allowedAdvance AND distToTarget ≤ POP_DIST), staying
+            // in RouteWalk is correct; switching to Anchor causes a
+            // visible flip-flop that the user described as "facing back
+            // toward where they came from, walking for a few seconds,
+            // then stopping and turning around."
+            //
+            // The flip-flop dynamics (kill #21 trace, 01:21:58 → 01:22:04,
+            // 5 big rotations in 6 seconds):
+            //   tick t₀ — bot at route[allowedAdvance], distToTarget=3.2y.
+            //             POP_DIST=3.6y. The original `return false` here
+            //             selects Anchor mode (target=approach-start
+            //             anchor, often 10-33y away in a perpendicular or
+            //             opposite direction from the route progression).
+            //   tick t₀+200ms — bot has rotated ~30° toward Anchor and
+            //             moved 1-2y. distToTarget to route waypoint now
+            //             ≈4.0y > POP_DIST. CheckShouldDefer now returns
+            //             TRUE-with-real-anchor → defer engaged, mode
+            //             flips Anchor → RouteWalk. Bot rotates 180° to
+            //             face route waypoint again.
+            //   tick t₀+900ms — bot has rotated back, distToTarget to
+            //             route waypoint dropped back below POP_DIST.
+            //             CheckShouldDefer flips back to FALSE → Anchor
+            //             mode reactivates. Bot rotates 180° again.
+            //   …repeats until the leader's approach phase ends, typically
+            //   1.5-3 seconds later. Each cycle = one 700-944ms rotation
+            //   key press visible to the user.
+            //
+            // Evidence: 19 deferrals (CheckShouldDefer returned TRUE with
+            // real anchor) across the 13.5-min log, ALL of them ended via
+            // "Approach ended without arrival at route waypoint" (the
+            // pending anchor was cleared without the assist completing a
+            // route leg). **0 successful deferred handoffs** at the
+            // line-4329 success path. The deferral mechanism's intended
+            // success path is unreachable in steady-state grinding — the
+            // leader's pull always completes faster than the assist can
+            // walk a full route leg.
+            //
+            // Trailing-by-one already places the bot one waypoint behind
+            // the leader's route position. The leader walks toward the
+            // next mob, entering combat from some angle. The bot is
+            // positioned to chase via PositionChase (mode auto-switches
+            // when leader.Status leaves Patrolling). No Anchor detour is
+            // needed in this geometry.
+            //
+            // Returning TRUE without setting anchorCoords (leaves it
+            // default) tells the caller to fall through to the RouteWalk
+            // block without storing a pending anchor. Initial _pendingAnchor
+            // value is also default, so the caller's `_pendingAnchor !=
+            // deferAnchor` check evaluates false → no update, no log. The
+            // deferred handoff at line ~4329 doesn't fire because it
+            // requires _pendingAnchor != default. Bot stays parked.
+            //
+            // Once the leader transitions Patrolling → Combat, the
+            // RouteWalk gate fails (Status != Patrolling/Waiting) and
+            // control falls through to PositionChase, which is the
+            // correct mode for chasing the leader's combat position.
+            //
+            // Edge case: bot was deferring with a real pending anchor
+            // (idx < allowedAdvance, distToTarget > POP_DIST) on tick N,
+            // then on tick N+1 advances to allowedAdvance with
+            // distToTarget ≤ POP_DIST. _pendingAnchor was real,
+            // deferAnchor=default now — the caller's update path runs and
+            // overwrites pending to default, logging a "Pending anchor
+            // updated" entry with `shift` equal to the prior anchor's
+            // distance from origin (thousands of yards). This is
+            // cosmetically misleading but harmless; the state mutation
+            // is exactly what we want (clear the pending so the
+            // deferred-handoff doesn't fire on subsequent ticks).
+            if (idx == allowedAdvance)
+            {
+                return true;
+            }
+
+            // Bot is at a non-cap waypoint (idx < allowedAdvance with
+            // distToTarget within POP_DIST — i.e., on a transient
+            // intermediate waypoint that the advance loop didn't pop
+            // yet). The original "no defer → Anchor direct" path applies
+            // because the bot can still advance the route on a future
+            // tick; entering Anchor mode immediately is the design intent
+            // here.
             return false;
         }
 
