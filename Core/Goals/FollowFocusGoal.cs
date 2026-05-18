@@ -676,7 +676,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     //
     // Lifecycle:
     //   - Sentinel -1 = "no cached value yet."
-    //   - Reset to -1 on FFG OnEnter and OnExit (fresh session).
+    //   - Initialized lazily by TryFindLeaderRouteIndex's primary path
+    //     (the first tick where leader.HasTargetWaypoint matches a
+    //     route entry within tolerance).
+    //   - Refreshed by TryFindLeaderRouteIndex on every subsequent
+    //     primary-path hit (line ~3784).
+    //   - Read by the fallback path when primary fails (e.g.,
+    //     HasTargetWaypoint=false during combat or approach phases).
+    //   - Auto-rejected by the TTL check inside the fallback path when
+    //     age exceeds CachedLeaderRouteIdxMaxAgeSec (30s).
+    //   - Fix BI-2: PRESERVED across FFG OnExit/OnEnter session
+    //     boundaries (was reset to -1 prior to BI-2). The TTL handles
+    //     bounded staleness; preserving lets the fallback path succeed
+    //     immediately at FFG.OnEnter post-combat, eliminating the
+    //     1-2 second window of stale-PositionChase walking that caused
+    //     the 180° flip-on-cache-repopulate bug.
     private int _cachedLeaderRouteIdx = -1;
     private DateTime _cachedLeaderRouteIdxUtc = DateTime.MinValue;
     private const double CachedLeaderRouteIdxMaxAgeSec = 30.0;
@@ -1036,12 +1050,71 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // transition next time RouteWalk advances to a waypoint.
         _pendingAnchor = default;
 
-        // ── Route-walking migration: Turn 3.5 ──
-        // Clear cached leader route index — the next session may have
-        // a different starting state, and stale cache could mislead
-        // the very first defer attempt.
-        _cachedLeaderRouteIdx = -1;
-        _cachedLeaderRouteIdxUtc = DateTime.MinValue;
+        // ── Fix BI-2 (log-94 kill #15 01:19:54:276 → 01:19:57:636,
+        //    1.9-second stale-PositionChase SE walk followed by a 180°
+        //    flip to the correct route NW, drift=39.9y, LeftArrow 976ms) ──
+        //
+        // The cache is PRESERVED across OnExit/OnEnter session boundaries.
+        // Prior behavior cleared it here (and at the symmetric OnExit
+        // site at line ~1312), which created a window after every FFG
+        // re-entry where:
+        //   1. The leader had just published a patrol waypoint
+        //      (FRG.Published patrol waypoint event)
+        //   2. But the assist's polled leader.HasTargetWaypoint hadn't
+        //      caught up yet (~150-2000ms polling/propagation lag)
+        //   3. TryFindLeaderRouteIndex's primary path failed because
+        //      leader.HasTargetWaypoint=false
+        //   4. The fallback path also failed because the cache was
+        //      just reset to -1 here
+        //   5. GetNavigationTarget fell through to PositionChase, using
+        //      leader.WorldPos directly (also has polling lag, so it
+        //      points to wherever the leader WAS before publishing the
+        //      new patrol waypoint — typically several yards in the
+        //      direction the leader was facing pre-combat)
+        //   6. The bot walked 4-5y toward the stale leader position,
+        //      typically southward away from the route
+        //   7. The cache finally repopulated when the primary path's
+        //      conditions all aligned
+        //   8. RouteWalk's Initial sync picked the nearest safe route
+        //      waypoint at-or-before allowedAdvance — for an off-route
+        //      bot, this waypoint was often ~30-40y in a roughly
+        //      opposite direction from where the bot had just been
+        //      walking
+        //   9. Mode change PositionChase → RouteWalk with massive drift
+        //      caused a ~180° body rotation key press (LeftArrow 976ms
+        //      in log-94's worst case — almost a full reversal)
+        //
+        // Preserving the cache means the fallback path can succeed
+        // immediately at FFG.OnEnter, RouteWalk engages on the first
+        // tick, and the bot turns ONCE to face its route waypoint
+        // (rather than turning to face stale-leader, walking briefly,
+        // then turning 180° to face route).
+        //
+        // The TTL check at TryFindLeaderRouteIndex line ~3808 already
+        // rejects stale cache (age > CachedLeaderRouteIdxMaxAgeSec).
+        // For typical grinding kills (combat duration 5-15s) the cache
+        // is still within TTL at FFG.OnEnter. For extended combat
+        // (>30s) the cache expires and behaviour matches the original
+        // (fall through to PositionChase). For first-ever FFG.OnEnter
+        // the cache is at its default (idx=-1, utc=MinValue) and the
+        // fallback path returns false as before — unchanged.
+        //
+        // Why this is safe across session boundaries:
+        //   - The cached value stores a route INDEX, not a physical
+        //     position. Even if the leader moved during combat, the
+        //     cached index reflects where the leader was on the route
+        //     before combat. Post-combat, the leader resumes patrol
+        //     from approximately the same route position (it didn't
+        //     teleport — combat was localised). The cached index is
+        //     therefore approximately correct.
+        //   - TryFindLeaderRouteIndex's primary path overwrites the
+        //     cache on the FIRST tick where leader.HasTargetWaypoint
+        //     matches a route entry. So any drift from the pre-combat
+        //     cached value is short-lived; once polling catches up
+        //     (typically within 500ms-1.5s), the cache is refreshed
+        //     with the current correct value.
+        //   - Cross-session leak from a long-past FFG session: the TTL
+        //     guarantees rejection of >30s-old cache.
 
         // ── Route-walking migration: Turn 3.5b ──
         // Reset the cache-fallback-in-use flag so the first transition
@@ -1306,11 +1379,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // confuse it.
         _pendingAnchor = default;
 
-        // ── Route-walking migration: Turn 3.5 ──
-        // Clear cached leader route index on exit. Symmetric with
-        // OnEnter; ensures no leak across FFG sessions.
-        _cachedLeaderRouteIdx = -1;
-        _cachedLeaderRouteIdxUtc = DateTime.MinValue;
+        // ── Fix BI-2 (log-94 kill #15) ──
+        // Cache PRESERVED across the OnExit boundary. See the matching
+        // OnEnter block (~line 1043) for the full rationale. The TTL
+        // check inside TryFindLeaderRouteIndex auto-rejects stale
+        // cache, so cross-session leaks are bounded. Preserving here
+        // (symmetric with OnEnter) means the next FFG re-entry has
+        // the cache available immediately for its fallback path.
 
         // ── Route-walking migration: Turn 3.5b ──
         _cacheFallbackInUse = false;
