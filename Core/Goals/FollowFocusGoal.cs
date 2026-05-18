@@ -827,23 +827,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // Turn 4a / Fix BE — route-span navigation tracking
     // -----------------------------------------------------------------------
     // Records the last route-span push so duplicate refreshes can be
-    // suppressed. Without suppression, every-tick re-pushes of the same span
-    // would thrash navigation's waypoint stack and degrade behavior below
-    // the original SetSingleWaypoint baseline. Mirror of FRG's
-    // IsDuplicateRecentRefill pattern (FollowRouteGoal.cs line 2125).
+    // suppressed. Mirrors FRG's _lastRefill* fields at FollowRouteGoal.cs:
+    // 74-76 + RefillWaypointsDuplicateCooldownMs at line 77.
     //
     // A push is "duplicate" if all of:
-    //   - first route waypoint is within RouteSpanSuppressionYards of last
+    //   - first route waypoint matches last (within 0.01y — route waypoints
+    //     are stable Vector3 values, so 0.01y is essentially equality)
     //   - length matches last push
-    //   - trailing element (if any) is within RouteSpanSuppressionYards
     //   - elapsed since last push < RouteSpanSuppressionMs
-    // Otherwise it's a meaningfully different span and gets pushed.
+    //   - AND navigation.HasWaypoint() || navigation.HasNext() (content-
+    //     aware safety: only suppress when nav has waypoints loaded)
+    // See IsDuplicateRecentRouteSpan / RecordRouteSpanPush helpers.
     private Vector3 _lastRouteSpanFirstWp;
-    private Vector3 _lastRouteSpanTrailing;
     private int _lastRouteSpanLength;
     private DateTime _lastRouteSpanUtc = DateTime.MinValue;
-    private const int RouteSpanSuppressionMs = 500;
-    private const float RouteSpanSuppressionYards = 1.0f;
+    private const int RouteSpanSuppressionMs = 750;
 
     // Threshold for "target is near the leader." Above this, the target is
     // likely a rewind anchor, recovery projection, or other off-leader point
@@ -1046,18 +1044,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"drop gated by bot's facing — only drops snap-back artifacts " +
             $"when facing is forward-aligned with path direction; preserves " +
             $"legitimate turnaround arcs when bot is about to reverse direction. " +
-            $"Turn 4a (Fix BE, BE-2): SetWaypointLoopGuarded now attempts a route-span " +
+            $"Turn 4a (Fix BE): SetWaypointLoopGuarded now attempts a route-span " +
             $"push (SetWayPoints with multi-waypoint span) before falling back " +
             $"to SetSingleWaypoint. When target is near the leader (<25y), " +
-            $"a span [route[assistIdx..leaderIdx], target] is pushed, causing " +
+            $"a span [route[resumeIndex..leaderIdx], target] is pushed, causing " +
             $"AvgDistance to reflect the real route stride (~10y instead of 3y " +
             $"default), which keeps Navigation.cs:3548's usePather=false for " +
-            $"typical route legs and reduces pathfinder invocation by ~10x. " +
-            $"Duplicate-refill suppression (RouteSpanSuppressionMs={RouteSpanSuppressionMs}ms) " +
-            $"prevents every-tick re-pushes; BE-2 refinement (log-90 evidence) " +
-            $"suppresses on route-prefix identity (firstWp + length) alone " +
-            $"— trailing-target drift is bounded and re-pushed naturally on " +
-            $"assistIdx advance. Mirrors FRG's RefillWaypoints pattern. " +
+            $"typical route legs. Span construction mirrors FRG.RefillWaypoints: " +
+            $"projection-aware advancement (incByDistance + incByProgress + POP " +
+            $"loop) computes resumeIndex correctly when bot is between route " +
+            $"waypoints; duplicate-suppression uses content-aware safety " +
+            $"(navigation.HasWaypoint() || HasNext()) plus FRG-style exact " +
+            $"match within RouteSpanSuppressionMs={RouteSpanSuppressionMs}ms. " +
             $"Key thresholds: " +
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
@@ -1067,7 +1065,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"AnchorLocalTtlMs={AnchorLocalTtlMs:0}ms, " +
             $"RouteSpanLeaderProximityYards={RouteSpanLeaderProximityYards:0.0}y. " +
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
-            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, BE-2. " +
+            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -4762,64 +4760,87 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // Turn 4a / Fix BE — route-span navigation
     // -----------------------------------------------------------------------
     //
-    // EVIDENCE (log-89):
-    //   Leader made 9 pathfinder requests in a 10-minute run; assist made 319.
-    //   The 35x asymmetry was caused by the assist using SetSingleWaypoint
-    //   (which internally calls SetWayPoints with a 1-element span,
-    //   producing AvgDistance=OutDoorMinDistance=3y) while the leader uses
-    //   SetWayPoints with a multi-waypoint span (AvgDistance ≈ real route
-    //   stride ≈ 10y). The Navigation.cs:3548 formula
-    //   `bool usePather = distance > MaxDistance || distance > AvgDistance * 2`
+    // EVIDENCE (log-89, 10-minute run):
+    //   Leader made 9 pathfinder requests; assist made 319 — a 35x asymmetry.
+    //   Caused by the assist using SetSingleWaypoint (which internally calls
+    //   SetWayPoints with a 1-element span, producing AvgDistance=
+    //   OutDoorMinDistance=3y) while the leader uses SetWayPoints with a
+    //   multi-waypoint span (AvgDistance ≈ real route stride ≈ 10y). The
+    //   Navigation.cs:3548 formula
+    //     `bool usePather = distance > MaxDistance || distance > AvgDistance * 2`
     //   makes usePather=true for any single-waypoint target >6y away, and
     //   usePather=false for typical multi-waypoint route legs of ~10y.
     //
-    //   The assist's pather dependency caused fragility to pathfinder
-    //   latency spikes (3 of 322 queries in log-89 were >200ms; one was
-    //   2543ms). The corridor stop at <-516,-4449> for 7+ seconds was a
-    //   single pathfinder hang that froze the assist because it had no
-    //   active waypoint to walk while waiting. The leader traversed the
-    //   same corridor at the same time without incident.
+    //   The assist's pather dependency caused fragility to pathfinder latency
+    //   spikes (3 of 322 queries in log-89 were >200ms; one was 2543ms). The
+    //   corridor stop at <-516,-4449> for 7+ seconds was a single pathfinder
+    //   hang that froze the assist because it had no active waypoint to walk
+    //   while waiting. The leader traversed the same corridor at the same
+    //   time without incident.
     //
-    // SOLUTION:
+    // SOLUTION (mirrors FollowRouteGoal.cs:1924-2135 — FRG.RefillWaypoints):
     //   When SetWaypointLoopGuarded is called with a target near the leader
     //   (within RouteSpanLeaderProximityYards), build a span of route
-    //   waypoints from the assist's nearest route index to the leader's
-    //   nearest route index, with the target appended as the trailing
-    //   waypoint. Push via SetWayPoints. The route portion direct-walks
-    //   (no pather); the trailing leg may or may not invoke the pather
-    //   depending on its distance from the last route waypoint, but it's
-    //   at most ONE pather call per span — not one per refresh.
+    //   waypoints from the assist's projected next-route-index to the
+    //   leader's route index, optionally with the target appended as the
+    //   trailing waypoint. Push via SetWayPoints. The route portion direct-
+    //   walks (no pather); the trailing leg may or may not invoke the pather
+    //   depending on its distance from the last route waypoint, but it's at
+    //   most ONE pather call per span — not one per refresh.
     //
     //   When the target is NOT near the leader (rewind anchor, recovery
-    //   projection, etc.), fall through to the original SetSingleWaypoint
-    //   behavior. These cases are typically one-shot calls where a single
-    //   pather query is acceptable.
+    //   projection, etc.), fall through to original SetSingleWaypoint
+    //   behavior. These are typically one-shot calls where a single pather
+    //   query is acceptable.
     //
-    // FALLBACK:
-    //   Returns false (caller uses SetSingleWaypoint) when:
+    // PROJECTION-AWARE ADVANCEMENT (mirrors FRG:1971-2030):
+    //   FindNearestSafeRouteIndex picks by simple Euclidean distance. When
+    //   the bot is between route[N] and route[N+1] but slightly closer to
+    //   route[N], that returns N. Building a span starting at route[N]
+    //   forces the bot to walk BACKWARDS to a waypoint it already passed.
+    //   Log-91 evidence: bot oscillated between route[23] and route[24] for
+    //   40 seconds because each push reset navigation's stack to start at
+    //   route[23] (Euclidean-nearest but already projection-passed).
+    //
+    //   The advancement applies at most one increment via:
+    //     incByDistance = dHere < 1.5y OR dNext <= dHere * 1.25  (bot is
+    //       at, or essentially at, current waypoint)
+    //     incByProgress = (bot - A) · (B - A) > 0  (bot's foot-of-
+    //       perpendicular onto segment A→B is past A toward B)
+    //   ...then a POP loop for any further waypoints already within
+    //   POP_DIST (bounded by leaderIdx so we never advance past the leader).
+    //
+    // FALLBACK (caller uses SetSingleWaypoint) when:
     //   - LoadedRoute is empty
     //   - leader state unavailable
-    //   - TryFindLeaderRouteIndex fails (leader not on route, no cache)
     //   - target is too far from leader (>RouteSpanLeaderProximityYards)
-    //   - assist is already at/past the leader on route (leaderIdx <= assistIdx)
+    //   - TryFindLeaderRouteIndex fails (leader not on route, no cache)
+    //   - FindNearestSafeRouteIndex fails
+    //   - after advancement, resumeIndex >= leaderIdx (no forward span)
     //
-    // DUPLICATE SUPPRESSION:
-    //   If the same span (same first waypoint, same length, same trailing
-    //   within tolerance) was just pushed within RouteSpanSuppressionMs,
-    //   skip the re-push. Without this, every-tick refreshes would
-    //   constantly rebuild navigation's waypoint stack — the architecture
-    //   would perform WORSE than the original SetSingleWaypoint baseline.
-    //   Returns true on suppression so the caller treats this as "handled."
+    // DUPLICATE SUPPRESSION (mirrors FRG:1273-1279 + line 1936 gate):
+    //   Two-part check, suppress only if BOTH:
+    //     1. canSkipDuplicateRefill = navigation.HasWaypoint() || HasNext()
+    //        — only suppress when nav actually has waypoints loaded. If the
+    //        stack was cleared (e.g., by EnterCantFollow's Stop()), a fresh
+    //        push is required regardless. Content-aware safety, not a
+    //        time-based heuristic.
+    //     2. IsDuplicateRecentRouteSpan: same firstWp (route waypoints are
+    //        stable Vector3 values — 0.01y tolerance) AND same total length
+    //        AND within RouteSpanSuppressionMs (750ms, matching FRG's
+    //        RefillWaypointsDuplicateCooldownMs).
+    //
+    //   With projection-aware advancement above, the same span doesn't get
+    //   re-computed across many ticks — when the bot advances, resumeIndex
+    //   changes, firstWp changes, suppression breaks naturally.
     //
     // LOOP-GUARD INTERACTION:
-    //   The SetWaypoint loop guard tracks consecutive calls within 100ms
-    //   where the bot moved <1y. It increments a counter and escalates to
-    //   CantFollow when the counter exceeds 10. With route-span navigation,
-    //   most calls suppress as duplicates (no SetWayPoints invocation),
-    //   so we do NOT update _lastSetWaypointUtc/PlayerPos on suppression
-    //   — the loop guard compares against the last ACTUAL push, which
-    //   captures real bot displacement and correctly resets the counter.
-    //   On a true span push, we update the loop-guard state normally.
+    //   The SetWaypoint loop guard (caller — SetWaypointLoopGuarded) tracks
+    //   consecutive calls within 100ms where the bot moved <1y. On a
+    //   suppressed push, we don't want the loop guard to count it as a
+    //   "stationary set" — the bot IS walking the existing span. Caller
+    //   handles this by only updating _lastSetWaypointUtc/PlayerPos when
+    //   outcome starts with "pushed" (actual SetWayPoints invocation).
     private bool TryPushRouteSpanForTarget(Vector3 target, out string outcome)
     {
         outcome = "?";
@@ -4855,105 +4876,124 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         Vector3 playerPos = playerReader.WorldPos;
-        int assistIdx = FindNearestSafeRouteIndex(playerPos, route.Length - 1);
-        if (assistIdx < 0)
+        int closestIndex = FindNearestSafeRouteIndex(playerPos, route.Length - 1);
+        if (closestIndex < 0)
         {
             outcome = "no-assist-route-idx";
             return false;
         }
 
-        if (leaderIdx <= assistIdx)
+        // Projection-aware advancement (mirrors FRG:1971-2030).
+        // See header comment "PROJECTION-AWARE ADVANCEMENT" for rationale.
+        int resumeIndex = closestIndex;
+        if (resumeIndex < route.Length - 1)
         {
-            // Assist is at or past leader on the route. Forward-span would be
-            // empty or single-element; fall back to single-waypoint so the
-            // bot can do a tight body-chase to wherever the leader actually
-            // is. (Backward-span handling is deferred to a later sub-turn.)
-            outcome = $"leader-at-or-behind (assistIdx={assistIdx}, leaderIdx={leaderIdx})";
+            Vector3 a = route[resumeIndex];
+            Vector3 b = route[resumeIndex + 1];
+
+            float dHere = playerPos.WorldDistanceXYTo(a);
+            float dNext = playerPos.WorldDistanceXYTo(b);
+
+            bool incByDistance = dHere < 1.5f || dNext <= dHere * 1.25f;
+
+            bool incByProgress = false;
+            float abx = b.X - a.X;
+            float aby = b.Y - a.Y;
+            float abLenSq = abx * abx + aby * aby;
+            if (abLenSq > 0.001f)
+            {
+                float apx = playerPos.X - a.X;
+                float apy = playerPos.Y - a.Y;
+                float t = (apx * abx + apy * aby) / abLenSq;
+                if (t > 0.0f) incByProgress = true;
+            }
+
+            if (incByDistance || incByProgress)
+                resumeIndex++;
+        }
+
+        // POP loop for already-reached waypoints, bounded by leaderIdx.
+        while (resumeIndex < leaderIdx)
+        {
+            if (playerPos.WorldDistanceXYTo(route[resumeIndex]) < Navigation.POP_DIST)
+                resumeIndex++;
+            else
+                break;
+        }
+
+        if (resumeIndex >= leaderIdx)
+        {
+            // At or past leader's route position. Forward span would be empty
+            // or single-element; let caller use SetSingleWaypoint for the
+            // tight body-chase to wherever the leader actually is.
+            outcome = $"resumeIndex-at-or-past-leader (closestIndex={closestIndex}, resumeIndex={resumeIndex}, leaderIdx={leaderIdx})";
             return false;
         }
 
-        // Determine if the target is essentially at route[leaderIdx]
-        // — if so, no trailing element needed; the route waypoints already
-        // arrive there.
+        // Determine if the target is essentially at route[leaderIdx] — if so,
+        // no trailing element needed; the route waypoints already arrive there.
         bool targetIsAtLeaderWp = target.WorldDistanceXYTo(route[leaderIdx]) < Navigation.POP_DIST;
-
-        int routeCount = leaderIdx - assistIdx + 1;
+        int routeCount = leaderIdx - resumeIndex + 1;
         int totalLen = targetIsAtLeaderWp ? routeCount : routeCount + 1;
+        Vector3 firstWp = route[resumeIndex];
 
-        Vector3 firstWp = route[assistIdx];
-        Vector3 trailing = targetIsAtLeaderWp ? default : target;
-
-        // Duplicate suppression — same first WP and same length, recent
-        // enough → skip the push. Return true so caller treats this as
-        // handled. Critical: WITHOUT this, every-tick re-pushes would
-        // thrash navigation's waypoint stack — every SetWayPoints call
-        // CLEARS the existing stack and rebuilds from the span's first
-        // element, so re-pushing the same span causes the bot to restart
-        // its walk from the first waypoint each tick. Log-90 evidence:
-        // with trailing-target included in the duplicate check, the
-        // body-chase target's natural drift (the offset point shifts as
-        // the bot moves, even when the leader is stationary) caused
-        // re-pushes every ~300ms. The bot oscillated between route[6]
-        // and route[7] for 22 seconds because each re-push reset
-        // navigation's progress.
-        //
-        // Fix BE-2 (Turn 4a refinement): suppress on route-prefix identity
-        // alone (firstWp + length). The trailing target's drift is
-        // bounded by the bot's own movement and the leader's movement,
-        // both small per tick. By the time the bot has walked through
-        // the route portion of the span (15+ waypoints), the trailing
-        // target will have been re-pushed many times via natural
-        // assistIdx advancement (when the bot's nearest route waypoint
-        // changes, firstWp changes, suppression breaks, push happens
-        // with fresh trailing target). For staleness within a single
-        // span execution, the bounded drift is acceptable.
-        DateTime now = DateTime.UtcNow;
-        if (_lastRouteSpanUtc != DateTime.MinValue)
+        // Duplicate suppression (mirrors FRG:1273-1279 + line 1936 gate).
+        // See header comment "DUPLICATE SUPPRESSION" for rationale.
+        bool canSkipDuplicateRefill = navigation.HasWaypoint() || navigation.HasNext();
+        if (canSkipDuplicateRefill && IsDuplicateRecentRouteSpan(firstWp, totalLen))
         {
-            double elapsedMs = (now - _lastRouteSpanUtc).TotalMilliseconds;
-            if (elapsedMs < RouteSpanSuppressionMs)
-            {
-                bool sameFirst = firstWp.WorldDistanceXYTo(_lastRouteSpanFirstWp) < RouteSpanSuppressionYards;
-                bool sameLength = totalLen == _lastRouteSpanLength;
-                if (sameFirst && sameLength)
-                {
-                    outcome = $"duplicate-suppressed (elapsed={elapsedMs:0}ms, firstWp={firstWp}, len={totalLen})";
-                    return true;
-                }
-            }
+            outcome = $"duplicate-suppressed (firstWp={firstWp}, len={totalLen})";
+            logger.LogInformation(
+                $"[FFG] [FIX-FIRE] BE: route-span duplicate suppressed " +
+                $"(navigation has waypoints loaded, firstWp={firstWp}, len={totalLen}). " +
+                $"Existing span is being walked.");
+            return true;
         }
 
-        // Build and push the span. The route portion direct-walks
-        // (AvgDistance becomes the real route stride after SetWayPoints);
-        // the trailing leg (if any) walks direct unless distance to it
-        // exceeds AvgDistance * 2 (in which case pather invoked ONCE).
+        // Build and push the span.
         Span<Vector3> span = stackalloc Vector3[totalLen];
         for (int i = 0; i < routeCount; i++)
-        {
-            span[i] = route[assistIdx + i];
-        }
+            span[i] = route[resumeIndex + i];
         if (!targetIsAtLeaderWp)
-        {
             span[totalLen - 1] = target;
-        }
 
         navigation.SetWayPoints(span);
+        RecordRouteSpanPush(firstWp, totalLen);
 
-        _lastRouteSpanFirstWp = firstWp;
-        _lastRouteSpanLength = totalLen;
-        _lastRouteSpanTrailing = trailing;
-        _lastRouteSpanUtc = now;
-
+        bool advancedByProjection = resumeIndex != closestIndex;
         logger.LogInformation(
-            $"[FFG] [FIX-FIRE] BE: route-span push (Turn 4a) — {totalLen} waypoints " +
-            $"[route[{assistIdx}..{leaderIdx}]={routeCount} pre-validated waypoints" +
-            $"{(targetIsAtLeaderWp ? ", no trailing target (at leader WP)" : $" + trailing target {target}")}]. " +
-            $"AvgDistance now reflects route stride; pather is invoked at most once " +
-            $"per span (for the trailing leg, if any). Replaces SetSingleWaypoint's " +
-            $"per-refresh pather invocation.");
+            $"[FFG] [FIX-FIRE] BE: route-span push — {totalLen} waypoints " +
+            $"[route[{resumeIndex}..{leaderIdx}]={routeCount} pre-validated waypoints" +
+            $"{(targetIsAtLeaderWp ? ", no trailing target (at leader WP)" : $" + trailing target {target}")}]" +
+            $"{(advancedByProjection ? $" — advanced from closestIndex={closestIndex} via projection (bot past closest waypoint)" : "")}.");
 
         outcome = targetIsAtLeaderWp ? "pushed-pure-route" : "pushed-with-trailing";
         return true;
+    }
+
+    // Duplicate-suppression helper (mirrors FRG.IsDuplicateRecentRefill at
+    // FollowRouteGoal.cs:1273-1279). Returns true if the proposed span has
+    // the same first waypoint and same length as the previous push, within
+    // the suppression window. 0.01y tolerance on firstWp is essentially an
+    // equality check — route waypoints are stable Vector3 values across
+    // calls when resumeIndex hasn't advanced.
+    private bool IsDuplicateRecentRouteSpan(Vector3 firstWp, int count)
+    {
+        if (_lastRouteSpanLength != count) return false;
+        if (_lastRouteSpanFirstWp == default) return false;
+        float d = firstWp.WorldDistanceXYTo(_lastRouteSpanFirstWp);
+        if (d > 0.01f) return false;
+        return (DateTime.UtcNow - _lastRouteSpanUtc).TotalMilliseconds < RouteSpanSuppressionMs;
+    }
+
+    // Records the span we just pushed for use by IsDuplicateRecentRouteSpan
+    // on subsequent calls. Mirrors FRG.RecordRefillWaypoints at
+    // FollowRouteGoal.cs:1282-1287.
+    private void RecordRouteSpanPush(Vector3 firstWp, int count)
+    {
+        _lastRouteSpanFirstWp = firstWp;
+        _lastRouteSpanLength = count;
+        _lastRouteSpanUtc = DateTime.UtcNow;
     }
 
     private bool SetWaypointLoopGuarded(Vector3 target)
