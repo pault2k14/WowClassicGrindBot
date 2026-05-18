@@ -1499,6 +1499,19 @@ public sealed partial class Navigation : IDisposable
 
                 // Refill produced a real route — safe to clear the latch now.
                 ClearDestinationLatch();
+
+                // Fix BH-1 (defensive, paired with the active check inside
+                // RefillWaypoints' Site 3 invoke at line ~3589): even with
+                // the in-Refill bail-out, recheck active here in case the
+                // Refill flow built a route while the pause flag was being
+                // set (millisecond-level race between OnWayPointReached and
+                // Refill's downstream EnqueuePathRequest / SetWaypoints
+                // calls). Without this, a stale route would persist into
+                // the steering block below and StartForward(true) would
+                // press the forward key after PausePathing was supposed
+                // to have stopped us.
+                if (!active)
+                    return;
             }
         }
 
@@ -1670,6 +1683,14 @@ public sealed partial class Navigation : IDisposable
 
                 // Refill produced a real route — safe to clear the latch now.
                 ClearDestinationLatch();
+
+                // Fix BH-1 (defensive, see line ~1503 for full rationale):
+                // Refill internal pop site can fire OnWayPointReached, whose
+                // FRG handler may call PausePathing. Without this check,
+                // Update falls through to the steering block and re-presses
+                // the forward key.
+                if (!active)
+                    return;
             }
         }
 
@@ -3587,6 +3608,37 @@ public sealed partial class Navigation : IDisposable
                 TrackPopAndDedupIfOscillating(Nav2D(completed));
 
                 OnWayPointReached?.Invoke();
+
+                // ── Fix BH-1 (log-94 01:25:36:706 → 01:26:15:353, 39-second,
+                //    69y leader drift while "paused") ──────────────────────
+                // OnWayPointReached can fire from THREE sites in this file
+                // (lines 989, 1125, 3589). Fix BG-1 added the active re-check
+                // after TryConsumeReachedWaypoint calls in Update (lines
+                // 1489 and 1660) to catch the case where FRG's pause-SET
+                // handler called PausePathing inside Site 989. But the
+                // current site (3589, inside RefillWaypoints) was missed —
+                // when the leader hits a "waypoint already reached" POP via
+                // Refill, the same handler fires, sets active=false, but
+                // Refill continues building a route and Update reaches
+                // input.StartForward(true) at line ~1771.
+                //
+                // Log-94 evidence: the leader's pause #5 at 01:25:36:706
+                // was triggered by "REFILL: waypoint already reached -> POP"
+                // (Site 3), not by the normal "POP WAYPOINT (XY reached)"
+                // (Site 1). Pauses 1-4 went through Site 1 and BG-1 caught
+                // them correctly. Pause 5 went through Site 3, BG-1 missed
+                // it, and the leader drifted 69y east into terrain — the
+                // user's "ran off into a terrain obstacle at the very end."
+                //
+                // Exit Refill cleanly via the same REFILL_EXIT path used
+                // when the post-pop stack is empty; the phase tag lets log
+                // grep distinguish this exit cause from the others.
+                if (!active)
+                {
+                    RefillExit("pause_during_wpReachedHandler");
+                    _phase = "exit_pause_during_wpReachedHandler";
+                    goto REFILL_EXIT;
+                }
 
                 if (wayPoints.Count == 0)
                 {

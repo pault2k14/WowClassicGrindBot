@@ -305,6 +305,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // this, even if the phase timer hasn't elapsed, we treat the phase
     // as stuck and may consider escalating earlier.
     private const float EscapeMinProgressYards = 1.5f;
+    // Fix BH-2 (log-94 01:26:18:001 → 01:26:46:807, 28.8-second 1630-event
+    // CPU loop). Minimum distance to the nearest route waypoint required
+    // before "toward-route" basis (Fix BD) is selected for the CantFollow
+    // escape projection. Must be > EscapeArrivalYards or the BG-2 clamp
+    // (effectiveYards = routeBasisDist) produces a projection target
+    // INSIDE the arrival radius — arrival check fires on the very next
+    // tick before the bot can move, the phase restarts, the same
+    // projection re-fires, and the phase budget timer is constantly
+    // reset (never reaching the 3-second escalation threshold).
+    //
+    // The 1.0y headroom above EscapeArrivalYards guarantees at least
+    // ~1y of useful displacement room before "arrived" can fire,
+    // giving the phase budget a chance to time-out-and-escalate when
+    // the bot is physically wedged. Below this threshold, the basis
+    // falls through to away-from-leader / reversed-facing — different
+    // geometry, no clamp interaction, no instant-arrival loop.
+    private const float MinRouteBasisDistance = EscapeArrivalYards + 1.0f;
 
     /// <summary>
     /// Fix AO (log-78 02:41:21:328 → end-of-log, leader paused at AssistReturn
@@ -783,6 +800,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// from this anchor before the Stuck flag clears.
     /// </summary>
     private Vector3 _activeStuckAnchorW;
+
+    /// <summary>
+    /// Fix BH-3 (log-94 01:25:48:280 → 01:26:18:001): true on ticks where
+    /// the trailing-by-one cap parked path fires (assist sits on its
+    /// allowed-advance route waypoint, waiting for the leader to publish
+    /// a higher-index waypoint). Read by <see cref="TickActiveStuckDetection"/>
+    /// to suppress the no-movement stuck trigger — the bot is not stuck,
+    /// it's correctly idle. Set in the parked branch of <see cref="OnRetrySharedWaypoint"/>
+    /// (~line 5704), cleared at the start of every <see cref="UpdateNavigatingToLeader"/>
+    /// invocation so a single non-parked tick re-arms the detector.
+    ///
+    /// Without this, the assist's no-movement triggers Stuck status
+    /// (~2.5s into the park), the leader sees Status==Stuck and STAYS
+    /// paused (already paused for distance), the chase-watchdog reaches
+    /// 30s, the assist escalates to CantFollow, and CantFollow's
+    /// projection escape thrashes (also fixed independently by BH-2).
+    /// The root fix is to recognise that "parked at my legitimate cap"
+    /// is not "stuck."
+    /// </summary>
+    private bool _routeWalkParked;
 
     // -----------------------------------------------------------------------
     // CantFollow: hold position, wait for leader within LeaderArrivedYards
@@ -2144,6 +2181,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     private void UpdateNavigatingToLeader()
     {
+        // Fix BH-3: clear the parked flag at the top of every tick. The
+        // parked path at line ~5704 sets it true; if this tick's
+        // OnRetrySharedWaypoint doesn't re-enter the parked branch
+        // (because we've advanced or fallen out of route-walk mode),
+        // the flag drops to false here and TickActiveStuckDetection
+        // re-arms with a fresh anchor.
+        _routeWalkParked = false;
+
         // ── Active-time timeout ─────────────────────────────────────────────
         TickNavActiveTimeout();
         if (_navState != NavState.NavigatingToLeader)
@@ -3318,10 +3363,35 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 }
             }
 
-            // Only use the route direction if the nearest waypoint is more
-            // than 1y away. Co-located waypoint would produce a near-zero
-            // direction vector that degenerates the projection.
-            if (bestIdx >= 0 && bestDist >= 1.0f)
+            // Only use the route direction if the nearest waypoint is far
+            // enough away that the BG-2 clamp won't drop the projection
+            // target into the arrival radius. See MinRouteBasisDistance
+            // for the full rationale.
+            //
+            // History:
+            //   - Original threshold was 1.0y (purely numerical: avoid
+            //     near-zero direction vector degeneracy when bot is on
+            //     top of a route point).
+            //   - Fix BG-2 added the clamp `effectiveYards = routeBasisDist`
+            //     to stop the bot from overshooting and ping-ponging
+            //     across the basis waypoint (log-93's 29-Projection10
+            //     oscillation through a 7.8×7.1y box).
+            //   - Fix BH-2 raised this gate to `MinRouteBasisDistance`
+            //     (= EscapeArrivalYards + 1.0y = 4.5y) after the clamp
+            //     turned out to create a NEW bug: when the basis waypoint
+            //     was within EscapeArrivalYards of the bot, the clamped
+            //     target sat inside the arrival radius and the next-tick
+            //     arrival check fired before the bot could move,
+            //     restarting Projection10 every 14ms (log-94: 1630 events
+            //     in 28.8s, bot frozen at (-327.00, -4148.28), CPU loop).
+            //
+            // Below this gate, the bot is essentially at a route waypoint
+            // already — there's nothing meaningful to project "toward."
+            // The fall-through to away-from-leader basis produces a
+            // 10y projection in a different direction; if the bot is
+            // wedged, the phase budget elapses in 3s and escalates to
+            // Projection20/30. Functional escape geometry, no loop.
+            if (bestIdx >= 0 && bestDist >= MinRouteBasisDistance)
             {
                 Vector3 wp = loadedRoute[bestIdx];
                 float dxw = wp.X - pos.X;
@@ -5357,6 +5427,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // ── Fix BH-3 (log-94 01:25:48:280 → 01:26:18:001) ─────────────────
+        // Skip stuck detection while the assist is parked at its
+        // trailing-by-one route cap. The bot is correctly idle (waiting
+        // for the leader to advance the published-waypoint cache), not
+        // stuck. Flagging it Stuck causes the leader's pause to convert
+        // from "distance" to "stuck" gating, which is far more sticky
+        // (Status==Stuck holds even when dist drops; it only clears when
+        // the assist's _activeStuckAnchorW displacement >= 3y) and
+        // ultimately routes the assist into the 30-second CantFollow
+        // escalation that produced log-94's 1630-Projection10 loop.
+        //
+        // Reset the trigger window too, so when the park ends the
+        // detector starts fresh from the bot's new position rather
+        // than firing immediately on the tick AFTER unpark.
+        if (_routeWalkParked)
+        {
+            _activeStuckSinceUtc = DateTime.MinValue;
+            // Don't clear _activeStuckReported here — if Stuck was ALREADY
+            // reported (the legitimate-stuck → park transition), the
+            // resume path at line ~5443 still owns the clear decision.
+            // Clearing here would silently un-Stuck without any movement
+            // proof, which is exactly the asymmetric-anchor bug Fix
+            // (log 01:50:54-01:51:09) was added to prevent.
+            return;
+        }
+
         Vector3 currentPos = playerReader.WorldPos;
         var now = DateTime.UtcNow;
 
@@ -5666,6 +5762,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     $"(retryDist={retryDist:0.0}y, leader {dist:0.0}y away). " +
                     $"Trailing-by-one cap reached; waiting for leader to advance. " +
                     $"Skipping waypoint refresh — no SetWaypoint, no loop-guard escalation.");
+
+                // Fix BH-3: flag this tick as "parked" so TickActiveStuckDetection
+                // (which runs earlier in UpdateNavigatingToLeader) skips the
+                // stuck trigger on the NEXT tick. UpdateNavigatingToLeader
+                // clears the flag at its top, so a single non-parked tick
+                // re-arms the detector with a fresh anchor.
+                _routeWalkParked = true;
                 return;
             }
 
