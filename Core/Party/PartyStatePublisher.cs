@@ -124,6 +124,10 @@ public sealed class PartyStatePublisher : IReader
             CantFollow = assistStatusProvider.CantFollow,
             HealthPercent = playerReader.HealthPercent(),
             InCombat = bits.Combat(),
+            // Fix BF: route progress published symmetrically to leader's
+            // TargetWaypoint broadcast — closes the same "position-without-
+            // route-context" asymmetry on the assist→leader direction.
+            AssistRouteIndex = assistStatusProvider.CurrentRouteIndex,
             Timestamp = DateTime.UtcNow
         };
     }

@@ -970,128 +970,50 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 // _assistReturnActive), the next FRG.Update tick re-evaluates
                 // pause-for-assist on the assist's current (post-arrival)
                 // status and acts appropriately.
-                if (shouldPause && !_pausedByAssistDistance && !_assistReturnActive)
-                {
-                    float dist = assistStateStore.GetNearestAssistDistanceYards(playerReader.WorldPos);
-                    AssistState? stuckAssist = assistStateStore.GetCantFollowState()
-                        ?? assistStateStore.GetAll().FirstOrDefault(
-                            a => !assistStateStore.IsStale(a) && a.Status == BotStatus.Stuck);
-
-                    logger.LogInformation(
-                        $"[FRG] Pausing for assist — dist={dist:0.0}y " +
-                        $"status={stuckAssist?.Status.ToString() ?? "TooFar"}");
-
-                    // Diagnostic detail: print the inputs that produced `dist`,
-                    // so we can distinguish "leader genuinely > 20 y away from
-                    // assist" from "leader is reading a stale assist snapshot".
-                    // Added after log 30 showed the assist reporting
-                    // "Reached follow position (dist=7.0y)" only 220 ms before
-                    // the leader logged "Pausing for assist — dist=20.1y" —
-                    // physically impossible without one side reading bad data.
-                    Vector3 leaderPos = playerReader.WorldPos;
-                    logger.LogInformation(
-                        $"[FRG] Pause-detail: leaderPos=<{leaderPos.X:F2},{leaderPos.Y:F2},{leaderPos.Z:F2}> " +
-                        $"pauseYards={LeaderPauseYards}");
-                    foreach (AssistState s in assistStateStore.GetAll())
-                    {
-                        float d = leaderPos.WorldDistanceXYTo(s.WorldPos);
-                        logger.LogInformation(
-                            $"[FRG] Pause-detail: assist id='{s.AssistId}' " +
-                            $"pos=<{s.WorldX:F2},{s.WorldY:F2},{s.WorldZ:F2}> " +
-                            $"status={s.Status} cantFollow={s.CantFollow} " +
-                            $"dist={d:F2}y ageMs={s.AgeMs:F0} stale={assistStateStore.IsStale(s)}");
-                    }
-
-                    _pausedByAssistDistance = true;
-                    // Fix T (log-63 19:47:02 → 19:48:21): broadcast pause-for-assist
-                    // state to the assist via LeaderNavigationProvider. Without this,
-                    // LeaderStateService.DetermineStatus reports Patrolling (because
-                    // the active goal is still FRG by name), the assist's FFG stays in
-                    // waypoint-sharing mode targeting the leader's last-published
-                    // waypoint, and if that waypoint can't be reached (e.g., the
-                    // leader has just inserted a detour through blacklist territory
-                    // — see Fix S) the assist gets stuck and can't recover. Switching
-                    // status to Waiting during pause-for-assist forces the assist's
-                    // FFG into position-chase against the leader's actual body, which
-                    // is the correct behaviour while the leader is stationary.
-                    leaderNavProvider.SetPausedForAssist(true);
-                    // StopMovement must be called before PausePathing.
-                    // PausePathing() suspends navigation and stops steering (left/right keys)
-                    // but does NOT release the forward movement key — without StopMovement()
-                    // the character keeps running forward at walking speed into obstacles.
-                    // Abort() calls both; the distance gate must do the same.
-                    navigation.StopMovement();
-                    navigation.PausePathing();
-
-                    // Disable the side target-finding thread on this transition.
-                    // Single-shot is sufficient: TryEnableSideTargetFinding() (used by
-                    // Resume() line 340 and the suppression-expiry watchdog at line 589)
-                    // checks _pausedByAssistDistance before any Set, so nothing
-                    // re-enables the side thread until the pause exits.
-                    sideActivityManualReset.Reset();
-                    targetFinder.Reset();
-
-                    // Fix 32 (log-52 17:38:42 → end-of-log, redesign per user
-                    // direction): the previous behavior here was to call
-                    // GoToOneWaypoint(cantFollow.MapPosNoZ) — an AssistReturn
-                    // navigation to the assist's position projected to the
-                    // leader-side edge of the BL rect. In log-52 that produced
-                    // an 80-second loop alternating between AssistReturn
-                    // timeouts and immediate retries, with neither bot moving
-                    // toward the other (the projected target was just outside
-                    // the rect but ~22 y from the actual assist, geometrically
-                    // unable to satisfy the CantFollow leader-arrived
-                    // condition).
-                    //
-                    // New design: the leader STAYS PUT when assist is
-                    // CantFollow. Per user: "as long as the leader is not in
-                    // a blacklisted area, they should stay where they are.
-                    // If they are in a blacklisted area they need to move
-                    // out. Under no circumstances should the leader or
-                    // assist 'go on patrol' again before they reunite, if
-                    // they are unable to reunite pausing indefinitely is fine."
-                    //
-                    // Inside-BL escape is already handled — the `shouldPause`
-                    // expression at the start of this block has a
-                    // `!insideBlacklist` clause, so this entire pause-for-
-                    // assist branch is SKIPPED when the leader is inside a
-                    // BL rect. Navigation stays active in that case and
-                    // Navigation.RefillWaypoints's escape-first (the
-                    // TryComputeEscapeOutOfBlacklist call at Navigation.cs:2490)
-                    // fires to walk the leader out of the rect. Once the
-                    // leader is outside, this pause branch fires (assist
-                    // still CantFollow → ShouldLeaderPauseForAssist still
-                    // returns true) and the leader stops.
-                    //
-                    // Combat self-defense continues to work: Fix 17/22/26 in
-                    // CombatGoal/GoapAgent override IsIgnored on any attacker
-                    // hitting the leader, switching the plan to Combat
-                    // regardless of FRG's pause state. After combat, FRG
-                    // re-enters, the same pause condition is re-evaluated,
-                    // and the leader returns to the held position (or close
-                    // enough — combat movement is unavoidable).
-                    //
-                    // The assist resolves CantFollow via FFG's active-escape
-                    // state machine (10y/20y/30y projection away from rect
-                    // center, then LastSafeAnchor, then physical unstuck).
-                    // On success it returns to NavigatingToLeader, status
-                    // eventually flips to Following, and
-                    // ShouldLeaderResumePatrol fires (it already requires
-                    // all assists to be Following before returning true,
-                    // line 176-177 of AssistStateStore). The leader then
-                    // takes the !shouldPause && shouldResume && _pausedByAssistDistance
-                    // branch below and Resume()s patrol normally.
-                }
-                else if (!shouldPause && shouldResume && _pausedByAssistDistance)
+                // ────────────────────────────────────────────────────────
+                // Fix BF (log-91 17:54:11→17:54:52, log-92 18:59:55→19:00:50):
+                // The pause-SET logic that used to live here has MOVED to
+                // Navigation_OnWayPointReached (line 1726+).
+                //
+                // Why: the per-tick check that previously fired here would
+                // pause the leader MID-STRIDE — typically at an arbitrary
+                // off-route position after combat carried the leader away
+                // from the patrol path. The assist's _cachedLeaderRouteIdx
+                // (derived from the leader's last-published TargetWaypoint)
+                // would then point to a route waypoint the leader had not
+                // physically reached. The asymmetry between
+                //   - "where the leader IS" (off-route WorldPos), and
+                //   - "where the leader CLAIMS to be on the route" (cached idx
+                //      pointing at the next route waypoint it was heading to
+                //      pre-combat)
+                // drove the BE route-span code to build spans toward a
+                // phantom destination, producing both observed oscillations.
+                //
+                // By deferring the pause check to waypoint arrival, the leader
+                // ALWAYS pauses on-route (at a route waypoint it just reached).
+                // The cache then matches the leader's physical position, and
+                // route-walking works correctly.
+                //
+                // Resume side STAYS HERE in Update so the leader unpauses with
+                // minimal latency once the assist catches up — pause overshoot
+                // (up to one stride) is acceptable, but resume overshoot is
+                // pure wasted time.
+                //
+                // The shouldPause local is still computed below because the
+                // resume branch (`!shouldPause && shouldResume && _pausedByAssistDistance`)
+                // needs it. The pause-SET IF block is gone; only the resume
+                // ELSE IF remains.
+                // ────────────────────────────────────────────────────────
+                if (!shouldPause && shouldResume && _pausedByAssistDistance)
                 {
                     float dist = assistStateStore.GetNearestAssistDistanceYards(playerReader.WorldPos);
                     logger.LogInformation(
                         $"[FRG] Assist Following and within range (dist={dist:0.0}y) — resuming patrol.");
 
                     // Same diagnostic detail as the pause path. The pause and
-                    // resume thresholds are different (LeaderPauseYards=20,
-                    // LeaderResumeYards=15), and during a flapping window the
-                    // resume side can also fire on stale data.
+                    // resume thresholds are different (LeaderPauseYards=25
+                    // after Fix BF, LeaderResumeYards=15), and during a flapping
+                    // window the resume side can also fire on stale data.
                     Vector3 leaderPos = playerReader.WorldPos;
                     logger.LogInformation(
                         $"[FRG] Resume-detail: leaderPos=<{leaderPos.X:F2},{leaderPos.Y:F2},{leaderPos.Z:F2}> " +
@@ -1103,6 +1025,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                             $"[FRG] Resume-detail: assist id='{s.AssistId}' " +
                             $"pos=<{s.WorldX:F2},{s.WorldY:F2},{s.WorldZ:F2}> " +
                             $"status={s.Status} cantFollow={s.CantFollow} " +
+                            $"routeIdx={s.AssistRouteIndex} " +    // Fix BF: published route progress
                             $"dist={d:F2}y ageMs={s.AgeMs:F0} stale={assistStateStore.IsStale(s)}");
                     }
 
@@ -1749,6 +1672,109 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
 
         MountIfPossible();
+
+        // ────────────────────────────────────────────────────────────────────
+        // Fix BF (log-91 17:54:11→17:54:52, log-92 18:59:55→19:00:50):
+        // pause-for-assist check, MOVED here from Update() per Option D.
+        //
+        // Firing at waypoint arrival guarantees that when the leader pauses,
+        // it pauses ON-ROUTE at a route waypoint it just reached. The assist's
+        // _cachedLeaderRouteIdx then matches the leader's physical position
+        // (not "where the leader was heading"), eliminating the stale-cache
+        // asymmetry that drove both observed oscillations.
+        //
+        // Trade-off vs the previous per-tick check: pause activation can
+        // overshoot by up to one route stride (~10y) — the bot walks an
+        // extra waypoint before noticing. Combined with LeaderPauseYards=25y
+        // (raised from 20y), worst-case actual pause distance is ~35y, still
+        // comfortably within healer range. This is fine because the urgent
+        // cases (CantFollow, Stuck) are also handled by the
+        // OnGoapEvent.assistrequestreturn / AssistReturn event-driven path,
+        // which is not throttled by this per-waypoint cadence.
+        //
+        // The blacklist-escape resume, the assist-following resume, and the
+        // pause early-return remain in Update() — those are urgent or need
+        // every-tick evaluation while paused.
+        //
+        // Fix 25 interlock preserved: only enter pause-SET when
+        // !_assistReturnActive (AssistReturn nav must not be killed by
+        // PausePathing). Same condition as the original Update-site check.
+        // ────────────────────────────────────────────────────────────────────
+        if (classConfig.Mode != Mode.PartyLeader)
+            return;
+        if (_pausedByAssistDistance)
+            return; // already paused
+        if (_assistReturnActive)
+            return; // Fix 25: don't kill AssistReturn nav
+
+        // Recompute inOrNearBlacklist locally (was computed in Update upstream).
+        // Suppresses pause when the leader is inside or near a blacklist rect
+        // so the existing escape logic in Navigation.RefillWaypoints can fire.
+        bool insideBlacklistHere = navigation.AreaBlacklist != null
+            && navigation.AreaBlacklist.ContainsWorld(playerReader.WorldPos);
+        const float NearBLEdgeBufferYards_BF = 6f;
+        bool nearBlacklistEdgeHere = !insideBlacklistHere
+            && navigation.AreaBlacklist != null
+            && navigation.AreaBlacklist.TryGetContainingRectInflated(
+                playerReader.WorldPos, NearBLEdgeBufferYards_BF, out _);
+        if (insideBlacklistHere || nearBlacklistEdgeHere)
+            return; // let the leader escape the blacklist first
+
+        bool shouldPauseHere = assistStateStore.ShouldLeaderPauseForAssist(
+            playerReader.WorldPos, LeaderPauseYards);
+        if (!shouldPauseHere)
+            return;
+
+        // ── Pause-SET (the body moved from Update lines 973-1083 in the
+        // pre-Fix-BF version) ───────────────────────────────────────────
+        float distHere = assistStateStore.GetNearestAssistDistanceYards(playerReader.WorldPos);
+        AssistState? stuckAssistHere = assistStateStore.GetCantFollowState()
+            ?? assistStateStore.GetAll().FirstOrDefault(
+                a => !assistStateStore.IsStale(a) && a.Status == BotStatus.Stuck);
+
+        logger.LogInformation(
+            $"[FRG] Pausing for assist (at waypoint) — dist={distHere:0.0}y " +
+            $"status={stuckAssistHere?.Status.ToString() ?? "TooFar"}");
+
+        // Diagnostic detail: print the inputs that produced `distHere`,
+        // so we can distinguish "leader genuinely > 25y away from assist"
+        // from "leader is reading a stale assist snapshot". Added after
+        // log-30 (per the original block's comment).
+        Vector3 leaderPosHere = playerReader.WorldPos;
+        logger.LogInformation(
+            $"[FRG] Pause-detail: leaderPos=<{leaderPosHere.X:F2},{leaderPosHere.Y:F2},{leaderPosHere.Z:F2}> " +
+            $"pauseYards={LeaderPauseYards}");
+        foreach (AssistState s in assistStateStore.GetAll())
+        {
+            float d = leaderPosHere.WorldDistanceXYTo(s.WorldPos);
+            logger.LogInformation(
+                $"[FRG] Pause-detail: assist id='{s.AssistId}' " +
+                $"pos=<{s.WorldX:F2},{s.WorldY:F2},{s.WorldZ:F2}> " +
+                $"status={s.Status} cantFollow={s.CantFollow} " +
+                $"routeIdx={s.AssistRouteIndex} " +    // Fix BF: published route progress
+                $"dist={d:F2}y ageMs={s.AgeMs:F0} stale={assistStateStore.IsStale(s)}");
+        }
+
+        _pausedByAssistDistance = true;
+        // Fix T preserved: broadcast pause-for-assist via LeaderNavigationProvider.
+        // Switches leader.Status to Waiting so the assist's FFG can engage its
+        // route-walking-during-Waiting path (Fix BF, FFG line ~4093).
+        leaderNavProvider.SetPausedForAssist(true);
+        // StopMovement must be called before PausePathing — see original
+        // block comment for the rationale (forward key handling).
+        navigation.StopMovement();
+        navigation.PausePathing();
+
+        // Disable the side target-finding thread on this transition.
+        // Single-shot, gated by _pausedByAssistDistance for symmetric re-enable.
+        sideActivityManualReset.Reset();
+        targetFinder.Reset();
+
+        // Fix 32 design (preserved from the original block): the leader STAYS
+        // PUT when assist is CantFollow. Inside-BL escape is handled by the
+        // `inOrNearBlacklist` early-return above. Combat self-defense via
+        // Fix 17/22/26 still works. Resume flows through the Update-side
+        // ELSE IF (`!shouldPause && shouldResume && _pausedByAssistDistance`).
     }
 
     /// <summary>

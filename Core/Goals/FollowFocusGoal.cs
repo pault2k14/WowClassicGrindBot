@@ -64,8 +64,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// <summary>Minimum leader movement before the navigation waypoint is refreshed.</summary>
     private const float WaypointUpdateThresholdYards = 3f;
 
-    /// <summary>Leader must pause when assist exceeds this distance.</summary>
-    public const float LeaderPauseYards = 20f;
+    /// <summary>
+    /// Leader must pause when assist exceeds this distance.
+    ///
+    /// <para>Fix BF (log-91, log-92): raised from 20y to 25y to accommodate
+    /// the new pause-at-waypoint semantics (the leader's pause check fires at
+    /// waypoint arrival rather than every tick). With Option D semantics,
+    /// distance can overshoot the threshold by up to one route stride
+    /// (~10y) between waypoint events, so a 25y threshold yields a
+    /// worst-case actual pause distance of ~35y — comfortably within the
+    /// 30-40y healer range floor.</para>
+    ///
+    /// <para>Hysteresis with LeaderResumeYards=15y is now 10y (= ~one stride),
+    /// preventing the flapping window the previous 5y hysteresis allowed
+    /// (per the comment on the resume side at FRG line 1092-1094).</para>
+    /// </summary>
+    public const float LeaderPauseYards = 25f;
 
     /// <summary>Leader may resume when assist is within this distance (hysteresis).</summary>
     public const float LeaderResumeYards = 15f;
@@ -1244,6 +1258,11 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // assist at a different position; force re-sync.
         _assistRouteIndex = -1;
 
+        // Fix BF: mirror reset to the provider so the leader sees a clean
+        // unsynced state when FFG is not active. Update() would otherwise
+        // not run to overwrite the stale value.
+        assistStatusProvider.CurrentRouteIndex = -1;
+
         // ── Route-walking migration: Turn 3 ──
         // Clear pending anchor on exit. The next FFG session may face
         // a different approach context (or none); stale pending would
@@ -1432,6 +1451,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     {
         if (bits.Drowning())
             input.PressJump();
+
+        // Fix BF: publish current route index for the leader to consume in
+        // diagnostic logs and future waypoint-precise coordination. Writing
+        // once per tick at Update entry keeps the provider in sync with the
+        // _assistRouteIndex field without mirroring every internal assignment.
+        // The field can be -1 (unsynced) or any valid route index.
+        assistStatusProvider.CurrentRouteIndex = _assistRouteIndex;
 
         // Note: API-based mob blacklist diff lives in GoapAgent.GoapThread
         // (not here) so the signal interrupts the assist's combat regardless
@@ -4090,7 +4116,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         //     completion at a behind-position), clamp _assistRouteIndex
         //     to the new allowedAdvance to prevent the assist from
         //     overshooting the leader.
-        if (leader.Status == BotStatus.Patrolling &&
+        //
+        // Fix BF (log-91 17:54:11→17:54:52 and log-92 18:59:55→19:00:50,
+        // both ~40s closed-loop oscillations): also engage RouteWalk when
+        // leader.Status == Waiting. Per LeaderStateService.DetermineStatus,
+        // Waiting means EXACTLY one thing for an active leader:
+        // IsPausedForAssist == true (pause-for-assist active). The leader's
+        // TargetWaypoint cache is still valid in this state (it was set
+        // pre-pause and remains broadcast), so route-walking toward
+        // one-behind-leader is the right behavior. Pairs with the
+        // FRG-side pause-at-waypoint change which guarantees the leader's
+        // pause position is ON-ROUTE — so the cached leaderIdx genuinely
+        // reflects the leader's physical position, eliminating the
+        // off-route/stale-cache asymmetry that drove both oscillations.
+        if ((leader.Status == BotStatus.Patrolling || leader.Status == BotStatus.Waiting) &&
             navigation.LoadedRoute.Length > 0)
         {
             if (TryFindLeaderRouteIndex(leader, out int leaderIdx))
@@ -4241,8 +4280,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // reachable when LoadedRoute is empty — assist class config has no
         // PathFilename). Dormant under route-walking but preserved as a
         // safety net.
+        //
+        // Fix BF: also accept Status==Waiting (pause-for-assist) here for
+        // symmetry with the primary RouteWalk gate above. In legacy
+        // configurations without a loaded route, the leader's last published
+        // waypoint is still the correct target to chase even when the leader
+        // is paused.
         if (_rendezvousConfirmed &&
-            leader.Status == BotStatus.Patrolling &&
+            (leader.Status == BotStatus.Patrolling || leader.Status == BotStatus.Waiting) &&
             leader.HasTargetWaypoint)
         {
             // Fix Y (log-66 23:05:39 → 23:06:42): distance gate.

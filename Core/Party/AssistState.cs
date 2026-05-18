@@ -42,6 +42,23 @@ public sealed class AssistState
     public int HealthPercent { get; set; }
     public bool InCombat { get; set; }
 
+    /// <summary>
+    /// Assist's current route waypoint index, or -1 if unsynced / no route loaded.
+    /// Mirrors <c>FollowFocusGoal._assistRouteIndex</c>. Published so the leader
+    /// has symmetric route-progress info (the leader already publishes its own
+    /// position relative to its route via TargetWaypoint). Diagnostic logging
+    /// uses this to show the trailing-by-one geometry (assistRouteIdx,
+    /// leaderRouteIdx) when investigating coordination issues.
+    ///
+    /// <para>Fix BF (log-91, log-92): added as part of the same cleanup that
+    /// relaxed the assist's RouteWalk gate to include Status==Waiting. Not
+    /// load-bearing for the fix itself, but closes the same "position
+    /// published, route-context not published" asymmetry that drove the
+    /// off-route-paused-leader bug — applied symmetrically to both
+    /// directions of party state.</para>
+    /// </summary>
+    public int AssistRouteIndex { get; set; } = -1;
+
     /// <summary>UTC timestamp set (or overwritten) by the leader controller on receipt.</summary>
     public DateTime Timestamp { get; set; }
 

@@ -54,4 +54,17 @@ public sealed class AssistStatusProvider
     /// tell the two cases apart.</para>
     /// </summary>
     public bool EvadeRecoveryActive { get; set; }
+
+    /// <summary>
+    /// Mirror of <c>FollowFocusGoal._assistRouteIndex</c>, written each FFG
+    /// tick and read by <see cref="PartyStatePublisher.BuildSnapshot"/> for
+    /// publication in <see cref="AssistState.AssistRouteIndex"/>.
+    /// Default -1 = unsynced (no route loaded or RouteWalk not yet engaged).
+    ///
+    /// <para>Fix BF: published so the leader has symmetric route-progress
+    /// info about the assist (the leader already publishes its own
+    /// TargetWaypoint). Diagnostic-grade today; lays foundation for future
+    /// waypoint-precise rendezvous coordination.</para>
+    /// </summary>
+    public int CurrentRouteIndex { get; set; } = -1;
 }
