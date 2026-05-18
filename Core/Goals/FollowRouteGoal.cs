@@ -1707,6 +1707,48 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (_assistReturnActive)
             return; // Fix 25: don't kill AssistReturn nav
 
+        // ── Fix BG (log-93 00:03:54:288 incident) ────────────────────────
+        // The Fix BF pause-SET should ONLY fire when the bot just popped one
+        // of MANY route waypoints (normal patrol progress). When the popped
+        // waypoint was the LAST in the stack, three pathological things
+        // happen at once:
+        //
+        // 1. The bot likely isn't AT a route waypoint at all — it's at
+        //    an orphaned single-waypoint target left by AssistReturn,
+        //    RouteEscape, AssistRewind, or another sub-navigation that
+        //    completed/aborted. Log-93 example: AssistReturn aborted at
+        //    00:03:52:482 leaving the AssistReturn target <-732.11,-4355.06>
+        //    in the stack. At 00:03:54:288 the bot reached that orphan,
+        //    popped it, and my Fix BF handler fired at the non-route
+        //    position <-729.15,-4356.54>. Pause-at-waypoint's invariant
+        //    ("pause only at route waypoints") was broken.
+        //
+        // 2. After OnWayPointReached fires here, Navigation.cs:991-994
+        //    will call CompleteDestinationReached() (because
+        //    wayPoints.Count == 0). CompleteDestinationReached fires
+        //    OnDestinationReached, which FRG handles by calling
+        //    RefillWaypoints(false). RefillWaypoints calls
+        //    SetWayPoints(count=N), which sets active=true again — UNDOING
+        //    the PausePathing we just did. Log-93 evidence: the second
+        //    pause's diagnostic shows "SetWayPoints(count=118) wasActive=
+        //    False ... (was paused, re-Acquired)" within the same
+        //    millisecond as the PausePathing call.
+        //
+        // 3. The leader's TargetWaypoint cache is mid-transition (just
+        //    popped, about to be refilled), so even the pause's
+        //    Status=Waiting broadcast doesn't carry useful route-context
+        //    for the assist.
+        //
+        // The correct behavior: don't pause here. Let CompleteDestination-
+        // Reached → RefillWaypoints chain run normally, refilling the
+        // patrol stack. The bot starts walking the new batch. At the FIRST
+        // pop of the new batch (a real route waypoint, with count > 0
+        // after), this handler fires again and the pause-SET takes hold
+        // correctly.
+        if (navigation.WaypointCount == 0)
+            return;
+        // ──────────────────────────────────────────────────────────────────
+
         // Recompute inOrNearBlacklist locally (was computed in Update upstream).
         // Suppresses pause when the leader is inside or near a blacklist rect
         // so the existing escape logic in Navigation.RefillWaypoints can fire.

@@ -3291,6 +3291,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         bool usingLeaderDirection = false;
         bool usingRouteDirection = false;
 
+        // Fix BG-2 (log-93 00:03:29 → 00:04:10, 40-second CantFollow ping-pong):
+        // Track the distance to the chosen route-basis waypoint so the
+        // projection length can be CLAMPED below to prevent overshoot when
+        // the route waypoint is closer than the projection length (10y).
+        // See the clamp site just before fallbackTarget is computed.
+        float routeBasisDist = float.MaxValue;
+
         // Hoisted so Fix BB (below, ~line 3442) can reference it. When BD's
         // route direction is in use, usingLeaderDirection stays false and BB
         // won't fire — the leader variable is unused in that path.
@@ -3326,6 +3333,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     fdx = dxw / lenW;
                     fdy = dyw / lenW;
                     usingRouteDirection = true;
+                    routeBasisDist = bestDist;   // Fix BG-2: save for the clamp below
                     logger.LogInformation(
                         $"[FFG] [FIX-FIRE] BD: AB-2 projection basis = toward " +
                         $"nearest LoadedRoute waypoint idx={bestIdx} at {wp} " +
@@ -3557,14 +3565,57 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             fdy = rdy;
         }
 
+        // ── Fix BG-2 (log-93 00:03:29 → 00:04:10) ───────────────────────────
+        // When the chosen basis is "toward-route" (Fix BD) and no angle
+        // offset is applied (Projection10 phase), clamp the projection length
+        // to the route waypoint's actual distance. Without this clamp, the
+        // projection OVERSHOOTS the route waypoint and lands on the other
+        // side of it. On the next re-plan, the bot is past the route waypoint
+        // and the direction TOWARD the waypoint flips — producing a ping-pong
+        // across the route waypoint that never escapes.
+        //
+        // Log-93 evidence: 29 Projection10 events fired between 00:03:29:834
+        // and 00:04:12:534. Every projection had bestDist between 2.4y and
+        // 4.8y (route waypoint very close), and every projection was 10y
+        // long — overshooting by 5-7.5y each cycle. The bot oscillated
+        // through 5 close points within a 7.8y × 7.1y bounding box centered
+        // on route[26] = (-746.35, -4318.80) for 40 seconds, never
+        // escalating to Projection20 because each Projection10 "arrived"
+        // (displacement ≥ EscapeArrivalYards=3.5y), restarting the phase.
+        //
+        // Clamping to routeBasisDist makes the projection land AT the route
+        // waypoint. The bot arrives there, re-plans, and (because bestDist
+        // is now < 1.0y) usingRouteDirection turns off — the next phase
+        // uses leader-direction or reversed-facing basis. Different
+        // geometry, no more ping-pong.
+        //
+        // Only applies when:
+        //   - usingRouteDirection (the route was actually chosen as basis)
+        //   - angleOffset is ~0 (Projection10; the 20/30y rotated phases
+        //     don't aim at the waypoint after rotation, so clamping by
+        //     pre-rotation distance is meaningless)
+        //   - routeBasisDist < yards (only clamp when overshoot would occur)
+        float effectiveYards = yards;
+        if (usingRouteDirection &&
+            MathF.Abs(angleOffset) < 0.001f &&
+            routeBasisDist < yards)
+        {
+            effectiveYards = routeBasisDist;
+            logger.LogInformation(
+                $"[FFG] [FIX-FIRE] BG-2: clamping projection length " +
+                $"{yards:0.0}y → {effectiveYards:0.0}y because route basis " +
+                $"({routeBasisDist:0.0}y) is closer than full projection. " +
+                $"Prevents overshoot-and-flip ping-pong around route waypoint.");
+        }
+
         Vector3 fallbackTarget = new Vector3(
-            pos.X + fdx * yards,
-            pos.Y + fdy * yards,
+            pos.X + fdx * effectiveYards,
+            pos.Y + fdy * effectiveYards,
             0f);
 
         logger.LogInformation(
             $"[FFG] [FIX-FIRE] AB-2: no BL rect contains assist — directional fallback projection " +
-            $"{yards:0}y (offset={angleOffset * 180f / MathF.PI:+0.0;-0.0;0}°, " +
+            $"{effectiveYards:0}y (offset={angleOffset * 180f / MathF.PI:+0.0;-0.0;0}°, " +
             $"basis={(usingRouteDirection ? "toward-route" : usingLeaderDirection ? "away-from-leader" : "reversed-facing")}) → " +
             $"{fallbackTarget} (pos={pos}).");
 

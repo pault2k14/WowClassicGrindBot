@@ -1457,6 +1457,37 @@ public sealed partial class Navigation : IDisposable
             {
                 if (wayPoints.Count == 0)
                     return;
+
+                // ── Fix BG (log-93 00:02:42:243 → 00:03:27:478, 45-second
+                //    "paused but walking" incident) ───────────────────────
+                // TryConsumeReachedWaypoint fires OnWayPointReached.Invoke,
+                // which in PartyLeader mode runs FRG.Navigation_OnWayPointReached
+                // (Fix BF's pause-for-assist check). That handler may call
+                // navigation.PausePathing() to set active=false MID-Update.
+                // Without this check, Update would continue past here to the
+                // steering loop at line ~1722 and call input.StartForward(true),
+                // re-pressing the forward key the handler just released via
+                // StopMovement(). The forward key is a STICKY press
+                // (ConfigurableInput.StartForward: SetKeyState(ForwardKey, true)
+                // stays down until StopForward); subsequent Update ticks see
+                // !active and early-return at line 1309 without releasing the
+                // key. Net effect: bot walks forward indefinitely after being
+                // "paused" until physical terrain stops it.
+                //
+                // Log-93 evidence: leader paused at <-746.56,-4315.50> at
+                // 00:02:42:244; ZERO meaningful events for 45s (only NAV-SANITY
+                // showing Update early-returning); leader's mapPos drifted
+                // (44.53,72.46) → (45.28,71.82) (~50y world). At 00:03:27 the
+                // leader was at <-714.93,-4360.07>, 54.6y from the pause
+                // position — far enough that the subsequent AssistReturn
+                // could not navigate back successfully, producing the
+                // observed "going around close points" RouteEscape loop.
+                //
+                // The fix is targeted: only return early if the handler
+                // actually cleared active. Normal (no-pause) waypoint pops
+                // continue through Refill and steering as before.
+                if (!active)
+                    return;
             }
 
             if (routeToNextWaypoint.Count == 0)
@@ -1619,6 +1650,14 @@ public sealed partial class Navigation : IDisposable
             if (TryConsumeReachedWaypoint(playerPos))
             {
                 if (wayPoints.Count == 0)
+                    return;
+
+                // Fix BG (see comment at the line-1456 callsite for the full
+                // rationale): re-check `active` after TryConsumeReachedWaypoint
+                // in case the OnWayPointReached handler called PausePathing.
+                // Both callsites of TryConsumeReachedWaypoint in Update share
+                // the same hazard; both need the same guard.
+                if (!active)
                     return;
             }
 
@@ -1894,6 +1933,18 @@ public sealed partial class Navigation : IDisposable
             $"[NAV-DIAG] PausePathing() pre: stuckDetector.OwnerId={stuckDetector.OwnerId} " +
             $"Enabled={stuckDetector.Enabled} -> Release(StuckOwnerId={StuckOwnerId})");
         stuckDetector.Release(StuckOwnerId);
+
+        // Fix BG (defense-in-depth, paired with the active check after
+        // TryConsumeReachedWaypoint in Update): release the forward key
+        // unconditionally when pausing. Callers SHOULD already call
+        // navigation.StopMovement() before PausePathing (StopMovement also
+        // calls input.StopForward), but a single PausePathing call without
+        // a prior StopMovement used to leave the forward key in its
+        // previous state. With navigation paused, no subsequent Update tick
+        // releases the key on its own — `if (!active) return;` at the top
+        // of Update means StartForward / StopForward sites are skipped.
+        // Releasing the key here closes that hole.
+        input.StopForward(true);
     }
 
     public void Stop()
