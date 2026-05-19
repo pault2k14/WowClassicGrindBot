@@ -5349,11 +5349,53 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return false;
         }
 
-        // Determine if the target is essentially at route[leaderIdx] — if so,
-        // no trailing element needed; the route waypoints already arrive there.
-        bool targetIsAtLeaderWp = target.WorldDistanceXYTo(route[leaderIdx]) < Navigation.POP_DIST;
+        // Fix BK (log-95 11:52:11:626 → 11:52:18:524 and 11:52:25:114 →
+        // 11:52:30:097, two of 26 systematic occurrences in a 9-min run):
+        //
+        // The previous check `targetIsAtLeaderWp` only tested whether the
+        // target coincides with route[leaderIdx]. When `target` was at
+        // some OTHER route waypoint (typically route[resumeIndex] in
+        // RouteWalk mode, since the FFG's nav target = route[_assist-
+        // RouteIndex] which is ≤ leaderIdx-1 in steady state or
+        // leaderIdx during rendezvous, but the projection-aware
+        // advancement may have moved resumeIndex past _assistRouteIndex),
+        // the check evaluated false and the trailing target was appended
+        // as a duplicate of a route waypoint already in the span.
+        //
+        // Failure mode: nav queue loaded as
+        //   [route[resumeIndex], …, route[leaderIdx], trailing=route[K]]
+        // where K ∈ [resumeIndex, leaderIdx] (or even K < resumeIndex, if
+        // the FFG's _assistRouteIndex hasn't yet been updated to match
+        // the bot's physical position past route[K]). The bot processes
+        // the queue in order: walks forward through route[resumeIndex..
+        // leaderIdx], then BACKWARDS to the trailing duplicate. Log-95
+        // evidence: 26/26 BE pushes had the trailing target match a
+        // route waypoint; backward distances 7-14y per push; "Destination
+        // reached. dist=N.Ny to leader — refreshing waypoint" fires
+        // after the backward walk completes, ~2 seconds later than it
+        // should have.
+        //
+        // The trailing target was DESIGNED for PositionChase mode, where
+        // `target = leader.WorldPos` (or a follow offset) is an off-
+        // route position the bot needs to reach after walking the route
+        // span. In RouteWalk mode the target IS a route waypoint and the
+        // trailing is always redundant.
+        //
+        // Fix: scan the entire route, not just route[leaderIdx]. If the
+        // target matches ANY route waypoint (within POP_DIST), omit the
+        // trailing — the route span itself already includes (or has
+        // already passed through) the target position.
+        bool targetIsRouteWaypoint = false;
+        for (int i = 0; i < route.Length; i++)
+        {
+            if (target.WorldDistanceXYTo(route[i]) < Navigation.POP_DIST)
+            {
+                targetIsRouteWaypoint = true;
+                break;
+            }
+        }
         int routeCount = leaderIdx - resumeIndex + 1;
-        int totalLen = targetIsAtLeaderWp ? routeCount : routeCount + 1;
+        int totalLen = targetIsRouteWaypoint ? routeCount : routeCount + 1;
         Vector3 firstWp = route[resumeIndex];
 
         // Duplicate suppression (mirrors FRG:1273-1279 + line 1936 gate).
@@ -5373,7 +5415,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         Span<Vector3> span = stackalloc Vector3[totalLen];
         for (int i = 0; i < routeCount; i++)
             span[i] = route[resumeIndex + i];
-        if (!targetIsAtLeaderWp)
+        if (!targetIsRouteWaypoint)
             span[totalLen - 1] = target;
 
         navigation.SetWayPoints(span);
@@ -5383,10 +5425,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         logger.LogInformation(
             $"[FFG] [FIX-FIRE] BE: route-span push — {totalLen} waypoints " +
             $"[route[{resumeIndex}..{leaderIdx}]={routeCount} pre-validated waypoints" +
-            $"{(targetIsAtLeaderWp ? ", no trailing target (at leader WP)" : $" + trailing target {target}")}]" +
+            $"{(targetIsRouteWaypoint ? ", no trailing target (target is a route waypoint, Fix BK)" : $" + trailing target {target}")}]" +
             $"{(advancedByProjection ? $" — advanced from closestIndex={closestIndex} via projection (bot past closest waypoint)" : "")}.");
 
-        outcome = targetIsAtLeaderWp ? "pushed-pure-route" : "pushed-with-trailing";
+        outcome = targetIsRouteWaypoint ? "pushed-pure-route" : "pushed-with-trailing";
         return true;
     }
 
@@ -6053,7 +6095,40 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (dist < FollowingMaxYards)
         {
             // Truly arrived within following range.
+            //
+            // Fix BL (log-95 11:48:19:813 → 11:48:25:646, 5.85s with the
+            // bot drifting 37.7y east at full walking speed while
+            // NavState=Idle; log-95 11:51:08:320 → 11:51:15:910, 7.59s
+            // with 21.5y drift): navigation.Stop() suspends the
+            // nav-layer's pathing and steering logic but does NOT
+            // release the forward movement key. The Fix K-1 comment at
+            // line ~1398 documents the exact same gotcha for
+            // FFG.OnExit, and the inline comment at FRG.cs:997-1002
+            // documents it for FRG. Without input.StopForward(true)
+            // here, the bot enters NavState.Idle with the forward key
+            // still pressed and continues to walk in its last facing
+            // direction until something else releases the key (the next
+            // FFG action that calls input.StopForward, OR another nav
+            // tick that issues new steering commands).
+            //
+            // The downstream consequence is severe: when FFG re-engages
+            // (e.g., leader resumes patrol or starts approaching a
+            // mob), the bot has drifted tens of yards past the route
+            // waypoint where the pop fired. FFG uses _assistRouteIndex
+            // = N (the index that was just popped) as the navigation
+            // target = route[N]. SetSingleWaypoint(route[N]) is BEHIND
+            // the bot's drifted position. The bot turns 180° and walks
+            // back to route[N]. This is the user's "during approach
+            // the assist actually turning around going many yards in
+            // the opposite direction" complaint.
+            //
+            // Symptom matches Fix K-1's log-57 evidence exactly: zero
+            // movement-key log lines on the assist during the drift
+            // window, yet the bot moved tens of yards forward — the
+            // Forward key was held continuously the whole time.
             navigation.Stop();
+            if (input.IsKeyDown(input.ForwardKey))
+                input.StopForward(true);
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
@@ -6117,7 +6192,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // re-engages when needed.
             _rendezvousConfirmed = true;
 
+            // Fix BL: see lengthy comment on the parallel
+            // dist<FollowingMaxYards branch above. Same gotcha applies
+            // here — navigation.Stop() does not release the forward
+            // key, and without input.StopForward(true) the bot would
+            // drift in its last facing direction until something else
+            // releases the key. Log-95 had this path fire during the
+            // grindloop's typical dead-band-co-located outcome (target
+            // = route[_assistRouteIndex] is the just-popped waypoint,
+            // refreshDist ≈ 0.7y < POP_DIST). Bot drifted east 37.7y
+            // in 5.85s in the worst case (11:48:19:813 → 11:48:25:646)
+            // before FFG re-engaged.
             navigation.Stop();
+            if (input.IsKeyDown(input.ForwardKey))
+                input.StopForward(true);
             ResetNavState();
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
