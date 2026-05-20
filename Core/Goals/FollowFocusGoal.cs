@@ -3623,6 +3623,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
+        // [DIAG-BW] TEMPORARY diagnostic (log-100 17.998 investigation):
+        // Reaching this line with mode==Anchor && !HasApproachStart means BU's
+        // hysteresis was eligible but did NOT return — i.e., one of the five
+        // conditions failed OR the sticky window elapsed. Static analysis of
+        // log-100 23:16:17.998 says all conditions should have held, yet mode
+        // flipped Anchor → RouteWalk. This log captures the actual state at the
+        // moment of bypass so the next reproduction identifies which condition
+        // broke. Observation-only — no state mutation. REMOVE AFTER ROOT CAUSE
+        // IDENTIFIED.
+        if (_currentNavTargetMode == NavTargetMode.Anchor && !leader.HasApproachStart)
+        {
+            double diagSinceLastTrueMs = _lastHasApproachStartUtc == DateTime.MinValue
+                ? double.MaxValue
+                : (DateTime.UtcNow - _lastHasApproachStartUtc).TotalMilliseconds;
+            logger.LogInformation(
+                $"[FFG] [DIAG-BW] BU bypass: mode=Anchor !HasApproachStart but BU did not return. " +
+                $"_lastHasApproachStartUtc={_lastHasApproachStartUtc:HH:mm:ss.fff} " +
+                $"(cond_utc={_lastHasApproachStartUtc != DateTime.MinValue}), " +
+                $"leader.Status={leader.Status} (cond_status={leader.Status == BotStatus.Patrolling}), " +
+                $"_lastAnchorTarget={_lastAnchorTarget} (cond_anchor={_lastAnchorTarget != default}), " +
+                $"sinceLastTrueMs={diagSinceLastTrueMs:0} " +
+                $"(cond_time={diagSinceLastTrueMs < AnchorModeStickyMs}, sticky={AnchorModeStickyMs}ms), " +
+                $"leader.ApproachStart=<{leader.ApproachStartWorldX:0.0},{leader.ApproachStartWorldY:0.0}>, " +
+                $"leaderConnection.LocalAgeMs={leaderConnection.LocalAgeMs:0}.");
+        }
+
         if (leader.HasApproachStart)
         {
             // ── Route-walking migration: Turn 3 — combat handoff ──
