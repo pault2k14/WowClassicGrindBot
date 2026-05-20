@@ -980,6 +980,50 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const float CBMaxScanDistanceYards = 35.0f;
     private const float CBImprovementMargin = 0.3f;
 
+    // ── Fix CF (log-109 16:08:57 evidence) — Body-chase override for route detours ──
+    //
+    // When the leader is geographically close (within
+    // CFBodyChaseProximityYards) but the next route waypoint is FURTHER
+    // from the leader than the bot is, the route is taking a detour
+    // (typically a U-turn or loop). Walking the route forward would take
+    // longer than chasing the leader directly. Per-tick: switch from
+    // RouteWalk → PositionChase to body-chase the leader directly.
+    //
+    // User observation (log-109 16:08:57): "the assist took a very long
+    // lap around what looked to be some waypoints after the last combat."
+    // Trace: bot at <-728.64, -4217.32>, leader at <-739.30, -4234.53>
+    // (25.8y direct). BM-3 + CB picked route[7]=<-720.45, -4207.66> as
+    // Initial sync target. CB's scan (CBMaxScanDistanceYards=35y) broke
+    // at route[9] (39y from bot) without seeing route[20] at 23y from
+    // bot — the route LOOPS through route[7..19] before coming back
+    // close to the bot. Without CF, bot walked 13 route waypoints (~140y)
+    // over ~30s while the leader stood 25.8y away. With CF: per-tick
+    // body-chase override fires (25.8y < 30y AND route[7] is 32.8y from
+    // leader > 25.8 + 3y margin) → bot walks 25.8y direct, ~6s.
+    //
+    // Per-tick override; no latching. If route-walk would actually be
+    // better on a future tick (next route wp closer to leader than direct),
+    // override naturally disengages.
+    //
+    // Why not just refine CB? CB's break-on-too-far protects against
+    // picking a 50+ y target during normal patrol. Loosening that risks
+    // regressions in non-loop scenarios. CF is a separate per-tick check
+    // that complements CB without changing its semantics — and matches
+    // the user's design suggestion (distance-based chase).
+    //
+    // Gate: skip CF when _pendingAnchor is set (combat handoff in flight —
+    // body-chase would miss the Anchor mode transition).
+    //
+    // CFBodyChaseProximityYards: bot-to-leader threshold below which
+    //   body-chase is worth the risk of unvalidated terrain. 30y matches
+    //   CBLeaderProximityYards (consistent with CB's "close" definition).
+    // CFRouteDetourMargin: next route waypoint must be at least this much
+    //   FURTHER from leader than bot is, to avoid flicker when route is
+    //   roughly aligned with chase direction. 3y ≈ POP_DIST.
+    private const float CFBodyChaseProximityYards = 30.0f;
+    private const float CFRouteDetourMargin = 3.0f;
+
+
     // ── Fix CC (log-106 11:14:16 evidence) — Geometric cache extension ──
     //
     // The leader's route index cache is updated only when leader publishes
@@ -1232,7 +1276,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -4533,6 +4577,63 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     // route-walking. The pending anchor stays in
                     // place; this tick returns the route target
                     // below.
+                }
+
+                // ── Fix CF (log-109 16:08:57 evidence) ──
+                // Per-tick body-chase override when the route would
+                // detour through a loop while the leader is geographically
+                // close. See the CFBodyChaseProximityYards constant block
+                // (~line 1020) for full design rationale and worked
+                // example.
+                //
+                // Gated on:
+                //   - leader within CFBodyChaseProximityYards (close
+                //     enough that body-chase is feasible — within healer
+                //     range)
+                //   - _assistRouteIndex valid (Initial sync has run)
+                //   - _pendingAnchor not set (combat handoff in flight —
+                //     body-chase would miss the Anchor mode transition)
+                //   - next route waypoint at least CFRouteDetourMargin
+                //     yards FURTHER from leader than the bot is (route
+                //     is genuinely detouring, not just slightly off-axis)
+                //
+                // Reset _assistRouteIndex = -1 so the next RouteWalk-
+                // eligible tick re-syncs from the assist's new (post-
+                // body-chase) position. Avoids stale-index issues where
+                // _assistRouteIndex still points at route[N] far behind
+                // the bot's actual position after body-chase moved it
+                // forward.
+                if (_pendingAnchor == default)
+                {
+                    float botToLeaderDistCF = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+                    if (botToLeaderDistCF < CFBodyChaseProximityYards
+                        && _assistRouteIndex >= 0
+                        && _assistRouteIndex < route.Length)
+                    {
+                        Vector3 nextWp = route[_assistRouteIndex];
+                        float nextWpToLeader = nextWp.WorldDistanceXYTo(leader.WorldPos);
+                        if (nextWpToLeader > botToLeaderDistCF + CFRouteDetourMargin)
+                        {
+                            if (_currentNavTargetMode != NavTargetMode.PositionChase)
+                            {
+                                logger.LogInformation(
+                                    $"[FFG] [FIX-FIRE] CF: Body-chase override — " +
+                                    $"leader {botToLeaderDistCF:0.0}y away " +
+                                    $"(< CFBodyChaseProximityYards={CFBodyChaseProximityYards:0.0}y), " +
+                                    $"next route wp[{_assistRouteIndex}]={nextWp} is " +
+                                    $"{nextWpToLeader:0.0}y from leader " +
+                                    $"(+{nextWpToLeader - botToLeaderDistCF:0.0}y further than direct " +
+                                    $"chase). Route is detouring through a loop or U-turn; " +
+                                    $"switching RouteWalk → PositionChase to chase leader directly. " +
+                                    $"Resetting _assistRouteIndex={_assistRouteIndex} → -1 so the " +
+                                    $"next RouteWalk-eligible tick re-syncs from the bot's new " +
+                                    $"position.");
+                            }
+                            _assistRouteIndex = -1;
+                            _currentNavTargetMode = NavTargetMode.PositionChase;
+                            return ComputeFollowTargetWorldPos(leader);
+                        }
+                    }
                 }
 
                 _currentNavTargetMode = NavTargetMode.RouteWalk;
