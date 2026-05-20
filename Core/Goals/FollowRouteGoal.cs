@@ -633,6 +633,75 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                                 $"GoToOneWaypoint on this same tick.");
                         }
                     }
+                    else if (_assistReturnActive)
+                    {
+                        // Fix CE-2 (log-108): Falling-edge handler for the
+                        // assistrequestreturn broadcast. The GoapAgent's
+                        // union diff (GoapAgent.cs line ~366) calls
+                        // AssistNotRequestReturn() when AnyAssistCantFollow()
+                        // transitions from true to false, which broadcasts
+                        // GoapKey.assistrequestreturn=false to all goals.
+                        // Previously this branch was empty — the case body
+                        // only handled the rising edge via the
+                        // AnyAssistCantFollow() check above. As a result,
+                        // an in-flight AssistReturn (set by the union diff's
+                        // sibling rising-edge call to GoToOneWaypoint, or by
+                        // the status diff at GoapAgent line ~437) would
+                        // persist on the leader's nav stack until either:
+                        //   1. The leader reached the AssistReturn destination
+                        //      (where _assistWaitingForFollowing pauses
+                        //      indefinitely waiting for assist's "following"
+                        //      confirmation),
+                        //   2. The 25s ASSIST_RETURN_TIMEOUT_ACTIVE_SEC
+                        //      timeout fired (TickAssistReturnTimeout), OR
+                        //   3. A subsequent path failure triggered
+                        //      AbortAssistReturn via the rewind retry path.
+                        //
+                        // None of these capture the common case where the
+                        // assist briefly entered CantFollow during combat
+                        // preemption, then the assist's AK gate cleared the
+                        // CantFollow state at combat end (Fix CE-1 clears
+                        // the flag too) — the leader's AssistReturn
+                        // destination becomes stale immediately but the
+                        // leader keeps walking to it.
+                        //
+                        // Log-108 manifestation:
+                        //   13:31:42:689  leader: union diff rising edge,
+                        //                 AssistReturn begin → <-515.76>
+                        //   13:31:42:740  assist: NavState → CantFollow
+                        //                 (path-rejection at <-515.55>)
+                        //   13:31:42-47   combat preempts both bots
+                        //   13:31:48:114  leader: Resume PRESERVE branch
+                        //                 keeps AssistReturn dest on stack
+                        //   13:31:48:251  assist: AK gate clears _navState
+                        //                 (+ Fix CE-1 clears flag)
+                        //   13:31:48:252  assist: BM-3 picks route[47] EAST
+                        //   13:31:48+     leader walks WEST (AssistReturn),
+                        //                 assist walks EAST (route) —
+                        //                 user-visible corridor loop
+                        //
+                        // With CE-1 clearing the flag at 13:31:48:251, the
+                        // GoapAgent's union diff sees AnyAssistCantFollow
+                        // fall from true to false on the next agent tick,
+                        // broadcasts assistrequestreturn=false. This
+                        // handler catches that broadcast and aborts the
+                        // stale AssistReturn — leader's nav stack is
+                        // cleared, Resume() refills with normal patrol
+                        // waypoints from the leader's current position,
+                        // and the two bots converge on the same route.
+                        //
+                        // Safety: _assistReturnActive guard prevents
+                        // spurious aborts when the broadcast fires but no
+                        // AssistReturn was ever initiated (e.g., flag
+                        // briefly rose and fell before any goal could
+                        // pick it up).
+                        logger.LogInformation(
+                            "[FRG] OnGoapEvent assistrequestreturn (falling edge) — " +
+                            "assist no longer reports CantFollow. Aborting in-flight " +
+                            "AssistReturn (Fix CE-2) so the leader doesn't continue " +
+                            "walking to a stale rescue destination.");
+                        AbortAssistReturn("Fix CE-2: assistrequestreturn falling edge");
+                    }
                     break;
 
                 case GoapKey.incombat:

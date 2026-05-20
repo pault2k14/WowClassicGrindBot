@@ -1232,7 +1232,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -1334,6 +1334,38 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 ResetEscapeState();
                 ResetNavState();
                 _navState = NavState.Idle;
+
+                // Fix CE-1 (log-108): the AK gate clears the assist's internal
+                // CantFollow nav-state (resets _navState to Idle), but the
+                // canonical CantFollow exit pattern (AO cumulative cap, line
+                // ~2599) also clears assistStatusProvider.CantFollow=false so
+                // the leader's snapshot of AnyAssistCantFollow() updates
+                // promptly. Without this clear, the flag stays true until the
+                // bot physically reaches follow range (via the line 1840 /
+                // 2025 / 2119 / 5766 / 5827 / 6029 / 6106 paths) and the
+                // leader continues to observe AssistCantFollow=true while
+                // walking to a stale AssistReturn destination.
+                //
+                // Log-108 13:31:48 manifestation: at combat end, AK clears
+                // _navState (good), but assist.CantFollow flag remains true
+                // until 13:32:38:996 (~50s later, when bot reaches follow
+                // range). During that window, leader's FRG.Resume PRESERVE
+                // branch preserves the AssistReturn destination <-515.76>
+                // (set at 13:31:42 by the union diff's GoToOneWaypoint
+                // before combat preemption), and walks WEST to it while
+                // assist's BM-3 picks route[47] and walks EAST. Bots
+                // diverge 55y in opposite directions over ~12 seconds,
+                // producing the user-visible corridor loop.
+                //
+                // Pairs with Fix CE-2 (FRG.OnGoapEvent case
+                // assistrequestreturn falling-edge handler) — CE-1 makes
+                // the flag fall promptly post-AK; CE-2 acts on the falling
+                // edge by aborting the leader's in-flight AssistReturn.
+                // Both required: CE-1 alone leaves the AssistReturn waypoint
+                // on the leader's nav stack until physical follow range is
+                // reached; CE-2 alone waits until the flag falls naturally
+                // (same 50s delay).
+                assistStatusProvider.CantFollow = false;
             }
             else
             {
