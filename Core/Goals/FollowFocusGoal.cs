@@ -3790,6 +3790,66 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
     else
         {
+            // ── Fix BW (log-101 22:34.317→22:34.488→22:36.778 evidence) ──
+            // Latch-aware hysteresis for the _approachAnchorColocated state.
+            //
+            // Symptom: bot reverses direction twice in ~2.3s during ATG↔PTG
+            // re-entry storms. Concrete sequence from log-101:
+            //   22:34.317  anchor co-located → latch=true, mode=PositionChase
+            //              (bot chasing leader's body, correctly)
+            //   22:34.488  HasApproachStart cache flipped false (leader did
+            //              ATG→PTG at 22:34.145, ~343ms earlier). Else-branch
+            //              fires, latch reset, RouteWalk block sets mode →
+            //              RouteWalk with drift=17.2y. NAV BC-fix-fire on the
+            //              same tick confirms: "bot is about to reverse
+            //              direction" (facing·forward = -0.16 cos).
+            //   22:36.778  HasApproachStart cache flipped true again (leader
+            //              re-entered ATG at 22:36.558). Mode → Anchor with
+            //              drift=5.7y. Second reversal: bot now turns around
+            //              again to head toward the anchor.
+            // User-visible: bot near leader → reverses to route waypoint AWAY
+            // from leader → reverses again back toward anchor. Two visible
+            // turn-backs in 2.3 seconds, with no actual change in the leader's
+            // strategic intent (same mob, same target GUID, same anchor coords
+            // via Fix BT's stable-anchor re-use).
+            //
+            // Root cause asymmetry: BU's sticky-window protects mode==Anchor
+            // from premature flip after HasApproachStart=false (2.5s window
+            // covers the brief PTG OnEnter gap). But mode==PositionChase
+            // when set by the _approachAnchorColocated latch has no such
+            // protection — the latch resets unconditionally on the very
+            // first tick HasApproachStart=false, dropping the bot straight
+            // through to the RouteWalk block.
+            //
+            // Fix: mirror BU. While the latch is set and we're within the
+            // sticky window since the last HasApproachStart=true tick,
+            // preserve the latch and return PositionChase chase target.
+            // The leader's ATG re-entry will re-fire HasApproachStart=true
+            // within typical PTG cycles (1.5-2.5s observed); on that next
+            // tick the if(HasApproachStart) block's latch check at
+            // line ~3714 takes over, keeping the bot in PositionChase
+            // smoothly. If the approach truly ended (mob killed, leader
+            // gave up), the sticky window expires after AnchorModeStickyMs
+            // and the latch resets normally — original behavior.
+            if (_approachAnchorColocated && _lastHasApproachStartUtc != DateTime.MinValue)
+            {
+                double sinceLastTrueMs = (DateTime.UtcNow - _lastHasApproachStartUtc).TotalMilliseconds;
+                if (sinceLastTrueMs < AnchorModeStickyMs)
+                {
+                    // Within sticky window — preserve latch and PositionChase mode.
+                    // Bot continues chasing leader's body across the brief
+                    // HasApproachStart=false gap (typical: leader's PTG OnEnter
+                    // before ATG re-entry). _pendingAnchor and AN latches are
+                    // also preserved by virtue of this early return — they will
+                    // be re-evaluated naturally when HasApproachStart returns
+                    // true on the next tick.
+                    _currentNavTargetMode = NavTargetMode.PositionChase;
+                    return ComputeFollowTargetWorldPos(leader);
+                }
+                // Sticky window elapsed — fall through to the original
+                // latch resets below. The approach genuinely ended.
+            }
+
             // ── Route-walking migration: Turn 3 ──
             // Approach phase ended (HasApproachStart=false). If we had
             // a pending anchor that was never consumed (assist didn't
