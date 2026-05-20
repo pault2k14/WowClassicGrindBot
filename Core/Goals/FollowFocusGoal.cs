@@ -642,55 +642,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // become route-adjacent rather than off-route.
     private Vector3 _pendingAnchor = default;
 
-    // ── Route-walking migration: Turn 3.5 (Turn 3 → Turn 3.5 commit) ──
+    // Route-walking Turn 3.5: leader route index cache (30s TTL).
     //
-    // _cachedLeaderRouteIdx + _cachedLeaderRouteIdxUtc cache the most
-    // recent route index we successfully matched to the leader's
-    // published TargetWaypoint. Used as a fallback in
-    // TryFindLeaderRouteIndex when the leader's HasTargetWaypoint is
-    // false (i.e., the leader has cleared its patrol target — observed
-    // during the approach phase when ATG takes over from FRG, and
-    // briefly post-combat before FRG re-publishes).
-    //
-    // Why this is necessary: log-86 analysis showed that Turn 3's
-    // CheckShouldDefer fired ZERO times across 57 approach events
-    // because the leader's HasTargetWaypoint went false at the exact
-    // moment HasApproachStart went true — a structural mutual
-    // exclusion in the leader's state machine. Without a cache,
-    // TryFindLeaderRouteIndex always fails during approach, defer
-    // never engages, and Turn 3 is dead code.
-    //
-    // Cache update policy:
-    //   - Refreshed (value + timestamp) on every successful match via
-    //     leader.HasTargetWaypoint + 1.0y tolerance.
-    //   - NOT updated when leader.HasTargetWaypoint=true but no match
-    //     within tolerance (rescue insertion, transient non-route
-    //     waypoint). Preserves the last KNOWN route index.
-    //
-    // Cache use policy:
-    //   - Used as fallback when (a) leader.HasTargetWaypoint=false, OR
-    //     (b) HasTargetWaypoint=true but no waypoint matched.
-    //   - TTL of CachedLeaderRouteIdxMaxAgeSec; treated as stale beyond
-    //     that to avoid using ancient indices after a long combat
-    //     break, rescue, etc.
-    //
-    // Lifecycle:
-    //   - Sentinel -1 = "no cached value yet."
-    //   - Initialized lazily by TryFindLeaderRouteIndex's primary path
-    //     (the first tick where leader.HasTargetWaypoint matches a
-    //     route entry within tolerance).
-    //   - Refreshed by TryFindLeaderRouteIndex on every subsequent
-    //     primary-path hit (line ~3784).
-    //   - Read by the fallback path when primary fails (e.g.,
-    //     HasTargetWaypoint=false during combat or approach phases).
-    //   - Auto-rejected by the TTL check inside the fallback path when
-    //     age exceeds CachedLeaderRouteIdxMaxAgeSec (30s).
-    //   - Fix BI-2: PRESERVED across FFG OnExit/OnEnter session
-    //     boundaries (was reset to -1 prior to BI-2). The TTL handles
-    //     bounded staleness; preserving lets the fallback path succeed
-    //     immediately at FFG.OnEnter post-combat, eliminating the
-    //     1-2 second window of stale-PositionChase walking that caused
-    //     the 180° flip-on-cache-repopulate bug.
+    // Caches the route index matched to leader's published TargetWaypoint.
+    // Used as fallback in TryFindLeaderRouteIndex when leader.HasTargetWaypoint
+    // is false (mutually exclusive with HasApproachStart in the leader's
+    // state machine — without the cache, CheckShouldDefer is dead code
+    // during every approach event). Fix BI-2: PRESERVED across FFG
+    // OnExit/OnEnter boundaries; TTL handles staleness, preserving the
+    // cache eliminates the ~1-2s stale-PositionChase window after combat.
+    // Sentinel -1 = no cached value.
+    // See HANDOFF Fix BI-2 + SCOPING Turn 3.5 for full evidence.
     private int _cachedLeaderRouteIdx = -1;
     private DateTime _cachedLeaderRouteIdxUtc = DateTime.MinValue;
     private const double CachedLeaderRouteIdxMaxAgeSec = 30.0;
@@ -1050,71 +1012,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // transition next time RouteWalk advances to a waypoint.
         _pendingAnchor = default;
 
-        // ── Fix BI-2 (log-94 kill #15 01:19:54:276 → 01:19:57:636,
-        //    1.9-second stale-PositionChase SE walk followed by a 180°
-        //    flip to the correct route NW, drift=39.9y, LeftArrow 976ms) ──
-        //
-        // The cache is PRESERVED across OnExit/OnEnter session boundaries.
-        // Prior behavior cleared it here (and at the symmetric OnExit
-        // site at line ~1312), which created a window after every FFG
-        // re-entry where:
-        //   1. The leader had just published a patrol waypoint
-        //      (FRG.Published patrol waypoint event)
-        //   2. But the assist's polled leader.HasTargetWaypoint hadn't
-        //      caught up yet (~150-2000ms polling/propagation lag)
-        //   3. TryFindLeaderRouteIndex's primary path failed because
-        //      leader.HasTargetWaypoint=false
-        //   4. The fallback path also failed because the cache was
-        //      just reset to -1 here
-        //   5. GetNavigationTarget fell through to PositionChase, using
-        //      leader.WorldPos directly (also has polling lag, so it
-        //      points to wherever the leader WAS before publishing the
-        //      new patrol waypoint — typically several yards in the
-        //      direction the leader was facing pre-combat)
-        //   6. The bot walked 4-5y toward the stale leader position,
-        //      typically southward away from the route
-        //   7. The cache finally repopulated when the primary path's
-        //      conditions all aligned
-        //   8. RouteWalk's Initial sync picked the nearest safe route
-        //      waypoint at-or-before allowedAdvance — for an off-route
-        //      bot, this waypoint was often ~30-40y in a roughly
-        //      opposite direction from where the bot had just been
-        //      walking
-        //   9. Mode change PositionChase → RouteWalk with massive drift
-        //      caused a ~180° body rotation key press (LeftArrow 976ms
-        //      in log-94's worst case — almost a full reversal)
-        //
-        // Preserving the cache means the fallback path can succeed
-        // immediately at FFG.OnEnter, RouteWalk engages on the first
-        // tick, and the bot turns ONCE to face its route waypoint
-        // (rather than turning to face stale-leader, walking briefly,
-        // then turning 180° to face route).
-        //
-        // The TTL check at TryFindLeaderRouteIndex line ~3808 already
-        // rejects stale cache (age > CachedLeaderRouteIdxMaxAgeSec).
-        // For typical grinding kills (combat duration 5-15s) the cache
-        // is still within TTL at FFG.OnEnter. For extended combat
-        // (>30s) the cache expires and behaviour matches the original
-        // (fall through to PositionChase). For first-ever FFG.OnEnter
-        // the cache is at its default (idx=-1, utc=MinValue) and the
-        // fallback path returns false as before — unchanged.
-        //
-        // Why this is safe across session boundaries:
-        //   - The cached value stores a route INDEX, not a physical
-        //     position. Even if the leader moved during combat, the
-        //     cached index reflects where the leader was on the route
-        //     before combat. Post-combat, the leader resumes patrol
-        //     from approximately the same route position (it didn't
-        //     teleport — combat was localised). The cached index is
-        //     therefore approximately correct.
-        //   - TryFindLeaderRouteIndex's primary path overwrites the
-        //     cache on the FIRST tick where leader.HasTargetWaypoint
-        //     matches a route entry. So any drift from the pre-combat
-        //     cached value is short-lived; once polling catches up
-        //     (typically within 500ms-1.5s), the cache is refreshed
-        //     with the current correct value.
-        //   - Cross-session leak from a long-past FFG session: the TTL
-        //     guarantees rejection of >30s-old cache.
+        // Fix BI-2: cache is PRESERVED across OnExit/OnEnter boundaries
+        // (was reset to -1 prior to BI-2). Eliminates the ~1-2s
+        // stale-PositionChase walk after combat re-entry that caused
+        // log-94 kill #15's 39.9y drift + 180° flip-on-cache-repopulate.
+        // The TTL inside TryFindLeaderRouteIndex (CachedLeaderRouteIdxMaxAgeSec=30s)
+        // bounds cross-session staleness; the cached value is a route
+        // INDEX (not a physical position) which remains approximately
+        // correct after typical combat displacement. First-ever OnEnter
+        // unaffected (default sentinel idx=-1 + utc=MinValue).
+        // See HANDOFF Fix BI-2 for full evidence.
 
         // ── Route-walking migration: Turn 3.5b ──
         // Reset the cache-fallback-in-use flag so the first transition
@@ -1244,66 +1151,19 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
         else if (_navState == NavState.CantFollow)
         {
-            // Fix AK (revised, log-76 evidence + oscillation-safety review):
+            // Fix AK: on CantFollow re-entry, discriminate by preemption
+            // duration. Brief (≤SignificantPreemptionMs=2500ms): resume
+            // CantFollow with ResetEscapeState (original Fix 31/32 — Heal/
+            // Buff/Loot class, geometry essentially unchanged). Long
+            // (>2500ms, Combat class): reset to Idle for fresh evaluation;
+            // if still unreachable, FFG re-escalates after ~100ms.
             //
-            // Original log-76 scenario (00:34:35:005 → 00:34:40:383):
-            //   - Assist entered CantFollow at <-375.78, -4134.94> due to a
-            //     genuine Fix AC+AE+AI U-turn rejection (angle=166.7°) when
-            //     pathing 10y SE through rocks.
-            //   - Combat preempted FFG at 00:34:35:362, ran for 5s, exited
-            //     at 00:34:40:217. FFG.OnEnter at 00:34:40:383.
-            //   - Pre-fix behavior: "resuming CantFollow state" branch fires
-            //     Projection10 with basis=away-from-leader. Leader had moved
-            //     south during Combat (final pos <-381.44, -4152.90>), so
-            //     away-from-leader projected NORTH. Assist walked north
-            //     for 15+ seconds through 16 Projection10 iterations.
-            //
-            // Naive Fix AK would always reset to Idle on FFG.OnEnter from
-            // CantFollow. But that creates a regression for the oscillation
-            // case raised in review: a genuinely-stuck assist (terrain
-            // obstacle persists) being briefly preempted by Heal, Buff,
-            // Loot, or any range-keyed goal would, on each preemption,
-            // pay 2 wasted path-find attempts (~100ms) AND briefly
-            // re-enter NavigatingToLeader (movement keys may pulse →
-            // visible jitter). Repeated rapidly, this is bad UX AND
-            // accumulating overhead.
-            //
-            // The discriminator: preemption duration. Position-based checks
-            // looked appealing but log-76 disproved them — the assist moved
-            // 1.25y during Combat and the leader moved 0.27y. Both were
-            // essentially stationary (the assist a ranged caster fighting
-            // in place). The ONLY signal that distinguishes Combat-class
-            // preemption from Heal-class preemption is wall-clock duration.
-            //
-            // Calibration:
-            //   - Combat: ~3-30s typical (log-76 was 5s; CombatTracker
-            //     "Left Combat after 3.00sec" line shows the shortest
-            //     realistic case).
-            //   - Heal/Buff: 1-2s cast time + 250ms goal-swap = 1.25-2.25s.
-            //   - Loot: 1-3s depending on items.
-            //   - ConsumeCorpse: 2-4s depending on level.
-            //   - SignificantPreemptionMs = 2500ms threshold.
-            //
-            // Behavior split:
-            //   - Brief preemption (≤2500ms): resume CantFollow with
-            //     ResetEscapeState() (original Fix 31/32 behavior). No
-            //     regression; oscillation-safe.
-            //   - Long preemption (>2500ms): reset to Idle, ResetEscapeState,
-            //     ResetNavState. UpdateIdle re-evaluates from current world
-            //     state. If still unreachable, FFG re-escalates to CantFollow
-            //     after 2 path attempts (~100ms wasted in the worst case).
-            //
-            // Misclassification cost:
-            //   - Very brief Combat (<2500ms) classified as brief: assist
-            //     resumes CantFollow with possibly-stale projection direction.
-            //     But the leader likely hasn't moved much in such a short
-            //     fight, so the projection direction is still roughly correct.
-            //   - Long Heal cast (>2500ms, e.g. resurrect-channel) classified
-            //     as long: assist pays 2 wasted path attempts before re-
-            //     escalating. Bounded, recoverable, no behavior loop.
-            //
-            // Both misclassification modes are strictly less bad than the
-            // log-76 wrong-direction walk.
+            // Wall-clock duration is the only signal that reliably
+            // discriminates the two classes (log-76 disproved position-
+            // based checks — bot and leader were both essentially
+            // stationary during 5s of ranged combat). Misclassification
+            // in either direction is bounded and self-correcting.
+            // See HANDOFF Fix AK for full evidence.
             navigation.Stop();
 
             double preemptionMs = _lastOnExitUtc != DateTime.MinValue
@@ -1430,55 +1290,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         if (_navState != NavState.CantFollow)
         {
-            // Fix 27 (log-50 14:27:14:932 → 14:28:02:655, leader stood still
-            // for 46 seconds while assist fought BL mob via Fix 26 self-
-            // defense override):
+            // Fix 27: only set Waiting if actually > FollowingMaxYards
+            // from the leader at exit time. Within range, keep Status =
+            // Following so the leader's FRG precondition
+            // (assistrequestreturnorisfollowing) stays satisfied through
+            // brief preemptions (Combat/Loot/ConsumeCorpse). The previous
+            // unconditional Waiting on every non-CantFollow exit caused a
+            // 46-second leader stall in log-50 when the assist fought a
+            // BL mob from 0.9y away — the brief Following posted at OnEnter
+            // was overwritten by Waiting in the publisher's staging slot
+            // before publication, so the leader never saw it.
             //
-            // The previous code unconditionally set Status=Waiting on every
-            // non-CantFollow exit. When the assist transitions FFG → Combat
-            // (or Loot, Consume Corpse, etc.) while still right next to the
-            // leader — log-50 measured 0.9 y at OnExit — that overwrote a
-            // perfectly valid "I'm with you" state with a misleading
-            // "I'm not following" state. Sequence in log-50:
-            //   14:27:14:792 FFG.OnEnter → UpdateIdle posts Following (0.9y)
-            //   14:27:14:807 FFG.OnExit  → OLD code overwrites to Waiting
-            //   14:27:14:932 NO PLAN, then Combat plan at 14:27:17:730
-            //   14:27:14 → 14:28:01 (47 s) — CombatGoal/Loot/Consume don't
-            //                                 touch Status, so it stays
-            //                                 Waiting the whole time
-            //   Leader-side: assistrequestreturnorisfollowing=False
-            //                → FRG precondition fails → NO PLAN for 46 s,
-            //                until the assist's next FFG.OnEnter at
-            //                14:28:01:428 re-posts Following.
-            //
-            // Worse, the 500 ms publisher interval (PartyApiConfig
-            // .AssistPostIntervalMs) meant the brief Following posted at
-            // 14:27:14:792 was overwritten by Waiting in the publisher's
-            // staging slot before the next publish tick fired — so the
-            // leader never saw the Following at all, the wasWaiting
-            // branch at line ~502 never executed, and the leader's
-            // _assistWaitingForFollowing flag (set at 14:27:02:213 when
-            // the AssistReturn destination was reached) stayed set.
-            //
-            // Fix: only set Waiting when actually far from the leader.
-            // If we're still inside FollowingMaxYards at exit time, we
-            // are positionally still "following" — only the active goal
-            // has changed. Keeping Following lets the leader's FRG
-            // precondition pass (assistisfollowing=True → assist-
-            // requestreturnorisfollowing=True) so it can patrol /
-            // pause-for-distance normally instead of locking up.
-            //
-            // The original comment's worry about NavigatingToLeader
-            // leaking into other plans doesn't apply here: FFG.UpdateIdle
-            // line ~681 only posts Following when dist < FollowingMaxYards,
-            // which is exactly the same condition we re-check here. So
-            // we never publish Following when the assist is actually
-            // out of position.
-            //
-            // Edge case — assist exits FFG mid-navigation at > 7 y from
-            // leader (e.g. NavigatingToLeader interrupted by Combat at
-            // 10 y): old behavior preserved, Status=Waiting, because
-            // the leader genuinely cannot assume we're in position.
+            // Edge case preserved: > FollowingMaxYards → still Status=Waiting
+            // (genuine out-of-position, NavigatingToLeader interrupted etc).
+            // See HANDOFF Fix 27 for full evidence.
             LeaderState? leader = leaderConnection.LastLeaderState;
             float distToLeader = (leader != null)
                 ? playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos)
@@ -1621,212 +1446,37 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
 
-        // ── Evade-recovery hold (REMOVED in session 27) ────────────────────
-        // Session 23 added a hold-position gate here that returned early during
-        // _evadeRecoveryActive, on the premise that "the leader is still next
-        // to the blacklisted mob when the event fires (and stays there until
-        // the leader-side PressClearTarget releases the wantNavPaused gate in
-        // FRG.cs:741); chasing the leader's body via PositionChase would
-        // route the assist into the danger zone."
+        // ── ATG-handoff focus-chain: Fix AH + AJ + AN + AM ──
         //
-        // That premise was true at the time because Defect D (FRG.wantNavPaused
-        // didn't filter IsIgnored) prevented the leader from moving during
-        // evade. Fix 4 in session 26 closed Defect D — wantNavPaused now
-        // filters playerReader.IsIgnored, so the leader actually retreats.
+        // Fix AH (log-73): at the approach-anchor co-location moment, press
+        // PressTargetFocus + PressTargetOfTarget so the next planner tick
+        // sees hastarget=true and ATG (cost 8) outranks FFG (cost 19),
+        // transferring control. The chain is placed ABOVE the state switch
+        // because Idle↔NavigatingToLeader toggles rapidly (<15ms in log-73)
+        // at the anchor — a per-state check would miss most ticks.
         //
-        // Log 27 confirmed the new failure mode created by leaving this gate
-        // in place after Fix 4:
-        //   00:50:05:631  evade fires
-        //   00:50:05:829  leader's FRG starts navigating (Fix 4 working) —
-        //                  RightArrow movement keys begin
-        //   00:50:08:608  leader has covered ~18y, still moving
-        //   00:50:09:602  leader hits LeaderPauseYards=20y → "[FRG] Pausing
-        //                  for assist — dist=20.0y status=TooFar"
-        //   00:50:05:771–30:610  assist FFG total silence (this gate held it
-        //                  in Idle for the full 24.84s window)
-        //   00:50:30:646  leader's evade window elapses
-        //   00:50:31:011  Tab in CombatGoal.FindPossibleThreats finds the
-        //                  same blacklisted mob still adjacent (because the
-        //                  leader couldn't continue retreating)
-        //   00:50:31:057  re-fired evade → cycle restarts
+        // Fix AJ (log-75): only LATCH _approachTargetAcquired when the
+        // chain produces a hostile target (bits.Target() && Target_Hostile()).
+        // Retry at ApproachTargetAcquireRetryMs (250ms) — round-trip
+        // latency can cause F to fire before PageUp lands, leaving the
+        // assist's target=focus=leader (friendly). The retry converges
+        // in 1-2 attempts because the failed first attempt left target=focus
+        // = leader, so the next F sees a stable current target.
         //
-        // Removing the gate lets FFG's normal state machine run during the
-        // evade-recovery window. The assist stays Idle while inside
-        // FollowingMaxYards (7y), transitions to NavigatingToLeader when the
-        // retreating leader exceeds NavigatingMinYards (14y), and tracks the
-        // leader's retreat naturally. The original "into the danger zone"
-        // concern is moot because the leader's body is no longer in the
-        // danger zone — it's actively retreating away from it.
+        // Fix AN (log-74/77): TTL fallback for short ATG windows. When the
+        // leader's ATG completes faster than the assist can converge to
+        // the anchor (~2-2.5s), remember the anchor position for
+        // AnchorLocalTtlMs (3s) past HasApproachStart=false; if the assist
+        // arrives in that window, fire the same chain. The leader still
+        // has the target selected at this point.
         //
-        // Other defenses remain in place to ensure the assist does not
-        // engage the blacklisted mob during the window:
-        //   - CombatGoal's AddPrecondition(GoapKey.evadeRecovery, false)
-        //     keeps Combat unselectable for the entire 25 s window.
-        //   - TFT.CanRun rejects on _evadeRecoveryActive AND, independently,
-        //     when playerReader.FocusTargetGuid is in IsIgnored (Fix 3/5a).
-        //   - CombatGoal.Update's session-24 IsIgnored short-circuit
-        //     (CombatGoal.cs:198) catches any race window where Combat
-        //     somehow runs an Update tick.
-        //   - TFT.Update's IsIgnored guard before the F press (Fix 5b).
+        // Fix AM: diagnostic only — at the AJ latch moment, snapshot every
+        // ATG-gating value (bits.Target_*, IsInBlacklistArea, HasApproachStart,
+        // ForcedFollow). If FFG is still running >StaleLatchWarnAfterMs
+        // after the latch, emit a warning. Turns "ATG silently not picked"
+        // into a greppable signature.
         //
-        // Stuck detection now runs unconditionally during the evade window
-        // (see TickNavActiveTimeout / TickActiveStuckDetection /
-        // TickIdleStuckDetection). The previous code suppressed it during
-        // evade because the hold gate above forced the assist stationary
-        // and we didn't want false-positive Stuck reports for that forced
-        // pause. With the gate gone, the assist navigates during evade and
-        // any real stall is a real problem — surfacing it (BotStatus.Stuck
-        // → leader pauses → recovery / pather-based escape) is exactly the
-        // right behaviour during a flee. Only bits.Combat() remains as an
-        // exemption because cast-loop stationarity is genuinely not a stall.
-
-        // ── Fix AJ (log-75 23:53:44 onwards): retry until hostile target acquired ──
-        //
-        // Fix AH as originally shipped latched the one-shot
-        // _approachTargetAcquired UNCONDITIONALLY after pressing the focus
-        // chain. log-75 evidence showed this latches even when the chain
-        // fails:
-        //
-        //   23:53:44:232  Fix AH log line ("acquiring leader's target...")
-        //   23:53:44:294  PageUp (PressTargetFocus) pressed
-        //   23:53:44:355  F     (PressTargetOfTarget) pressed (60ms after)
-        //   23:53:44:355  _approachTargetAcquired = true latched
-        //   23:53:44:355  FFG: Reached follow position (dist=3.6y) — Idle.
-        //   [next 2.68 s: no plan transition; ATG never selected]
-        //   23:53:47:052  FFG: Leader out of range (14.7y) — resuming nav
-        //   ...PositionChase through trees...
-        //   23:53:52:467  Fix AC+AE+AI rejection #1 (angle=151°, legit U-turn)
-        //   23:53:53:037  Fix AC+AE+AI rejection #2 (angle=162°, legit U-turn)
-        //   23:53:53:054  Fix AB-2 projection 10y AWAY from leader (NW direction
-        //                 leader at <-483.57, -4314.54>; bot escapes SE)
-        //
-        // Root cause: WoW Classic round-trip latency is typically 30-100ms.
-        // 60ms between PageUp and F is at the lower edge of that window.
-        // When F is processed by the client BEFORE PageUp's effect lands
-        // (no current target yet), F is a no-op. Then PageUp eventually
-        // arrives: assist's target = focus = leader (friendly). The
-        // unconditional latch then prevented any retry.
-        //
-        // Consequences in ATG's preconditions:
-        //   - targethostile=false  (the leader is friendly)        ← FAILS
-        //   - incombatrange=true   (assist is 3.6y from leader,
-        //                           ≤ 5y melee combat range)        ← FAILS
-        // Either failure alone deselects ATG. Planner stays on FFG, falls
-        // into PositionChase, hits the legitimate U-turn rejections, and
-        // escalates to CantFollow's away-from-leader projection.
-        //
-        // Fix AJ: only LATCH _approachTargetAcquired when the chain actually
-        // produced a hostile target. Retry the chain on subsequent FFG.Update
-        // ticks at a 250ms rate-limit (covers max typical round-trip with
-        // headroom). The retry case is robust because the FAILED first
-        // attempt left the assist's target = leader (focus); on the retry,
-        // PageUp targets the same focus (no-op visible to F), and F now
-        // sees a stable current target and correctly cascades to
-        // leader.target = mob (hostile). Convergence in 1-2 retries.
-        //
-        // The retry stops naturally when either:
-        //   (a) bits.Target() && bits.Target_Hostile() → latch closes the loop
-        //   (b) HasApproachStart goes false (anchor cleared) → block-gate fails
-        //   (c) _approachAnchorColocated resets → block-gate fails
-        //
-        // Why hostile-only as the success criterion:
-        //   targethostile=true is the precondition ATG actually needs. We
-        //   check bits.Target() too so the latch can't accidentally close
-        //   on a stale-from-prior-combat bit (defense-in-depth).
-        // ── Fix AH (log-73): focus-chain target acquisition at approach anchor ──
-        //
-        // Hand off to ApproachTargetGoal at the moment the assist is co-located
-        // with the leader's approach-start anchor. ATG's AssistFocus precondition
-        // (GoapKey.partyEngaging, formerly partyincombat) is already satisfied
-        // by leader.HasApproachStart via the corresponding partyEngaging key in
-        // GoapAgent.UpdateWorldState. The remaining blocker is the common
-        // hastarget=true precondition — the assist has no target at this point
-        // because the leader's mob is too far/obscured for autotargeting to
-        // grab it.
-        //
-        // Solution: press the same focus chain that ATG.Update's AssistFocus
-        // branch presses every tick (PressTargetFocus + PressTargetOfTarget).
-        // On the next planner tick, the world state includes hastarget=true
-        // and ATG (cost 8) outranks FFG (cost 19) — control transfers to ATG,
-        // which then re-presses the focus chain every Update and adds
-        // PressApproach for the interact-key auto-walk.
-        //
-        // Gating conditions (all must hold):
-        //   - leader != null              we have a fresh broadcast
-        //   - leader.HasApproachStart     the leader is in its ATG phase
-        //   - _approachAnchorColocated    the assist is at the anchor; the
-        //                                 latch is set by GetNavigationTarget
-        //                                 when the bot is within POP_DIST of
-        //                                 the anchor.
-        //   - !_approachTargetAcquired    not yet succeeded — see Fix AJ
-        //                                 above for the conditional latch.
-        //   - elapsed ≥ ApproachTargetAcquireRetryMs since last attempt
-        //                                 (Fix AJ rate-limit).
-        //
-        // Placement above the state machine: at the approach anchor the assist
-        // toggles rapidly between Idle and NavigatingToLeader (log-73 shows
-        // <15 ms toggling). A check inside any single state handler would
-        // miss most ticks. Above-the-switch placement is state-agnostic.
-        //
-        // ── Fix AN (log-74 22:52, log-77 first-approach 01:46:45→01:46:48):
-        // Local anchor TTL fallback.
-        //
-        // log-74 22:52: leader's ATG window was 2.55s. At the moment the
-        //   anchor cleared, the assist was 4.28y from it — just past
-        //   POP_DIST (3.6y). The co-location latch never fired; Fix AH
-        //   never ran. Assist fell back to PositionChase through trees,
-        //   hit Fix AC+AE+AI rejection, escalated to CantFollow.
-        // log-77 first-approach 01:46:45→01:46:48: leader's ATG window
-        //   was only 2.14s — even shorter. The assist never converged
-        //   to the anchor. Same failure mode as log-74.
-        //
-        // Pattern: leader's ATG completes faster than the assist can
-        // traverse to the anchor. The anchor was a perfectly good place
-        // to fire the focus-chain handoff, but the leader's side cleared
-        // it on ATG.OnExit, and the assist abandoned the latch a tick
-        // later when HasApproachStart=false was observed.
-        //
-        // Fix AN: remember the most recently observed anchor position
-        // for up to AnchorLocalTtlMs after HasApproachStart goes false.
-        // If, within that window, the assist actually arrives at the
-        // anchor location (within POP_DIST), fire the same Fix AH+AJ
-        // focus-chain anyway. The target acquisition itself is just as
-        // useful one tick after the anchor expired: the leader still
-        // has the target selected (it's in PTG/Combat now), and the
-        // assist can latch onto it via the focus chain.
-        //
-        // Why an assist-side TTL rather than leader-side extended anchor:
-        // The leader-side fix (keep the anchor set across PTG/Combat)
-        // requires touching multiple files (ATG, PTG, CombatGoal, plus
-        // all of ATG's bail-out paths) and creates new coordination
-        // contracts. The assist-side TTL is single-file, has a bounded
-        // blast radius (3s window), and addresses the same failure mode.
-        // If the simpler fix proves insufficient, the leader-side fix
-        // remains an option to layer on top.
-        //
-        // ── Fix AM (log-77 01:47:03:506 → end-of-log):
-        // Diagnostic logging for "Fix AJ latched but ATG never took over."
-        //
-        // log-77 evidence: at 01:47:03:506 Fix AJ confirmed hostile target
-        // acquired (guid=535132). FFG.Update continued running for another
-        // 3+ seconds in PositionChase mode, with the planner never selecting
-        // ATG. One of ATG's preconditions must be failing in
-        // GoapAgent.UpdateWorldState, but without a snapshot of the relevant
-        // GoapKey values at the latch moment we can't tell which.
-        //
-        // Fix AM emits two diagnostics:
-        //   1. At the moment Fix AJ latches, dump every ATG-gating value
-        //      that FFG can observe (bits.Target_*, playerReader.With...,
-        //      navigation.IsInBlacklistArea, leaderNavProvider.HasApproachStart,
-        //      chatReader.ForcedFollow). This gives a single line of evidence
-        //      at the moment the world state should be ATG-favorable.
-        //   2. If FFG.Update is still running >StaleLatchWarnAfterMs after
-        //      the latch with HasApproachStart still true, emit a warning
-        //      indicating ATG did NOT take over. This makes the bug visible
-        //      in the log even when nothing else looks wrong.
-        //
-        // Together these turn "ATG silently not picked" into a single
-        // greppable warning line plus a diagnostic snapshot.
+        // See HANDOFF Fix AH/AJ/AN/AM for full evidence trail.
         {
             LeaderState? approachLeader = leaderConnection.LastLeaderState;
             bool leaderAnchorActive = approachLeader != null && approachLeader.HasApproachStart;
@@ -2466,90 +2116,24 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             bool suppressRefresh = false;
             if (navigation.HasWaypoint())
             {
-                // ── Fix AZ (log-82 19:06:54:442 → 19:06:55:229) ──
+                // Fix AZ: when navigation.IsRouteEscapeActive=true, suppress
+                // FFG's drift-gate waypoint refresh unconditionally. The
+                // current wp is owned by RouteEscape (tactical escape target
+                // 10y/20y/30y at offset angles from facing); refreshing it
+                // toward the leader yanks the bot back into the obstacle
+                // that caused the stuck.
                 //
-                // ROUTEESCAPE OWNERSHIP OF THE WAYPOINT
+                // The pre-AZ alignment-based check (cos > 0.7) ALWAYS fails
+                // for escape targets because they intentionally point away
+                // from the leader. log-82 mob N: 30y escape curve (pathLen=33,
+                // 664ms movement) overwritten after 787ms with a 7y leader-
+                // pursuit target, bot walked straight back into same stuck.
                 //
-                // When Navigation's RouteEscape state machine is mid-execution
-                // (IsRouteEscapeActive=true), the current waypoint is owned by
-                // RouteEscape — it's the tactical escape target (10y at 0°, 20y
-                // at +120°, or 30y at −120° from the bot's facing direction at
-                // attempt-start). RouteEscape sets the waypoint via
-                // SetSingleWaypoint(escapeW) when an attempt fires (Navigation
-                // TryRouteUnstuck line ~2720) and expects to retain it for the
-                // duration of the attempt (up to RouteEscapeNoMovementSec=3.0s
-                // or per-yard timeout).
-                //
-                // The alignment check below was designed for normal patrol /
-                // leader-pursuit transitions where the new target is in roughly
-                // the same direction as the old waypoint (just further along).
-                // Escape targets are INTENTIONALLY in a different direction —
-                // they aim away from the obstacle that caused the stuck, which
-                // is by definition not aligned with the leader. So the cos > 0.7
-                // test ALWAYS fails for escape targets, suppressRefresh stays
-                // false, and FFG overwrites the escape route on its next drift-
-                // gate tick (~250-700ms cadence).
-                //
-                // Evidence (log-82, mob N post-combat):
-                //   19:06:54:442  Navigation: RouteEscape attempt 30y →
-                //                 <-757.52, -4265.19>. offset=-120°, target NW.
-                //                 SetSingleWaypoint(escapeW). _routeEscapeActive
-                //                 = true.
-                //   19:06:54:443  SetWayPoints(count=1) — wpTop=<-757.52, -4265.19>.
-                //   19:06:54:473  REFILL fires with escape target.
-                //   19:06:54:503  Path 130 computed: pathLen=33 (long curve around
-                //                 the hill SE of the bot). routeCount=5 after
-                //                 SimplifyRouteToWaypoint.
-                //   19:06:54:504  ROUTESET reqId=130. Bot starts walking along curve
-                //                 — Right arrow pressed 664ms.
-                //   19:06:55:229  SetWayPoints(count=1) AGAIN — wpTop=<-735.20,
-                //                 -4288.27>, the 7y leader-pursuit target. Curve
-                //                 escape OVERWRITTEN after 787ms.
-                //   19:06:55:245  Path 131 computed (pathLen=15, due east toward
-                //                 leader). Bot walks east — Left arrow 858ms.
-                //   19:06:58:878  Stuck AGAIN at <-740.87, -4290.86> (same spot
-                //                 as the original stuck, 1y away from start of
-                //                 the 30y curve).
-                //
-                // User observation: "as it cleared the hill going in a curve, the
-                // assist moved right back to where it was." Verified: the 30y
-                // curve had pathLen=33 (winding around the obstacle), bot got
-                // 787ms of movement along it before FFG yanked the wp back to
-                // leader-pursuit, then walked straight back into the same
-                // stuck terrain.
-                //
-                // Fix: when navigation.IsRouteEscapeActive=true, suppress the
-                // refresh unconditionally. The escape route runs to completion
-                // (target reached → IsRouteEscapeActive=false naturally) or to
-                // failure (RouteEscape's own no-progress/timeout logic in
-                // TryRouteUnstuck escalates 10y→20y→30y, or
-                // "all pather attempts exhausted" → ResetRouteEscape, also
-                // clearing IsRouteEscapeActive). Either way, FFG resumes normal
-                // refresh cadence as soon as RouteEscape relinquishes ownership.
-                //
-                // Why this is additive (doesn't break existing logic):
-                //   - The alignment-based check only fires for leader-pursuit /
-                //     anchor / waypoint-sharing scenarios where the bot is
-                //     actively navigating toward the leader. Those scenarios
-                //     don't intersect with RouteEscape (mutually exclusive: bot
-                //     is either escaping OR pursuing).
-                //   - During RouteEscape, the leader-pursuit "currentNavigation-
-                //     Target" still gets computed each tick (line ~1910), but
-                //     suppression prevents it from being applied. _lastNavigated-
-                //     ToLeaderWorldPos still gets updated below so the drift
-                //     baseline stays fresh; when escape ends, the next tick
-                //     uses the current leader position naturally without
-                //     re-triggering the drift gate from a stale baseline.
-                //
-                // Inter-attempt gap: _routeEscapeActive briefly flips to false
-                // between attempts (after one attempt's no-progress/timeout but
-                // before the next attempt fires at +200ms cooldown). During that
-                // ~1-2 second window FFG may overwrite the stale wp with leader-
-                // pursuit. Acceptable because the next escape attempt overwrites
-                // it back, and the brief leader-pursuit doesn't have time to
-                // route the bot far before the escape resumes. Could be tightened
-                // with a separate "IsRouteEscapeInProgress" (includes inter-
-                // attempt) flag if logs show it matters.
+                // Inter-attempt gap (~1-2s between escape attempts when
+                // _routeEscapeActive briefly flips false at cooldown):
+                // acceptable, next attempt restores ownership before brief
+                // leader-pursuit can route the bot far.
+                // See HANDOFF Fix AZ for full evidence.
                 if (navigation.IsRouteEscapeActive)
                 {
                     suppressRefresh = true;
@@ -2825,60 +2409,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        // ── Fix AO (log-78 02:41:21:328 → end-of-log): cumulative-displacement exit
+        // Fix AO: cap cumulative displacement from CantFollow entry at
+        // MaxEscapeDisplacementYards (20y). On exceed, exit CantFollow →
+        // NavigatingToLeader and re-attempt nav from the new position.
+        // Self-limiting: if the path still fails, CantFollow re-fires with
+        // _cantFollowEnteredPos refreshed, starting the bound over.
         //
-        // Evidence: assist failed to path 36 y NE to leader's waypoint top
-        // (Fix AC+AE+AI+AL rejected a 107-raw-node, 11-simplified path with
-        // 172.6° rear angle — genuine navmesh wraparound). Entered CantFollow
-        // at <-707.89, -4281.00> at 02:41:21:328. Leader detected CantFollow
-        // rising edge, broadcast AssistRequestReturn, navigated to assist's
-        // last position (<-710.68, -4280.07>), arrived at 02:41:23:812, then
-        // PAUSED waiting for assist to report Following.
-        //
-        // Meanwhile, the assist's CantFollow escape ran Fix AB-2 "directional
-        // fallback projection 10y, basis=away-from-leader." Each Projection10
-        // cycle recomputed direction using the leader's CURRENT (stationary)
-        // position. Leader stayed west; projection stayed east. Across 23
-        // cycles in 49 s, assist moved <-707.89, -4281.00> → <-531.31, -4313.57>
-        // — 177 y east of leader. The log ended with the escape still running;
-        // the only exit that would have fired was the 120 s CantFollowTimeoutSec.
-        //
-        // Why the existing exits didn't fire:
-        //   - Leader-arrived (6 y): leader paused, assist running away —
-        //     gap monotonically widened. Never triggers.
-        //   - Segment-clear-of-BL: gated by `navigation.AreaBlacklist != null`;
-        //     on the assist side AreaBlacklist is null (no blacklist data
-        //     loaded), so the entire block is skipped regardless of position.
-        //   - 120 s timeout: would eventually fire but lets the assist
-        //     wander 200+ y before retrying.
-        //
-        // Root cause: the Fix AB-2 design rationale (line ~2585-2587) assumes
-        // "The leader, via AssistRequestReturn, is navigating TOWARD the
-        // assist, so even slight backward displacement doesn't hurt the
-        // rendezvous — the leader catches up." When the leader's AssistReturn
-        // completes and the leader PAUSES, this assumption breaks: the leader
-        // has already caught up, but the assist's escape keeps recomputing
-        // "away from leader" and recedes further.
-        //
-        // Fix: cap cumulative displacement from the CantFollow entry position
-        // at MaxEscapeDisplacementYards (20 y). When exceeded, exit CantFollow
-        // → NavigatingToLeader. From the new position, navigation re-attempts
-        // pathing to the leader's CURRENT position (whatever it is now). One
-        // of three things happens:
-        //   (a) Path succeeds (most common when bot has escaped the original
-        //       dead-zone; in log-78's case, a path WEST to the paused
-        //       leader is geometrically different from the rejected NE path
-        //       and likely navigable). Assist returns to leader. ✓
-        //   (b) Path fails identically. CantFollow re-fires with
-        //       _cantFollowEnteredPos updated to the new spot. Escape starts
-        //       fresh, bounded again. Self-limiting.
-        //   (c) Bot has actually walked PAST the rendezvous (rare). Leader
-        //       moves toward bot when assist reports Following or via
-        //       subsequent AssistReturn cycles.
-        //
-        // This is additive — it does not change leader-arrived, segment-clear,
-        // or 120 s timeout behavior. The only new outcome is "give up on
-        // unbounded escape after 20 y and let normal navigation retry."
+        // Root cause (log-78): when AssistReturn completes and the leader
+        // PAUSES at the assist's last position, Fix AB-2's "away-from-leader
+        // projection" keeps receding from the stationary leader. 23 cycles
+        // in 49s walked the assist 177y east before the 120s CantFollow
+        // timeout would have fired. The leader-arrived/segment-clear exits
+        // can't trigger because the gap is monotonically widening or
+        // AreaBlacklist is null on assist side.
+        // See HANDOFF Fix AO for full evidence.
         if (leaderFresh && _cantFollowEnteredPos != default)
         {
             float displacementFromEntry =
@@ -2917,70 +2461,23 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Fix 32 — drive the active-escape state machine.
         DriveCantFollowEscape();
 
-        // Fix AF (log-72 16:09:15:518 → 16:09:35:198+, assist held in
-        // CantFollow at <-699.85, -4170.15> for 20+ seconds during a leader
-        // fight; user described "it didn't appear the assist was actually
-        // stuck, plenty of free movement space on almost all sides"):
+        // Fix AF: tick Navigation on every UpdateCantFollow call so the
+        // escape state machine's installed waypoints actually drive the
+        // bot. Without this, StartProjectionPhase calls SetSingleWaypoint
+        // and flips Navigation.active=true but no path request, route
+        // refill, or input key ever fires — escape phases observe 0.0y
+        // displacement for their entire budget and escalate uselessly.
         //
-        // Evidence from log-72:
-        //   16:09:15:518  SetWayPoints(count=1) for Projection10 target
-        //                 <-705.69, -4178.27>. Navigation.active flipped True.
-        //   16:09:15:519 → 16:09:18:526   ZERO NAV-DBG, NAV-EMPTY, NAV-REFILL,
-        //                                 NAV-DBG ENQUEUE PATH, or
-        //                                 PathCalculatedCallback entries.
-        //                                 Navigation was simply never ticked.
-        //   16:09:18:526  Projection10 elapsed 3.0s with 0.0y displacement.
-        //   (same pattern repeated for Projection20, Projection30, then
-        //   after PhysicalUnstuck moved the bot 2.4y via direct keyboard
-        //   input, a fresh Projection10 from the new position again
-        //   produced 0.0y over the next 3s window.)
-        //
-        // Root cause: navigation.Update() is called from FFG only inside
-        // UpdateNavigatingToLeader (line ~1142 and ~1349). When _navState
-        // is CantFollow, UpdateCantFollow drives the escape state machine
-        // via StartProjectionPhase → navigation.SetSingleWaypoint(target),
-        // which clears the route and flips active=True — but Navigation is
-        // never given a tick to process that change. No path request is
-        // enqueued, no MOVE event fires, no input key is pressed. The bot
-        // sits at the projection's start position for the entire 3 s phase
-        // budget, "0.0y displacement" is observed, and the state machine
-        // escalates to the next phase, where the cycle repeats.
-        //
-        // Why this only surfaced after Fix AE: before Fix AE, the spurious
-        // CantFollow entries caused by Fix AC false-positives were short
-        // (assist re-rescued by leader within ~5-10s), so the broken
-        // projection escape rarely got a chance to matter. Fix AE
-        // eliminated the false-positive entries; the CantFollow entries
-        // that remain are legitimate, the leader is typically engaged in
-        // combat and not returning quickly, and the projection escape
-        // actually needs to do its job. It can't.
-        //
-        // Fix: tick Navigation on every UpdateCantFollow call, after the
-        // escape state machine has had a chance to install a new waypoint.
-        //   - During Projection10/20/30 and LastSafeAnchor phases, active
-        //     is True (set by SetSingleWaypoint via SetWayPoints). Update
-        //     processes the route, refills via path request, drives the
-        //     bot toward the route top via input keys.
-        //   - During PhysicalUnstuck and Exhausted phases, both
-        //     StartPhysicalUnstuckPhase (~line 1775) and the Exhausted
-        //     branch in StartEscapePhase (~line 1666) call
-        //     navigation.Stop(), which sets active=False. Navigation.Update
-        //     has `if (!active) return;` at its top (~line 1137), so this
-        //     call is a safe no-op during those phases.
-        //   - The leader-arrived exit and the BL-segment-clear exit at the
-        //     top of UpdateCantFollow both `return` before reaching here,
-        //     so this call doesn't fire on transition-out ticks.
-        //   - All Navigation event handlers in FFG that could fire from
-        //     this Update (Navigation_OnPathFailed,
-        //     Navigation_OnDestinationReached, Navigation_OnWayPointReached,
-        //     and the Option B policy handlers Navigation_OnPathResultInspected,
-        //     Navigation_OnStaleEmptyPathMatchesActive,
-        //     Navigation_OnRepeatedNoPathDirectRouteDecision) guard on
-        //     `_navState != NavState.NavigatingToLeader` and no-op during
-        //     CantFollow. This is correct: a "rear-curving" projection
-        //     path means the pather found a route back toward the leader,
-        //     which is *useful* during an escape — Fix AC+AE must not
-        //     reject it.
+        // Safe across all phases: PhysicalUnstuck and Exhausted call
+        // navigation.Stop() (active=false), so Navigation.Update no-ops
+        // via its early-return guard. Leader-arrived/BL-segment-clear
+        // exits at the top of UpdateCantFollow return before reaching
+        // here. All Navigation event handlers in FFG that could fire
+        // from this Update guard on _navState != NavigatingToLeader
+        // and no-op during CantFollow — correct, because a "rear-curving"
+        // path during escape is USEFUL (it routes back toward the leader)
+        // and Fix AC+AE must not reject it.
+        // See HANDOFF Fix AF for full evidence.
         navigation.Update(CancellationToken.None);
 
         wait.Update();
@@ -3319,115 +2816,41 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        // ── Path 2: Fix AB-2 directional fallback ─────────────────────────
+        // ── Path 2: Fix AB-2 directional fallback (+ BD route-basis) ──
         //
-        // Fix AB-2 (log-68 11:03:43→11:04:25, assist stuck in Durotar
-        // corridor between hill and tree; no blacklist exists for the
-        // route so the original return-default fell through to
-        // LastSafeAnchor):
+        // When no blacklist rect contains the assist, provide a fallback
+        // direction so the Projection phases can still emit meaningful
+        // escape waypoints. Three-step direction priority:
         //
-        // When no rect contains the assist (within the inflated search
-        // zone), the original code returned default and StartProjectionPhase
-        // logged "Projection{yards} — not inside any inflated rect;
-        // CantFollow may not be BL-driven. Falling through to LastSafeAnchor."
+        //   1. BD (Turn 3.5c / log-88): nearest LoadedRoute waypoint, if
+        //      available and not co-located (>1.0y). Route waypoints are
+        //      pre-validated walkable terrain by construction — heads the
+        //      bot toward known-good ground regardless of current terrain
+        //      class. SUPERSEDED the original away-from-leader basis after
+        //      log-88's hilltop-stuck (away-from-leader drove bot up a
+        //      hill into unrecoverable collision).
         //
-        // In log-68, LastSafeAnchor was 0.1y from the assist's current
-        // position (set during a recent successful navigation step before
-        // the stuck began). The co-located check in StartLastSafeAnchorPhase
-        // (line ~1714) then jumped to PhysicalUnstuck — fired ONCE — and
-        // afterwards the second Projection10 attempt repeated the same
-        // fall-through pattern, this time landing on an anchor 5.8y away
-        // (now reachable in principle) but PPather still failed to route
-        // there. After 8s of no progress all phases were exhausted, and
-        // the bot held position for another ~16s waiting for the leader.
+        //   2. AB-2: away-from-leader (reversed leader→assist vector) when
+        //      no route or co-located with nearest wp. Rationale: the
+        //      bot's arrival path is probably traversable in reverse, and
+        //      leader's AssistRequestReturn is approaching anyway.
         //
-        // The mechanism missing was directional waypoint-based escape
-        // when no blacklist exists. With BL absent, the entire 10/20/30
-        // projection escalation collapsed into a single PhysicalUnstuck
-        // round.
+        //   3. Reversed player facing (-cos(facing), -sin(facing)) when
+        //      leader missing/stale or degenerate co-located.
         //
-        // Fix: provide a fallback direction so the Projection phases can
-        // still emit meaningful escape waypoints. Direction strategy —
-        // AWAY from the leader's body (the unreachable target):
-        //   - The leader is "where we want to go but can't reach".
-        //   - Reversing the leader→assist vector points along the bot's
-        //     natural back-step direction; whatever path the assist took
-        //     to arrive at the stuck position is probably traversable in
-        //     reverse.
-        //   - The leader, via AssistRequestReturn, is navigating TOWARD
-        //     the assist, so even slight backward displacement doesn't
-        //     hurt the rendezvous — the leader catches up.
+        // Per-phase rotation around the chosen axis (mirrors Navigation
+        // Fix W): 10y at 0°, 20y at +120°, 30y at −120°. Sweeps ~240°
+        // around the bot across 3 escalation phases.
         //
-        // Rotation by escalation level (mirrors Fix W in Navigation.cs):
-        //   10y: 0°    — straight back along the leader→assist axis
-        //   20y: +120° — 60° forward-and-side from straight back
-        //   30y: -120° — 60° forward-and-side, opposite side
-        // This sweeps ~240° around the bot so three attempts cover
-        // most clear directions. If "straight back" is also obstructed
-        // (corner stuck, etc.), one of the rotated attempts is more
-        // likely to find clearance.
+        // Interaction with Fix BB: BB flips direction TOWARD leader when
+        // usingLeaderDirection=true AND CantFollow was path-rejection AND
+        // leader ≤ 25y. When BD's route basis is chosen,
+        // usingLeaderDirection=false and BB is correctly skipped (route
+        // direction already points at known-good ground).
         //
-        // Edge cases:
-        //   - Leader missing/stale: use reversed player facing
-        //     (-cos(facing), -sin(facing)). This is the "back away from
-        //     whatever you were heading toward" heuristic.
-        //   - Co-located with leader (degenerate, shouldn't reach
-        //     CantFollow but defensive): same reversed-facing fallback.
-        //
-        // The projection target may itself be unreachable by PPather
-        // (e.g., 30y backward lands in another impassable area). In
-        // that case the escape phase's 3-second budget elapses with no
-        // progress and EscalateEscapePhase fires normally. Behaviour is
-        // strictly improved over the pre-fix collapse: we get up to 3
-        // directional attempts where previously we got 0.
-        // ── Turn 3.5c / Fix BD (log-88 evidence) ──
-        // PREFER ROUTE WAYPOINT AS PROJECTION BASIS
-        //
-        // The original AB-2 basis was "away-from-leader" with the rationale
-        // that the bot's arrival path is the safest reverse direction. That
-        // assumption only holds when the arrival path itself was navmesh-
-        // valid. In log-88's hill incident, the bot's arrival was a chain
-        // of body-chase + previous AB-2 escapes through terrain whose
-        // navmesh-collision agreement was poor. AB-2 then projected 10y
-        // further away-from-leader, walking the bot deeper into the same
-        // terrain class. Result: bot drifted UP a hill, ended completely
-        // stuck at the hilltop where the WoW client's character collision
-        // blocked all lateral movement; leader rescue was required.
-        //
-        // The LoadedRoute, by contrast, contains pre-validated terrain
-        // — the route author walked it during creation, every waypoint
-        // is by construction physically traversable, every leg between
-        // adjacent waypoints is by construction walkable. Projecting
-        // toward the nearest route waypoint heads the bot toward
-        // known-good ground regardless of what terrain class the bot
-        // is currently standing on.
-        //
-        // The ±120° rotations on subsequent escalation phases (20y, 30y)
-        // still apply, but rotate around the toward-route axis rather
-        // than the away-from-leader axis. If the direct route approach
-        // is blocked by an obstacle, the ±120° sweep still gives three
-        // angles to try.
-        //
-        // Fallback: if LoadedRoute is empty (no patrol route loaded) OR
-        // the nearest route waypoint is co-located with the bot (within
-        // 1.0y), keep the existing away-from-leader / reversed-facing
-        // logic.
-        //
-        // Interaction with Fix BB: BB flips the direction TOWARD the
-        // leader when (a) we were using the leader-direction basis AND
-        // (b) CantFollow was caused by path-rejection AND (c) leader is
-        // ≤ 25y. With Fix BD, the leader-direction branch fires only
-        // when route is unavailable. So BB still applies its flip there.
-        // When route IS available, BD's toward-route direction is
-        // already pointed at known-good ground; BB's flip is unnecessary
-        // (and is skipped because usingLeaderDirection=false).
-        //
-        // Naming note: this fix retains the AB-2 log message (the
-        // projection geometry itself is unchanged — same 10/20/30y
-        // phases, same ±120° rotation), but adds a new basis label
-        // "toward-route" to the existing log line. The fix-fire
-        // identifier BD logs separately when the route direction is
-        // chosen, so we can track its rate of engagement.
+        // Log uses the original AB-2 fix-fire string; BD logs separately
+        // when the route basis is engaged, so engagement rate is greppable.
+        // See HANDOFF Fix AB-2 + Fix BD for full evidence.
         float fdx = 0f;
         float fdy = 0f;
         bool usingLeaderDirection = false;
@@ -3549,146 +2972,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        // ── Fix BB (log-83 20:17:59:688 → 20:18:05:005) ──
+        // Fix BB: when CantFollow is caused by path-rejection
+        // (_lastPathFailureWasRejection=true) AND we're using the
+        // leader-direction basis AND leader ≤ 25y, NEGATE the direction
+        // vector so projection points TOWARD the leader instead of away.
         //
-        // CLOSE-LEADER PATH-REJECTION OVERRIDE: FLIP DIRECTION TOWARD LEADER
+        // Rationale: AB-2's away-from-leader assumes the bot is wedged in
+        // terrain near an unreachable leader. For path-rejection failures
+        // (Fix AC+AE+AI+AL refusing U-turn paths > 150° angle / 8 nodes),
+        // the bot is at a navmesh-VALID position and the rejection is a
+        // routing quirk (long detour for short straight-line distance).
+        // Backing away from leader deepens the routing problem AND
+        // produces the user-visible "turned around" symptom.
         //
-        // Original Fix AB-2 (this function, Path-2) projects AWAY from the
-        // leader's body on the assumption that the leader is "where we want
-        // to go but can't reach" — i.e., the bot is physically stuck in
-        // terrain near an unreachable leader, and the bot's arrival path
-        // is the safest reverse direction. That assumption is correct for
-        // displacement-based stuck scenarios.
+        // Threshold tuning: 15y (initial) → 25y (Turn 3.5 / log-86).
+        // 15y missed corridor scenarios where assist trails further back
+        // during catch-up (log-86: 20.9y, BB silent, AB-2 walked bot 13y
+        // wrong-way, 50s stuck). 25y covers log-83/84/85/86 corridor cases.
+        // The _lastPathFailureWasRejection gate keeps BB tight — wedge-
+        // case escapes (where away-from-leader IS correct) have
+        // _lastPathFailureWasRejection=false and BB stays silent.
         //
-        // It is WRONG for the path-rejection failure mode: Fix AC+AE+AI+AL
-        // refuses paths whose first major segment is a U-turn (angle > 150°,
-        // simplified ≥ 8 nodes). When this rejection fires twice in a row
-        // and escalates to CantFollow, the bot is at a navmesh-VALID position
-        // (it just walked there); the rejection is a routing quirk where
-        // the pather returns a long winding detour for a short straight-line
-        // distance. The bot is not wedged — backing away from leader simply
-        // moves it further from any clean navmesh route, deepening the
-        // routing problem.
-        //
-        // Evidence (log-83, mob 1 approach):
-        //   20:17:57:807  Assist starts navigating to approach-start anchor
-        //                 <-510.83, -4448.26>. Bot at <-523.32, -4442.74>.
-        //   20:17:57:992  Path 195 computed cleanly: pathLen=12. Bot walks SE
-        //                 through Durotar corridor between hill and tree.
-        //   20:17:59:487  Bot arrives at anchor area (Fix AN tolerance match).
-        //                 Bot ends Y=-4446.69 — 1.6y NORTH of corridor
-        //                 centerline (Y≈-4448) due to navmesh-snap drift.
-        //   20:17:59:626  FFG refreshes wp to new leader-pursuit target
-        //                 <-503.99, -4448.80> (8.5y SE of bot).
-        //   20:17:59:688  Path 196 computed: pathLen=145 for 9y straight-line
-        //                 distance. Simplified=16, routeTop=<-516, -4444.8>
-        //                 at 163° behind forward dir. The bot's 1.6y-off-
-        //                 axis position forces the pather to wind through
-        //                 the tight tree/hill navmesh, producing a long
-        //                 detour whose first major segment goes NW first.
-        //                 Fix AC+AE+AI+AL rejects (matches log-69 profile).
-        //   20:17:59:689  Rewind to LastSafeAnchor (<-513.01, -4446.62> —
-        //                 0.4y away, useless: bot already there).
-        //   20:17:59:703  Rewind reached; retry leader target.
-        //   20:18:00:260  Path 197: same 145-node path. Rejected again.
-        //   20:18:00:261  Path failed after retry → CantFollow.
-        //   20:18:00:277  ╔════════════════════════════════════════════╗
-        //                 ║ Fix AB-2 directional fallback projection   ║
-        //                 ║ 10y AWAY from leader → <-522.25, -4444.74> ║
-        //                 ║ (10y WEST of bot, AWAY from leader EAST).  ║
-        //                 ║                                            ║
-        //                 ║ Bot follows this Projection10 target,      ║
-        //                 ║ then Projection10 fires again on arrival   ║
-        //                 ║ at 20:18:02:903 (another 10y WEST), then   ║
-        //                 ║ again at 20:18:03:877 (third 10y WEST).    ║
-        //                 ║ Total westward travel: 20y before Fix AO   ║
-        //                 ║ caps cumulative displacement.              ║
-        //                 ╚════════════════════════════════════════════╝
-        //   20:18:05:005  Fix AO cap (20y) — exit CantFollow at <-532.58,
-        //                 -4451.25>. Leader has moved on, now 64.4y east.
-        //                 Net result: assist walked 20y in the WRONG
-        //                 direction, leader had to rescue.
-        //
-        // User-visible behavior matches the log: "the assist followed half
-        // way through the corridor, then stopped, turned around and ran in
-        // the opposite direction." The "turned around" event is the
-        // SetSingleWaypoint(Projection10 target = 10y west) at 20:18:00:277
-        // — exactly when the bot's wp flipped from <-503.99, -4448.80>
-        // (leader, east) to <-522.25, -4444.74> (10y west).
-        //
-        // Fix: when CantFollow is entered due to recent path-rejection
-        // (_lastPathFailureWasRejection=true, set at the snap.Reject=true
-        // line in Navigation_OnPathResultInspected) AND the leader is
-        // close (≤ FixBBLeaderProximityYards), AND we have a fresh leader
-        // position (usingLeaderDirection=true), NEGATE the direction
-        // vector. Projection10's 0° rotation then points TOWARD leader
-        // (straight at, where the bot was already heading); Projection20's
-        // +120° and Projection30's -120° still apply on top, so the sweep
-        // is over the FORWARD half-plane instead of the rear.
-        //
-        // For log-83 geometry: leader 9y SE, fdx initial ≈ (-0.973, +0.230)
-        // (10y NW). After flip: fdx ≈ (+0.973, -0.230) (10y SE). Projection10
-        // → <-503.04, -4448.74>: 0.95y short of the leader, in the corridor.
-        // Even if the navmesh blocks the route, the bot's CURRENT heading
-        // doesn't flip (the wp is in the same direction the bot was
-        // already going). The "turned around" symptom is fully eliminated.
-        //
-        // Why 15y threshold:
-        //   - FollowingMaxYards = 14y is the dead-band's outer edge —
-        //     "within follow range" is roughly bounded by this.
-        //   - 15y gives 1y of margin for jitter; covers the log-83 case
-        //     (leader was 8.5y) and similar close-leader scenarios.
-        //   - Beyond 15y, the bot may legitimately be in a different
-        //     "stuck-far-from-leader" failure mode where the original AB-2
-        //     reverse-arrival heuristic is correct. Don't override there.
-        //
-        // Why not just disable the flip when bot is wedged: the wedged
-        // case sets _lastPathFailureWasRejection=false (rejection didn't
-        // fire — bot was stuck due to displacement). The flag-based gate
-        // already distinguishes these failure modes correctly without
-        // needing additional condition checks.
-        //
-        // Recovery if the flipped direction also fails: the bot walks
-        // toward the leader's last known position; if it hits real
-        // terrain (the hill or tree the pather was routing around), the
-        // chase/no-progress watchdog fires within ~3s and Projection10
-        // escalates to Projection20 (which adds +120° from the flipped
-        // basis, still in the forward half-plane). Eventually the
-        // CantFollow phase exhausts and LastSafeAnchor / PhysicalUnstuck
-        // / Exhausted fire as today. Worst-case: 9-12s of forward-
-        // attempt cycling before the bot is back to today's recovery
-        // path — and during those 9-12s the bot stays NEAR the leader,
-        // not 20y away. AssistRequestReturn rescue (which fires from
-        // the leader side at status=CantFollow) can resolve from the
-        // close position much faster than the original 20y-away spot.
-        // ── Turn 3.5 update (log-86 evidence) ──
-        // Raised FixBBLeaderProximityYards from 15.0f to 25.0f. The 15y
-        // value was too aggressive for corridor scenarios where the
-        // assist trails further behind the leader during catch-up:
-        //
-        // Log-86 trace (03:05:02-15): the assist was at <-521.60,
-        // -4429.37> with the leader 20.9y away ("segment to leader is
-        // now clear (20.9y, no BL rect blocks)"). Fix AB-2 fired with
-        // basis=away-from-leader, projecting the bot WEST while the
-        // leader was EAST. Cumulative AB-2 firings (23 in the session)
-        // walked the bot ~13y west of the corridor entrance, then
-        // rotated through ±120° projections, ending 18y NORTH of the
-        // corridor at <-521.60,-4429.37>. Stuck for 50s.
-        //
-        // BB was supposed to override this by flipping the projection
-        // TOWARD the leader, but BB only fired when leader was ≤ 15y.
-        // At 20.9y, BB stayed silent and AB-2's wrong-direction
-        // projection ran unimpeded.
-        //
-        // 25y covers all observed corridor-stuck scenarios (log-83,
-        // log-84, log-85, log-86 — leader was ≤ 25y in every case).
-        // Trade-off: BB may now flip in scenarios where the leader is
-        // farther away and the away-from-leader direction WAS correct
-        // (e.g., escaping a wide blacklist rect). But BB still
-        // requires _lastPathFailureWasRejection=true, which is
-        // specifically the corridor-style failure — not the
-        // blacklist-rect escape. The two conditions together remain
-        // a tight signature for the corridor failure mode.
+        // Interaction with BD (route basis): BD sets usingLeaderDirection
+        // =false when LoadedRoute is available, so BB is correctly skipped
+        // there (route direction already points at known-good ground).
+        // See HANDOFF Fix BB for full evidence.
         const float FixBBLeaderProximityYards = 25.0f;
         if (usingLeaderDirection && _lastPathFailureWasRejection)
         {
@@ -3976,47 +3284,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     }
 
     /// <summary>
-    /// Fix BM-1 (log-96 16:36:20:860 → 16:36:50:754, 30 s false-stuck cascade):
-    /// Returns true when the assist is parked at its trailing-by-one cap (or
-    /// rendezvous cap) waiting for the leader to advance — the "correctly idle"
-    /// state that <see cref="TickActiveStuckDetection"/> and
+    /// Fix BM-1 (log-96): returns true when assist is parked at its
+    /// trailing-by-one (advance) cap or rendezvous cap, waiting for
+    /// leader to advance — the "correctly idle" state that
+    /// <see cref="TickActiveStuckDetection"/> and
     /// <see cref="TickNavActiveTimeout"/> must NOT flag as stuck.
-    ///
-    /// <para>The parked-at-cap CONDITION is persistent (tens of seconds while
-    /// the leader is in combat, looting, etc.), but the parked-EVENT
-    /// (Navigation_OnDestinationReached's RouteWalk branch) fires only once
-    /// per arrival. BH-3's transient flag-set approach therefore left the
-    /// flag false on every tick except the arrival tick —
-    /// TickActiveStuckDetection trips at 2.5s and TickNavActiveTimeout at
-    /// 30s with no suppression.</para>
-    ///
-    /// <para>This predicate computes the parked state from observable
-    /// fields each tick, replacing the transient flag with persistent
-    /// state recognition:</para>
-    /// <list type="number">
-    ///   <item>Current nav target mode is RouteWalk (set by
-    ///     <see cref="GetNavigationTarget"/> on the previous tick; remains
-    ///     stable until the bot transitions to a different goal phase).</item>
-    ///   <item><see cref="_assistRouteIndex"/> is a valid index into
-    ///     <see cref="GoalsComponent.Navigation.LoadedRoute"/>.</item>
-    ///   <item>The bot is within <see cref="GoalsComponent.Navigation.POP_DIST"/> of
-    ///     <c>route[_assistRouteIndex]</c> — i.e., standing at the route
-    ///     waypoint it's targeting.</item>
-    /// </list>
-    /// <para>When all three hold, the bot is parked at cap (the advance
-    /// loop in GetNavigationTarget would have already incremented
-    /// <c>_assistRouteIndex</c> if the cap allowed; if it didn't, then
-    /// <c>_assistRouteIndex == advanceCap</c> or
-    /// <c>_assistRouteIndex == rendezvousCap</c>, both of which are
-    /// "at cap").</para>
-    ///
-    /// <para>False positive: bot mid-route, transiently within POP_DIST of
-    /// route[N] as it passes through. On the same tick the advance loop
-    /// will increment <c>_assistRouteIndex</c> to N+1; on the next tick
-    /// the distance to route[N+1] is &gt; POP_DIST and parked returns
-    /// false. One extra suppressed tick during waypoint passage is
-    /// harmless — the bot is making progress and the timers wouldn't
-    /// have fired anyway.</para>
+    /// Replaces BH-3's transient flag, which was false on every tick
+    /// except the arrival tick (parked-EVENT fires once, parked-
+    /// CONDITION persists for tens of seconds).
+    /// Predicate: NavTargetMode==RouteWalk AND _assistRouteIndex valid
+    /// AND distance(player, route[_assistRouteIndex]) &lt; POP_DIST.
+    /// See HANDOFF Fix BM-1 for full evidence.
     /// </summary>
     private bool IsParkedAtRouteCap()
     {
@@ -4156,8 +3434,24 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return false;
         }
 
-        anchorCoords = new Vector3(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
-        return true;
+        // Fix BP (log-97 19:31:25:193 → 19:32:24:633, all 5 deferred handoffs failed):
+        // mid-leg case (distToTarget > POP_DIST) — the assist is between route waypoints
+        // when the leader signals approach. Per user design intent #2 ("stop moving to a
+        // waypoint and instead go and help with combat"), the assist should abandon
+        // route-walking and head directly to the anchor.
+        //
+        // Empirical: 0 of 5 deferred-handoffs succeeded in log-97. Every one of them ended
+        // with "Approach ended without arrival at route waypoint" because the leader's
+        // approach phase ended (HasApproachStart=false) before the assist could traverse
+        // its current route leg. The Turn 3 "combat handoff" design assumed approach phase
+        // lasted long enough for a route-leg traversal, but with the leader's ATG sync-pause
+        // exiting in 1-19ms (fixed in BN), it never does.
+        //
+        // The parked-at-cap case (idx >= advanceCap AND distToTarget <= POP_DIST) above
+        // still returns true to preserve BI-1 anti-flip-flop. That case is "already at the
+        // waypoint" — not the "moving to a waypoint" case the user is complaining about.
+        // See HANDOFF Fix BP for full evidence.
+        return false;
     }
 
 
@@ -4423,144 +3717,43 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // comparison in the Fix AH+AJ gating block.
         }
 
-        // ── Route-walking migration: Turn 2 ──
-        //
-        // Priority 1: Route-walking during patrol. The assist navigates its
-        // own next route waypoint (trailing the leader by one index in
-        // LoadedRoute) rather than chasing the leader's body. Eliminates
-        // the moving-target failure mode that caused log-69 / log-83
-        // corridor incidents.
-        //
-        // Engagement conditions (all must hold):
-        //   - leader is Patrolling (not Combat/Loot/Rest/Waiting)
-        //   - navigation.LoadedRoute is populated (Turn 1 LoadRoute()
-        //     succeeded — assist class config has a PathFilename)
-        //   - leader's published TargetWaypointW matches a LoadedRoute
-        //     entry within 1.0y tolerance (the leader is on a known
-        //     route waypoint, not a rescue/manual detour insertion)
-        //   - the resulting leaderIdx − 1 is ≥ 0 (leader has advanced
-        //     past the route's start — otherwise there's nothing for
-        //     the assist to trail to)
-        //
-        // When RouteWalk doesn't engage but the leader is patrolling
-        // with a populated LoadedRoute, fall through to PositionChase
-        // (NOT WaypointSharing) — see code below. WaypointSharing
-        // remains as a safety net only for the empty-LoadedRoute case.
-        //
-        // State management:
-        //   - _assistRouteIndex starts at −1 (unsynced) after OnEnter
-        //     and after any non-RouteWalk mode tick. First RouteWalk
-        //     engagement calls FindNearestSafeRouteIndex to pick the
-        //     closest waypoint at-or-before allowedAdvance.
-        //   - On each RouteWalk tick, if the assist is within
-        //     Navigation.POP_DIST of its current target waypoint AND
-        //     the index can still advance (< allowedAdvance), advance.
-        //     Repeats within a tick if multiple waypoints are within
-        //     POP_DIST (close-packed corner waypoints).
-        //   - If the leader retreated (rare; manual override, rescue
-        //     completion at a behind-position), clamp _assistRouteIndex
-        //     to the new allowedAdvance to prevent the assist from
-        //     overshooting the leader.
-        //
-        // Fix BF (log-91 17:54:11→17:54:52 and log-92 18:59:55→19:00:50,
-        // both ~40s closed-loop oscillations): also engage RouteWalk when
-        // leader.Status == Waiting. Per LeaderStateService.DetermineStatus,
-        // Waiting means EXACTLY one thing for an active leader:
-        // IsPausedForAssist == true (pause-for-assist active). The leader's
-        // TargetWaypoint cache is still valid in this state (it was set
-        // pre-pause and remains broadcast), so route-walking toward
-        // one-behind-leader is the right behavior. Pairs with the
-        // FRG-side pause-at-waypoint change which guarantees the leader's
-        // pause position is ON-ROUTE — so the cached leaderIdx genuinely
-        // reflects the leader's physical position, eliminating the
-        // off-route/stale-cache asymmetry that drove both oscillations.
+        // Route-walking (Turn 2 + Fix BF): when leader is Patrolling OR
+        // Waiting (pause-for-assist) and LoadedRoute is populated,
+        // assist navigates its own route waypoint trailing the leader
+        // by one index. Eliminates the moving-target failure mode that
+        // caused log-69 / log-83 corridor incidents. Falls through to
+        // PositionChase (not WaypointSharing) when conditions don't hold.
+        // State managed via _assistRouteIndex (-1 = unsynced).
+        // See SCOPING Turn 2 + HANDOFF Fix BF for full design.
         if ((leader.Status == BotStatus.Patrolling || leader.Status == BotStatus.Waiting) &&
         navigation.LoadedRoute.Length > 0)
         {
             if (TryFindLeaderRouteIndex(leader, out int leaderIdx))
             {
-                // ── Fix BJ (post-combat rendezvous semantics) ──
-                //
-                // Two route-index caps govern the assist's behaviour, and
-                // they apply at DIFFERENT phases of the patrol cycle:
+                // Fix BJ: post-combat rendezvous semantics. Two caps,
+                // applied at DIFFERENT phases:
                 //
                 //   rendezvousCap = leaderIdx
-                //     Upper bound for Initial sync and clamp. Used when
-                //     the bots are REJOINING the route after combat (or
-                //     after any other off-route detour). Both bots
-                //     converge on the SAME route waypoint — route[leaderIdx],
-                //     which is the leader's current TargetWaypoint.
+                //     Upper bound for Initial sync + clamp. Both bots
+                //     converge on route[leaderIdx] when rejoining after
+                //     combat / detour. Pre-BJ used leaderIdx-1 here,
+                //     which excluded the leader's actual target — picked
+                //     a route waypoint behind leader, often 30-40y away
+                //     in route-progression direction. Bots converged
+                //     on DIFFERENT waypoints with ~13y permanent gap
+                //     (log-94 kill #15: assist 21.9y from route[49] but
+                //     picked route[48] at 33.8y under old semantic).
                 //
-                //   advanceCap    = leaderIdx - 1
-                //     Upper bound for the steady-state advance loop. Once
-                //     both bots are physically at route[leaderIdx] (the
-                //     rendezvous point), the leader walks toward
-                //     route[leaderIdx + 1], its TargetWaypoint updates,
-                //     and the assist's leaderIdx (via TryFindLeaderRoute-
-                //     Index) advances by one. At that point advanceCap
-                //     becomes (new leaderIdx) - 1 = old leaderIdx, and
-                //     the assist (still at old leaderIdx) satisfies
-                //     `_assistRouteIndex >= advanceCap` — no advance, the
-                //     assist WAITS at the rendezvous waypoint until the
-                //     leader reaches the NEXT waypoint and advances again.
-                //     The lockstep gap-of-one emerges naturally from this
-                //     advance-loop cap; it is NOT enforced at Initial sync
-                //     or at clamp.
+                //   advanceCap = leaderIdx - 1
+                //     Upper bound for the steady-state advance loop
+                //     only. Lockstep gap-of-one emerges naturally:
+                //     once assist is at route[leaderIdx], advance is
+                //     gated until leader hits route[leaderIdx+1].
                 //
-                // Why the trailing-by-one cap of leaderIdx-1 must NOT be
-                // applied at Initial sync:
-                //
-                // Steady-state patrol invariant: when both bots are
-                // on-route, leader at route[N+1] (target), assist trails
-                // at route[N]. Gap = 1 waypoint. This is the design.
-                //
-                // Post-combat rejoin: BOTH bots are off-route, having
-                // been pulled SE to engage a mob. The leader resumes
-                // patrol with TargetWaypoint = route[N+1] (whatever index
-                // it was heading to pre-combat). The assist's
-                // _assistRouteIndex was reset to -1 during combat (when
-                // leader.Status was Combat and the RouteWalk gate at
-                // line 4409 evaluated false), so its first post-combat
-                // tick runs the Initial sync at line 4420.
-                //
-                // The bug under the OLD (`allowedAdvance = leaderIdx - 1`)
-                // semantic: Initial sync calls FindNearestSafeRouteIndex
-                // with maxIdx = leaderIdx - 1, which linearly scans
-                // route[0..leaderIdx-1] for the closest waypoint to the
-                // assist. Even if route[leaderIdx] (the leader's actual
-                // target, where the leader is heading) is much closer to
-                // the assist's off-route position, it's EXCLUDED. The
-                // function picks route[leaderIdx-1] (or earlier), often
-                // 30-40y away in the route's progression direction.
-                // The leader is meanwhile walking to route[leaderIdx]
-                // (different waypoint, ~10-15y from route[leaderIdx-1]).
-                // The bots converge on DIFFERENT waypoints with a
-                // permanent ~13y separation.
-                //
-                // Log-94 kill #15 (assist 01:19:57:636 Initial sync):
-                //   assist at (-457.56, -4470.45)
-                //   leaderIdx = 49, leader.TargetWaypoint = route[49] at
-                //     (-472.26, -4453.99)
-                //   distance(assist, route[49]) = 21.9y
-                //   distance(assist, route[48]) = 33.8y
-                //   OLD semantic picked route[48] because allowedAdvance
-                //     was 48; new BJ semantic picks route[49] because
-                //     rendezvousCap is 49 and route[49] is closer.
-                //
-                // The fix: use rendezvousCap (= leaderIdx) at Initial
-                // sync and clamp; use advanceCap (= leaderIdx - 1) only
-                // in the advance loop.
-                //
-                // Note on leaderIdx == 0: rendezvousCap = 0, advanceCap
-                // = -1. Initial sync syncs to route[0] (the only option
-                // in [0, 0]). Clamp: 0 > 0 is false, no-op. Advance loop:
-                // `_assistRouteIndex (0) < advanceCap (-1)` is false, no
-                // advance. Bot navigates to route[0] and waits. The
-                // previous `if (allowedAdvance >= 0)` gate (which would
-                // have skipped this block entirely for leaderIdx==0,
-                // falling through to PositionChase) is no longer needed —
-                // rendezvous at route[0] is a valid behaviour. Edge case
-                // is now handled positively.
+                // leaderIdx==0 edge case: rendezvousCap=0, advanceCap=-1.
+                // Sync to route[0], no advance, assist waits. Correct
+                // behavior (pre-BJ skipped this block entirely).
+                // See HANDOFF Fix BJ for full evidence.
                 int rendezvousCap = leaderIdx;
                 int advanceCap = leaderIdx - 1;
 
@@ -4828,60 +4021,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             (leader.Status == BotStatus.Patrolling || leader.Status == BotStatus.Waiting) &&
             leader.HasTargetWaypoint)
         {
-            // Fix Y (log-66 23:05:39 → 23:06:42): distance gate.
+            // Fix Y: WaypointSharing distance gate. When dist > NavigatingMinYards
+            // (14y), exit to PositionChase. Pre-Y, once _rendezvousConfirmed
+            // latched the assist kept targeting the leader's forward-broadcast
+            // wp even when 20+y behind, dragging path-finds past obstacles
+            // the assist hadn't yet crossed (log-66: leader popped corridor
+            // wp with 3.3y of slack, broadcast next wp far past it, assist
+            // 21.7y north got pathed around a tree, ~25s stuck recovering).
             //
-            // WaypointSharing's semantic is "the bots are close enough to
-            // converge on the same destination together." Once
-            // _rendezvousConfirmed is set, there has been no automatic exit
-            // when the bots drift apart — only the blacklist guard below,
-            // and the outer condition for non-Patrolling status. If the
-            // assist falls behind, it continued targeting the leader's
-            // *next* waypoint rather than the leader's body, even when the
-            // bots are 20+ yards apart.
-            //
-            // The failure mode (log-66): the leader pops a corridor-routing
-            // waypoint with up to ~3.5y of slack in wpPopThreshold, then
-            // immediately broadcasts the *next* waypoint (which may be past
-            // the corridor or in a different direction). If the assist is
-            // upstream of that corridor — i.e., still on the wrong side of
-            // an obstacle the popped waypoint was placed to thread — the
-            // assist's path request to the new waypoint goes from its
-            // upstream position to the far waypoint, and the pathfinder
-            // returns a detour around the obstacle.
-            //
-            // Observed in log-66: leader popped <1975.68,-2173.66> at
-            // 23:05:39:711 while still 3.3y north of it; at 23:05:40:699
-            // the new wp <1975.53,-2187.30> was broadcast; the assist at
-            // <1981.85,-2150.15> was 21.7y from the leader and ~5y east of
-            // the corridor; the path to the new wp curved around a tree;
-            // the bot got stuck; RouteEscape (with Fix W rotation) + Fix X
-            // recovery took ~25s.
-            //
-            // Threshold matches NavigatingMinYards (14y) — FFG's own
-            // definition of "the bots are no longer together enough" used
-            // for the dead-band entry that triggers navigation from Idle.
-            // Above this distance, ComputeFollowTargetWorldPos (which
-            // returns the leader's body with FollowStopShortYards offset)
-            // is the right target — it anchors the path-find at the
-            // leader's actual progressed position rather than the leader's
-            // forward broadcast. The path is shorter, the assist isn't
-            // pulled past obstacles it hasn't yet crossed, and once it
-            // closes back inside NavigatingMinYards the broadcast resumes
-            // automatically.
-            //
-            // _rendezvousConfirmed is NOT cleared — matches the blacklist-
-            // guard pattern just below: the bots WERE together, they
-            // drifted, they're catching back up. When dist returns to
-            // <= NavigatingMinYards on a later tick, the entire outer
-            // condition is satisfied again and WaypointSharing resumes
-            // without needing a fresh full rendezvous co-location.
-            //
-            // No hysteresis on the threshold: oscillation around 14y would
-            // require the bots to be moving in lockstep at exactly that
-            // separation, which doesn't match observed leader/assist
-            // dynamics. If logs later show mode-flip thrash here, lower
-            // the re-entry threshold to NavigatingExitYards (10y) the same
-            // way FFG already hystereses Following↔NavigatingToLeader.
+            // PositionChase uses ComputeFollowTargetWorldPos (leader's body
+            // with FollowStopShortYards offset) — anchors path-find at
+            // leader's CURRENT progressed position. Once assist closes
+            // back inside NavigatingMinYards, WaypointSharing resumes
+            // automatically. _rendezvousConfirmed not cleared (matches the
+            // blacklist-guard pattern just below).
+            // See HANDOFF Fix Y for full evidence.
             float distToLeader = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
             if (distToLeader > NavigatingMinYards)
             {
@@ -4996,74 +4150,25 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         float invLen = 1f / lenXY;
 
-        // Fix Z (log-67 00:37:11:228 → 00:37:24:551, assist detour 25y east
-        // of corridor over ~13 s): cap the path target distance from the
-        // assist when the bots are far apart.
+        // Fix Z: when lenXY > NavigatingMinYards (14y) in PositionChase,
+        // cap target distance from assist at FarTargetMaxYards (7y) along
+        // the assist→leader line. Pre-Z, a far target sitting PAST a
+        // navmesh constraint (log-67: assist at <1974,-2163> targeting
+        // leader at <1977,-2152> through a two-tree corridor) produced
+        // a winding 14-node detour starting SW; bot drifted 25y east
+        // before recovery (~13s). Putting the target IN/BEFORE the
+        // constraint zone forces the pathfinder to return short straight
+        // paths.
         //
-        // The failure mode (log-67): leader walked north through the
-        // two-tree corridor from Y=-2174 to Y=-2149. Once Fix Y switched
-        // the assist to PositionChase (because dist > NavigatingMinYards),
-        // the assist's path target became the leader's body offset —
-        // <1976.92,-2152.16>, NORTH of the trees. The straight-line
-        // distance from the assist at <1974.43,-2162.89> to that target
-        // is 11y, but the trees create a constrained passage between
-        // them; the pathfinder returned a 14-node curve that started
-        // SW (routeTop=<1974.00,-2164.80> — south of the assist!) and
-        // wrapped around to the north. Bot followed the curve, was
-        // interrupted mid-path by an Adhoc plan (Inner Fire cast), and
-        // on FFG re-entry was at <1978.84,-2168.65> — 4.4 y east of its
-        // original position. The next path from this drifted start
-        // produced a 15-node curve, and the bot ended up at
-        // <2003.49,-2161.80> — 25 y east of the corridor.
+        // 7y matches FollowingMaxYards — when bot reaches the capped
+        // target, dist to leader is approx (lenXY - 7), landing in the
+        // Following band naturally. No hysteresis on the 14y threshold
+        // (oscillation would just produce ~4y target jumps absorbed
+        // by path-preservation suppression).
         //
-        // Compare path #1 in the same log: assist at <1978.21,-2174.27>,
-        // target <1976.82,-2161.59> (IN the trees' Y zone, not past
-        // them). 4-node straight path. No detour.
-        //
-        // The difference is purely the target's position relative to the
-        // obstacles. When the target sits PAST the trees (Y < -2155),
-        // the pathfinder plans a route through or around them, and any
-        // route the simplifier returns is a curve the bot has to follow.
-        // When the target sits IN OR BEFORE the trees zone, the path is
-        // short and straight.
-        //
-        // Fix Z's solution: when lenXY > NavigatingMinYards, cap the
-        // target's distance from the assist at FarTargetMaxYards (7y)
-        // along the assist→leader line. For the log-67 scenario:
-        // instead of <1976.92,-2152.16> (11y from assist, past trees),
-        // the new target is <1976.02,-2156.06> — 7 y from assist,
-        // INSIDE the corridor at Y=-2156 (between trees at roughly
-        // Y=-2160 south and Y=-2150 north). The pathfinder is asked
-        // for a short path to a target inside the corridor, gets a
-        // short straight route, the bot walks 7 y north without
-        // crossing the constrained passage, and on the next tick the
-        // distance drops below NavigatingMinYards and the standard
-        // close-target branch resumes.
-        //
-        // Geometry note: dx, dy is (assist - leader), so (dx, dy)/lenXY
-        // is the unit vector pointing FROM leader TOWARD assist. To go
-        // FROM assist TOWARD leader, subtract that vector from assistW.
-        //
-        // 7y matches FollowingMaxYards — the "naturally close" distance
-        // already used elsewhere in FFG. When the bot reaches the Fix Z
-        // target, dist to leader is ~ (lenXY - 7), which for lenXY
-        // slightly above 14y puts the bot right in the Following band.
-        //
-        // No hysteresis on the threshold: small oscillation around 14 y
-        // would just mean a 4-y target jump per crossing, which path-
-        // preservation suppression absorbs in most cases. If logs show
-        // path-discard thrash here, add a re-entry threshold (e.g.,
-        // 10y = NavigatingExitYards).
-        //
-        // Intersection with the blacklist projection-safety loop below:
-        // both Fix Z and Fix 19 modify `target`. Fix Z runs first, then
-        // the BL loop. If Fix Z's target falls in/near a BL rect, the
-        // BL loop will search for a non-BL alternative starting at
-        // distFromLeader=5y and stepping toward the assist. Candidates
-        // closer to the leader than Fix Z's distance constraint may be
-        // chosen if they're non-BL — i.e., the BL correctness guarantee
-        // takes precedence over Fix Z's performance optimization in
-        // that rare intersection.
+        // Intersection with BL projection-safety loop below: Fix Z runs
+        // first, then BL loop. BL correctness takes precedence over Fix Z.
+        // See HANDOFF Fix Z for full evidence.
         const float FarTargetMaxYards = 7f;
         Vector3 target;
         if (lenXY > NavigatingMinYards)
@@ -5088,52 +4193,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 0f);
         }
 
-        // log-36 02:52:51:236 → 02:53:21:263: when the leader is inside a blacklist
-        // (e.g., killed/looted a mob inside a blacklisted area), the standard target
-        // (leader_pos + FollowStopShortYards * dir_to_assist) sits inside the same
-        // rect. Navigation.SkipBlacklistedWaypoints pops it on the next Update tick,
-        // OnDestinationReached fires, GetNavigationTarget is re-called and returns
-        // the same blacklisted point — infinite SetSingleWaypoint→pop loop at
-        // ~15ms intervals for 30 seconds until TickNavActiveTimeout escalates.
+        // Blacklist projection safety (Fix 18 + Fix 19 + log-36):
         //
-        // Fix: project further along the leader→assist line in 2y steps until a
-        // non-blacklisted point is found. The assist navigates to the closest safe
-        // point near the leader (semantically: "get as close as possible without
-        // entering forbidden terrain"). If no safe point exists between the leader
-        // and the assist's current position, return the assist's position so the
-        // SetWaypointLoopGuarded helper detects the no-movement loop and escalates
-        // to CantFollow within ~150ms instead of 30s.
-        // Fix 19 (log-44 00:40:40 → 00:41:14: assist ping-ponging in/out of
-        // blacklist rect at X≈952-955, 6 full oscillations over ~34 s):
-        // the original Fix 4 outer trigger check below used strict
-        // ContainsWorld(target). When the standard target landed even 1 y
-        // outside the rect's strict boundary (e.g. <947.12, 285.62> with
-        // rect MinX≈952.4, target X=947.12 is 5.3 y outside), Fix 4 didn't
-        // fire — the function returned the standard target as-is. FFG then
-        // set this as the wp, the pather built a 7-point route to reach it,
-        // and bot movement execution (auto-run + clockwise turn corrections)
-        // overshot the wp by ~5-15 y of forward inertia, depositing the bot
-        // inside the rect at X≈952.6 within ~3 s. Navigation's escape-first
-        // then fired, drove bot west to X≈937, FFG recomputed the same
-        // (still-outside) target, pather rebuilt route, bot overshot again.
+        // Outer trigger uses TryGetContainingRectInflated with
+        // ProjectionSafetyMarginYards (6y) — not strict ContainsWorld —
+        // so targets within 6y of a BL rect ALSO trigger the projection
+        // loop. Strict containment let route execution overshoot (3.6y
+        // POP_DIST + inertia) deposit the bot inside, causing 30s+
+        // BL-edge ping-pong (log-44: 6 oscillations over 34s).
         //
-        // Fix: change the outer trigger from ContainsWorld (strict) to
-        // TryGetContainingRectInflated (margin=ProjectionSafetyMarginYards
-        // = 6 y). Now ANY target within 6 y of a rect — even technically
-        // outside it — triggers the projection loop. The inflated check
-        // inside the loop (also 6 y) returns candidates that are ≥6 y from
-        // the strict rect, so the wp itself is at least 6 y clear. Bot's
-        // overshoot during route execution is bounded by POP_DIST (3.6 y)
-        // plus a small amount of inertia, well under the 6 y margin.
-        //
-        // 6 y margin chosen for consistency with Fix 12's ExitMargin and
-        // Fix 18's projection-loop check. Both inner and outer checks use
-        // the same margin so the loop always finds a strictly-better
-        // candidate than the standard target if one exists at all.
-        //
-        // If the entire leader→assist line is within 6 y of a rect (loop
-        // finds no safe candidate), control falls through to Fix 12's
-        // assist self-escape logic below — same failure-mode as before.
+        // Inner loop projects in 2y steps along leader→assist line until
+        // a point ≥6y from the rect is found. If the entire segment is
+        // within 6y of a rect, control falls through to Fix 12's self-
+        // escape logic below. 6y margin matches Fix 12 ExitMargin so
+        // both checks find the same candidate.
+        // See HANDOFF Fix 18/19/33 for full evidence.
         const float ProjectionSafetyMarginYards = 6.0f;
         if (navigation.AreaBlacklist != null &&
             navigation.AreaBlacklist.TryGetContainingRectInflated(
@@ -6566,70 +5640,25 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // failed path attempt before falling through to the same recovery.
             const float REAR_REJECT_COS_THRESHOLD_SQ = 0.75f;
 
-            // Fix AL (log-76 00:34:34:449 + 00:34:35:004, assist at
-            // <-375.78, -4134.94> chasing target <-379.89, -4143.99> 9.94y
-            // SSE through some rocks; user observed assist participated in
-            // combat after barely clearing the rocks, then "took off running
-            // in the opposite direction" post-combat):
+            // Fix AL: path rejection requires BOTH high angle AND high
+            // simplified route count (≥ 8). Angle alone (Fix AI's 150°)
+            // doesn't distinguish dead-zone wraparounds from legitimate
+            // short detours:
             //
-            // Fix AI's 150° threshold rejected what was actually a legitimate
-            // short rock-detour at angle=166.8° (cos=-0.973, dot=-40.79,
-            // dist=4.22y). pathLen=16 raw, simplified to 3 nodes — a short,
-            // simple detour requiring ONE bend, not a navmesh-dead-zone
-            // wraparound. The cos²=0.947 result is FAR above 0.75; raising
-            // the angle threshold further would chase the symptom forever.
+            //   Case        | angle  | simplified | Verdict
+            //   log-69 real | 151°   | 17         | DEAD ZONE — reject
+            //   log-76 false| 166.8° | 3          | DETOUR    — accept
             //
-            // What actually distinguishes genuine dead-zone U-turns from
-            // legitimate short detours is PATH COMPLEXITY, not angle alone:
+            // Simplified count (measured after Fix AA pruning + PathSimplify)
+            // is a direct kink-count measure, robust to per-segment node
+            // spacing changes. 8 leaves ~5 node margin between known detours
+            // (3) and known wraparounds (17). High-angle-only paths are
+            // accepted with a warning log for future-evidence monitoring.
             //
-            //   Case           | angle  | pathLen | simplified | Verdict
-            //   ---------------|--------|---------|------------|---------
-            //   log-69 (real)  | 151°   | 146     | 17         | DEAD ZONE
-            //   log-69 (real)  | 163°   | (high)  | (high)     | DEAD ZONE
-            //   log-74 (false) | 135.1° | 14      | 3          | DETOUR
-            //   log-76 (false) | 166.8° | 16      | 3          | DETOUR
-            //
-            // The angle distribution does NOT separate the classes; the
-            // simplified-route-count distribution does. log-69's 17-node
-            // simplified route reflects a heavy wraparound through navmesh-
-            // difficult terrain. log-74 and log-76's 3-node simplified routes
-            // reflect single-bend detours around isolated obstacles (trees,
-            // rocks).
-            //
-            // Fix AL: require BOTH high angle AND high simplified route
-            // count. A path that meets only the angle criterion (short
-            // detour around a small obstacle) is accepted with a warning
-            // log line — useful for monitoring future evidence of the
-            // false-positive class without losing the data point.
-            //
-            // The threshold of 8 simplified nodes gives ~5 nodes of margin
-            // between known detours (3) and known wraparounds (17). The
-            // threshold could be tuned tighter (e.g., 6) without losing
-            // detection of log-69, but 8 leaves room for legitimate
-            // mid-complexity detours we haven't seen yet.
-            //
-            // Behavior on known cases:
-            //   log-69 (simplified=17, angle 151°-163°) → STILL REJECTED ✓
-            //     (both conditions met — genuine dead zone)
-            //   log-71 (simplified varies, angle 93°-104°) → unchanged
-            //     from Fix AE (angle below threshold)
-            //   log-74 (simplified=3, angle 135.1°) → was already accepted
-            //     by Fix AI; still accepted here
-            //   log-76 (simplified=3, angle 166.8°) → NOW ACCEPTED — bot
-            //     follows the detour around the rocks, ~1s of swing-wide
-            //     instead of 15s+ of CantFollow walking the wrong direction
-            //
-            // Why simplified route count rather than raw pathLen: pathLen
-            // varies with the pather's per-segment node spacing (which can
-            // shift across navmesh versions and area-density). simplified
-            // count is measured AFTER Fix AA pruning AND PathSimplify, so
-            // it captures the path's actual kink-count — a more direct
-            // measure of "is this a complex wraparound" than raw pathLen.
-            //
-            // Recovery for any missed-rejection case is unchanged: if the
-            // accepted path turns out to land the bot in trouble (the bot
-            // walks NE 4y then runs into a navmesh edge), Navigation's
-            // stuck detection and OnPathFailed escalation still fire.
+            // Recovery on missed rejection: if the accepted path lands the
+            // bot in trouble, Navigation's stuck detection and OnPathFailed
+            // escalation still fire normally.
+            // See HANDOFF Fix AL for full evidence.
             const int COMPLEX_WRAPAROUND_MIN_ROUTECOUNT = 8;
 
             if (toTopDistSq > REAR_TOP_REJECT_MIN_YARDS * REAR_TOP_REJECT_MIN_YARDS)
@@ -6793,154 +5822,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"{StaleEmptyResultsBeforeOnPathFailed} for active (start, end). " +
             $"start={snap.ResultStartW} end={snap.ResultEndW}");
 
-        // ── Fix AU (log-81 16:00:19:837 → 16:00:47:157) ──
+        // Fix AU: when _activeStuckReported=true (TickActiveStuckDetection
+        // confirmed < 1y movement in 2.5s = real stationary) AND Fix AB-1
+        // has observed ONE stale-empty matching the active request's
+        // (start, end) within 1y (pather-side evidence the current
+        // position can't route to current target), escalate to CantFollow
+        // immediately — skip the 3-count gate and the 30s
+        // TickNavActiveTimeout wall.
         //
-        // COMPOUND STUCK + STALE-EMPTY ESCALATION
+        // Both signals are independently strong. Together they prove the
+        // bot won't recover by waiting (movement: confirmed absent;
+        // pather: failing for unchanged input). The 3-count gate is
+        // itself a stationarity proxy — with _activeStuckReported
+        // proving stationarity directly, count=1 carries the same
+        // evidentiary weight as count=3.
         //
-        // When TickActiveStuckDetection has already set _activeStuckReported
-        // = true (bot moved < ActiveStuckMinMovementWorld in
-        // ActiveStuckThresholdSec — confirmed real-world stationary) AND
-        // Fix AB-1 has just observed a stale empty-path matching the
-        // currently-active in-flight request's (start, end) within 1y
-        // (pather-side evidence that the bot's current position is not
-        // routable to its current target), the bot will not recover by
-        // waiting. Escalate directly to CantFollow without the 3-count
-        // gate or the 30 s TickNavActiveTimeout wall.
+        // log-81 mob 2: pre-AU, bot sat at <-755.43,-4272.97> for 27.3s
+        // after Stuck flag (PPather NRE-loop on bot position, 3s re-
+        // enqueue cycle producing same un-routable request). AU
+        // collapses to ~7.5s. AB-1's #1/3 hit at 16:00:27:324 escalates;
+        // pre-AU waited for either #3/3 OR 30s TickNavActiveTimeout
+        // (whichever was the same instant).
         //
-        // Evidence (log-81 mob 2 post-combat sequence):
-        //   16:00:14:939  leader Consume Corpse (combat ends).
-        //   16:00:15:054  assist plan: Combat → Follow Focus.
-        //   16:00:15:085  Path 95 enqueued from <-750.13, -4275.64>
-        //                 to <-756.81, -4277.68>. Returns pathLen=53
-        //                 (long curved route). Bot navigates north.
-        //   16:00:16:104  Path 96 from <-751.48, -4271.68>.
-        //                 Returns pathLen=7. Fix AA drops 1 rear node.
-        //   16:00:17:305  Path 97 enqueued from <-755.22, -4272.88>
-        //                 to <-761.46, -4275.77> (6.88 y SW). PPather
-        //                 will throw NullReferenceException on this
-        //                 request (and every subsequent request from
-        //                 the bot's eventual stuck position).
-        //   16:00:19:837  FFG: "Stuck while navigating — moved only
-        //                 0.00 y in 2.5 s at <-755.4346, -4272.968, 0>"
-        //                 — TickActiveStuckDetection fires;
-        //                 _activeStuckReported = true; status = Stuck.
-        //   16:00:20:317  First Path-wait timeout (3 s elapsed since
-        //                 Path 97 enqueue with no callback). Re-enqueue
-        //                 reqId 98 with identical (start, end).
-        //   16:00:23:327, 16:00:26:335, 16:00:29:346, 16:00:32:361,
-        //                 16:00:35:370, 16:00:38:381, 16:00:41:391,
-        //                 16:00:44:399  Same 3 s re-enqueue cycle
-        //                 repeats. Bot has not moved (still
-        //                 <-755.43, -4272.97>); _activeStuckReported
-        //                 stays true (no 3 y resume movement, not in
-        //                 combat, NavState unchanged, no ResetNavState).
-        //   16:00:27:306  PPatherService logs
-        //                 "Object reference not set to an instance of
-        //                 an object." PathFinderThread "processes" the
-        //                 oldest queued request (reqId 97 from 10 s
-        //                 earlier) and emits a stale empty result.
-        //   16:00:27:323  Navigation: "Ignoring stale path result
-        //                 reqId=97 waitingReqId=100 activeReqId=100"
-        //                 — but Fix AB-1's pre-check matches the
-        //                 stale empty's (start, end) against the
-        //                 active (start, end) within 1 y and fires
-        //                 OnStaleEmptyPathMatchesActive.
-        //   16:00:27:324  Fix AB-1: "stale no-path #1/3 for active
-        //                 (start, end). start=<-755.22, -4272.88>
-        //                 end=<-761.46, -4275.77>".
-        //   16:00:37:317  Fix AB-1: "stale no-path #2/3" — second
-        //                 stale empty for the same (start, end), 10 s
-        //                 later (one full PPather queue cycle).
-        //   16:00:47:157  TickNavActiveTimeout fires (30.0 s without
-        //                 NavigationProgressResetYards of movement);
-        //                 escalates to CantFollow. Fix AB-1 would
-        //                 have hit #3/3 at approximately the same
-        //                 instant — the 3-count gate provided no
-        //                 benefit over the timeout.
-        //
-        // Without Fix AU, the bot sat at <-755.43, -4272.97> for
-        // 27.3 seconds after FFG reported Stuck, doing nothing
-        // productive — every 3 s re-enqueue produced the same
-        // un-routable (start, end), every 10 s PPather call threw
-        // NRE, and the chase watchdog (TickChaseWatchdog, 15 s on
-        // Navigation.ChaseSinceBestSec) was silent because chase
-        // tracking only updates when a route is active, and the
-        // bot had no route the entire time.
-        //
-        // With Fix AU, escalation fires at 16:00:27:324 — the
-        // FIRST Fix AB-1 hit observed while _activeStuckReported
-        // is true. CantFollow starts ~19.8 s earlier; the leader's
-        // AssistRequestReturn rising edge fires ~20 s earlier;
-        // rendezvous shifts ~20 s earlier. From a user-visible
-        // standpoint, the "long stuck" window collapses from
-        // 32 s (Stuck flag → escape exit → still walking back)
-        // down to ~12 s.
-        //
-        // Why count == 1 is safe (no false positives):
-        //   - _activeStuckReported requires 2.5 s of < 1 y movement
-        //     before it sets true. That is real-world position
-        //     evidence — not a heuristic, the bot has actually
-        //     been stationary.
-        //   - Fix AB-1 firing requires the stale empty-path
-        //     result's (start, end) to match the CURRENTLY ACTIVE
-        //     in-flight request's (start, end) within 1 y.
-        //     Navigation pre-computes the match and only raises
-        //     the event when true. That is pather-side evidence
-        //     the bot's current position cannot be routed to its
-        //     current target.
-        //   - Both signals are independently strong. Together,
-        //     they prove the bot will not recover by waiting:
-        //     waiting requires either the bot moving (it isn't)
-        //     or the pather succeeding for the same (start, end)
-        //     it just failed on (it won't, the bot is stationary
-        //     so the failing input is unchanged).
-        //   - The existing 3-count gate (StaleEmptyResults-
-        //     BeforeOnPathFailed = 3) is itself a stationarity
-        //     proxy — requiring "same (start, end) within 1 y
-        //     for 3 consecutive failures" implies the bot hasn't
-        //     moved much. With _activeStuckReported already
-        //     proving stationarity directly, count = 1 carries
-        //     the same evidentiary weight as count = 3 without
-        //     the Stuck flag.
-        //
-        // Why this is additive (doesn't break existing logic):
-        //   - When the bot is moving (Stuck flag not set) and
-        //     the pather keeps failing for near-stationary
-        //     positions, the existing 3-count path still fires:
-        //     snap.Escalate → Navigation.OnPathFailed →
-        //     Navigation_OnPathFailed rewinds to LastSafeAnchor
-        //     on first failure, EnterCantFollow on second. This
-        //     branch is unchanged.
-        //   - When the bot is Stuck and Fix AB-1 fires, Fix AU
-        //     short-circuits to CantFollow. The OnPathFailed
-        //     rewind path would not help here anyway —
-        //     LastSafeAnchor is typically <10 y from the stuck
-        //     position, and PPather's NRE is local to the area
-        //     (in log-81, paths from <-755.43, -4272.97> failed
-        //     for every target; paths from <-740.10, -4259.93>
-        //     after escape succeeded in 15 ms). Walking the bot
-        //     a few yards backward then forward again would
-        //     just re-enter the same NRE region.
-        //
-        // Counter reset matches the existing 3-count escalation
-        // path — both clear _staleEmptySameCount + last-start/end
-        // so the next NavigatingToLeader cycle (after CantFollow
-        // exit via Fix AO / leader-arrived / segment-clear /
-        // 120 s timeout) starts fresh.
-        //
-        // Note: OnEnter (FFG) and Update transitions to
-        // NavigatingToLeader do not currently reset the Fix AB-1
-        // counter explicitly; OnEnter clears it via lines
-        // 745-749, ResetNavState does not. Since Fix AU resets
-        // here on fire and the existing 3-count branch resets
-        // on fire, the only way the counter persists across a
-        // NavigatingToLeader cycle is if neither branch fires
-        // during the cycle — which means there were < 3 stale
-        // empties and Stuck was never reported, i.e. the bot
-        // was navigating successfully. The counter being stale
-        // in that case is harmless because the same-as-last
-        // check at the top of this function will reset it as
-        // soon as a different (start, end) appears.
+        // Counter reset on fire matches the 3-count branch. Counter is
+        // additive — wedge-case existing 3-count path unchanged for
+        // bot-moving scenarios where Stuck flag isn't set.
+        // See HANDOFF Fix AU for full evidence.
         if (_activeStuckReported)
         {
             // Fix AX (Route B Part 1): try direct-route recovery before

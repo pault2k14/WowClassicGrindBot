@@ -4,6 +4,7 @@ using Core.Party;
 using Microsoft.Extensions.Logging;
 
 using System;
+using System.Numerics;  // Fix BN: Vector3 for anchor-position field
 using System.Threading;
 
 using static System.Diagnostics.Stopwatch;
@@ -50,7 +51,17 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private bool _anchorSyncPauseActive;
     private DateTime _anchorSyncPauseStartUtc;
-    private const double AnchorSyncPauseTimeoutSec = 1.0;
+    private Vector3 _anchorPos;  // Fix BN: saved at OnEnter for distance check during pause
+
+    // Fix BN (log-97 19:31:18:533 → 19:32:45:770, 9 of 11 ATG sync-pauses completed in 1-19 ms):
+    // distance-aware sync-pause completion. The old condition (assistNavigating || timeout)
+    // exits immediately because the assist's NavState is almost always NavigatingToLeader
+    // during patrol catch-up — proximity is ignored. New condition requires the assist to
+    // actually be near the anchor (within AnchorSyncReadyYards) OR the timeout to expire.
+    // Timeout raised 1.0s → 3.0s to give a typical catch-up window time to close.
+    // See HANDOFF Fix BN for the full log-97 evidence trail.
+    private const double AnchorSyncPauseTimeoutSec = 3.0;
+    private const float AnchorSyncReadyYards = 12.0f;
     private double nextStuckCheckTime;
     private int initialTargetGuid;
     private float initialMinRange;
@@ -220,14 +231,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         // from the same location and through the same terrain.
         if (classConfig.Mode == Mode.PartyLeader)
         {
-            leaderNavProvider.SetApproachStart(playerReader.WorldPos);
-            logger.LogInformation($"[ATG] Published approach-start anchor: {playerReader.WorldPos}");
+            // Fix BN: save the anchor position for the distance-aware sync-pause check below.
+            // Re-use playerReader.WorldPos here — same instant the anchor is published.
+            _anchorPos = playerReader.WorldPos;
+            leaderNavProvider.SetApproachStart(_anchorPos);
+            logger.LogInformation($"[ATG] Published approach-start anchor: {_anchorPos}");
 
-            // Arm sync-pause: hold interact presses until the assist has begun
-            // navigating toward the anchor (AnyAssistNavigating=true) or the timeout
-            // expires. Without this, the leader immediately starts pressing interact
-            // and moves away from the anchor point before the assist has had time to
-            // detect the anchor via the API poll (~250ms) and start navigating there.
+            // Arm sync-pause: hold interact presses until the assist is actually near the
+            // anchor (Fix BN: AnchorSyncReadyYards proximity) or the timeout expires.
             _anchorSyncPauseActive = true;
             _anchorSyncPauseStartUtc = DateTime.UtcNow;
         }
@@ -393,14 +404,28 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if (classConfig.Mode == Mode.PartyLeader && _anchorSyncPauseActive)
         {
             double elapsed = (DateTime.UtcNow - _anchorSyncPauseStartUtc).TotalSeconds;
-            bool assistNavigating = assistStateStore.AnyAssistNavigating();
 
-            if (assistNavigating || elapsed >= AnchorSyncPauseTimeoutSec)
+            // Fix BN: require BOTH a nav-state signal AND proximity. The old condition
+            // (assistNavigating alone) exited immediately because the assist is in
+            // NavigatingToLeader almost continuously during catch-up — proximity was
+            // ignored. Log-97 evidence: 9 of 11 ATG sync-pauses completed in 1-19 ms
+            // with the assist up to 55 y from the anchor. New condition: distance
+            // <= AnchorSyncReadyYards counts as ready (handles both navigating-toward
+            // and co-located cases); otherwise wait for the (raised) timeout.
+            float distToAnchor = assistStateStore.GetNearestAssistDistanceYards(_anchorPos);
+            bool assistNearby = distToAnchor <= AnchorSyncReadyYards;
+            bool assistNavigating = assistStateStore.AnyAssistNavigating();
+            bool assistFollowing = assistStateStore.AnyAssistIsFollowing();
+            bool assistReady = assistNearby && (assistNavigating || assistFollowing);
+
+            if (assistReady || elapsed >= AnchorSyncPauseTimeoutSec)
             {
                 _anchorSyncPauseActive = false;
                 logger.LogInformation(
-                    $"[ATG] Anchor sync-pause complete: assistNavigating={assistNavigating} " +
-                    $"elapsed={elapsed:0.2}s — beginning interact approach.");
+                    $"[ATG] [FIX-FIRE] BN: Anchor sync-pause complete: distToAnchor={distToAnchor:0.0}y " +
+                    $"(threshold={AnchorSyncReadyYards}y), assistNavigating={assistNavigating} " +
+                    $"assistFollowing={assistFollowing} elapsed={elapsed:0.2}s " +
+                    $"(timeout={AnchorSyncPauseTimeoutSec:0.0}s) — beginning interact approach.");
             }
             else
             {

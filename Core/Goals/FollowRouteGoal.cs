@@ -123,7 +123,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     /// </summary>
     private bool _syncPauseActive;
     private DateTime _syncPauseStartUtc;
-    private const double SyncPauseTimeoutSec = 1.0;
+
+    // Fix BO (log-97 19:31:14:411 → 19:33:38, FRG sync-pauses completed in 0-100 ms during
+    // catch-up): distance-aware completion. The old condition (assistNavigating || assistFollowing
+    // || timeout) exits immediately because the assist is in NavigatingToLeader almost continuously
+    // during catch-up — proximity was ignored. Companion to Fix BN on the ATG side.
+    // Timeout raised 1.0s → 2.0s (briefer than BN's 3.0s — FRG fires on every patrol resume,
+    // a long pause here would feel sluggish; the proximity gate handles the common case).
+    // See HANDOFF Fix BO for full evidence.
+    private const double SyncPauseTimeoutSec = 2.0;
+    private const float FrgSyncReadyYards = 14.0f;
 
     // Stale logging — avoid spamming every tick
     private bool _assistWasStaleLogged;
@@ -758,17 +767,27 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (_syncPauseActive)
         {
             double elapsed = (DateTime.UtcNow - _syncPauseStartUtc).TotalSeconds;
+
+            // Fix BO: require BOTH a nav-state signal AND proximity. The old condition
+            // (assistNavigating || assistFollowing alone) exited immediately because the
+            // assist is in NavigatingToLeader almost continuously during catch-up — proximity
+            // was ignored. New condition: distance <= FrgSyncReadyYards counts as ready
+            // (handles both navigating-toward and co-located cases); otherwise wait for the
+            // (raised) timeout. Companion to Fix BN in ApproachTargetGoal.cs.
+            float distToLeader = assistStateStore.GetNearestAssistDistanceYards(playerReader.WorldPos);
+            bool assistNearby = distToLeader <= FrgSyncReadyYards;
             bool assistNavigating = assistStateStore.AnyAssistNavigating();
             bool assistFollowing  = assistStateStore.AnyAssistIsFollowing();
-            bool assistReady      = assistNavigating || assistFollowing;
+            bool assistReady      = assistNearby && (assistNavigating || assistFollowing);
 
             if (assistReady || elapsed >= SyncPauseTimeoutSec)
             {
                 _syncPauseActive = false;
                 logger.LogInformation(
-                    $"[FRG] Sync-pause complete: assistNavigating={assistNavigating} " +
+                    $"[FRG] [FIX-FIRE] BO: Sync-pause complete: distToLeader={distToLeader:0.0}y " +
+                    $"(threshold={FrgSyncReadyYards}y), assistNavigating={assistNavigating} " +
                     $"assistFollowing={assistFollowing} elapsed={elapsed:0.1}s " +
-                    $"— resuming patrol navigation.");
+                    $"(timeout={SyncPauseTimeoutSec:0.0}s) — resuming patrol navigation.");
                 navigation.Resume();
 
                 // Re-enable side target-finding alongside navigation.
