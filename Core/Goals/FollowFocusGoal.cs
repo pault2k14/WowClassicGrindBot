@@ -364,6 +364,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private const float MaxEscapeDisplacementYards = 20.0f;
 
+    // Fix BR (log-98 22:06:14 → 22:06:56, assist drifted idx 11→9→8→4 over successive resyncs):
+    // distance threshold below which the assist abandons route-walk and heads directly to
+    // the approach-start anchor (Fix BP behavior). When the assist is FURTHER than this,
+    // abandoning route just drags the assist off-route since it can't reach the anchor
+    // before combat ends anyway — defer to RouteWalk in that case (original Turn 3 behavior).
+    // 25y reflects realistic closing budget: ~5y/s × 5s typical approach window.
+    private const float AnchorReachableYards = 25.0f;
+
+    // Fix BQ (log-98 22:07:14.616 → 22:07:16.481, 3 mode flips in 1.87s + earlier 0.45s flip
+    // at 22:06:32.475→925): anchor-mode hysteresis. The leader's HasApproachStart can flicker
+    // (ATG re-entry, polling jitter); each flicker causes a mode change with 20-60y target
+    // shift that the user observed as "going back to previous waypoints". Once we enter
+    // Anchor mode, stay in it for at least AnchorModeStickyMs even if HasApproachStart
+    // transitions false — unless the leader's status indicates a real combat/non-approach
+    // state (Patrolling with HasTargetWaypoint, or Combat/Looting/Resting), in which case
+    // exit immediately.
+    private const int AnchorModeStickyMs = 1500;
+    private DateTime _anchorModeEnteredUtc = DateTime.MinValue;
+    private Vector3 _lastAnchorTarget;  // Fix BQ: anchor coords cached for hysteresis return value
+
     // Fix 33 (log-53: 1000 "Position-chase: standard target ... within 6.0y
     // of assist's blacklist; projected toward assist to ..." log lines in
     // ~100 s, ~10 Hz steady state and ~60 Hz during CantFollow flap):
@@ -3434,24 +3454,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return false;
         }
 
-        // Fix BP (log-97 19:31:25:193 → 19:32:24:633, all 5 deferred handoffs failed):
-        // mid-leg case (distToTarget > POP_DIST) — the assist is between route waypoints
-        // when the leader signals approach. Per user design intent #2 ("stop moving to a
-        // waypoint and instead go and help with combat"), the assist should abandon
-        // route-walking and head directly to the anchor.
-        //
-        // Empirical: 0 of 5 deferred-handoffs succeeded in log-97. Every one of them ended
-        // with "Approach ended without arrival at route waypoint" because the leader's
-        // approach phase ended (HasApproachStart=false) before the assist could traverse
-        // its current route leg. The Turn 3 "combat handoff" design assumed approach phase
-        // lasted long enough for a route-leg traversal, but with the leader's ATG sync-pause
-        // exiting in 1-19ms (fixed in BN), it never does.
-        //
-        // The parked-at-cap case (idx >= advanceCap AND distToTarget <= POP_DIST) above
-        // still returns true to preserve BI-1 anti-flip-flop. That case is "already at the
-        // waypoint" — not the "moving to a waypoint" case the user is complaining about.
-        // See HANDOFF Fix BP for full evidence.
-        return false;
+        // Fix BP+BR — assist-side response to mid-leg approach signal:
+        //   - Fix BP (log-97): when the leader signals approach mid-leg, abandon route-walk
+        //     and head directly to the anchor. Per user design intent #2.
+        //   - Fix BR (log-98 22:06:14-56 evidence): condition that on distToAnchor.
+        //     When the assist is FAR from the anchor (>AnchorReachableYards), abandoning
+        //     route just drags the assist further off-route (it can't reach the anchor
+        //     before combat ends anyway) — observed as the progressive Initial-sync drift
+        //     from idx=11→9→8→4 in log-98 (5 successive resyncs after combat got further
+        //     from the leader's idx as the assist drifted south chasing partial anchors).
+        //     In that case, restore the original Turn 3 behavior: defer to RouteWalk with
+        //     pending anchor, so the assist makes route progress and can transition to
+        //     Anchor once it reaches a route waypoint.
+        Vector3 anchor = new Vector3(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
+        float distToAnchor = playerReader.WorldPos.WorldDistanceXYTo(anchor);
+        if (distToAnchor <= AnchorReachableYards)
+        {
+            // Fix BP behavior: anchor is reachable, head directly. Returning false selects
+            // Anchor mode in GetNavigationTarget.
+            return false;
+        }
+
+        // Fix BR: anchor too far, defer to RouteWalk with pending anchor (original Turn 3).
+        // See HANDOFF Fix BP+BR for full evidence.
+        anchorCoords = anchor;
+        return true;
     }
 
 
@@ -3513,6 +3540,33 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // chasing the leader's live body during approach means the pather continuously recomputes
         // a route to a retreating point, arriving in different terrain. Both bots navigating to
         // the same anchor start the final interact-key approach from the same geographic location.
+        // Fix BQ (log-98 22:07:14.616→16.481, 3 mode flips in 1.87s; 22:06:32.475→925,
+        // 0.45s flip): anchor-mode hysteresis. The leader's HasApproachStart can flicker
+        // briefly false during the approach phase (ATG re-entry, polling jitter,
+        // ApproachStart-mutex with HasTargetWaypoint). Each flicker triggers Anchor →
+        // RouteWalk → Anchor, shifting the assist's nav target by 20-60 yards and forcing
+        // a turn-around. The user observed this as "going back to previous waypoints".
+        //
+        // Suppress flickers: once in Anchor mode, stay there for at least AnchorModeStickyMs
+        // even when HasApproachStart goes false, BUT only while the leader's published
+        // Status is still Patrolling. If the leader transitioned to Combat/Looting/Resting,
+        // a real state change is happening — exit Anchor promptly (don't apply hysteresis).
+        if (_currentNavTargetMode == NavTargetMode.Anchor &&
+            !leader.HasApproachStart &&
+            _anchorModeEnteredUtc != DateTime.MinValue &&
+            leader.Status == BotStatus.Patrolling &&
+            _lastAnchorTarget != default)
+        {
+            double sinceEntryMs = (DateTime.UtcNow - _anchorModeEnteredUtc).TotalMilliseconds;
+            if (sinceEntryMs < AnchorModeStickyMs)
+            {
+                // Within sticky window AND leader still patrolling — treat as HasApproachStart
+                // flicker rather than a real exit. Return the cached anchor without changing
+                // mode (so the "Nav target mode change" log stays quiet for these flickers).
+                return _lastAnchorTarget;
+            }
+        }
+
         if (leader.HasApproachStart)
         {
             // ── Route-walking migration: Turn 3 — combat handoff ──
@@ -3633,6 +3687,15 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 // Anchor is not co-located — return world-space anchor directly.
                 // SetSingleWaypoint's IsMapPoint check will not match (values are large
                 // negative for Azeroth) and uses it as-is.
+
+                // Fix BQ: track Anchor-mode entry time and cache the anchor for hysteresis
+                // suppression of HasApproachStart flicker. Only set entry time on a NEW
+                // entry (not on every tick that re-confirms Anchor mode) — otherwise the
+                // sticky window resets continuously while in Anchor and the hysteresis
+                // never expires.
+                if (_currentNavTargetMode != NavTargetMode.Anchor)
+                    _anchorModeEnteredUtc = DateTime.UtcNow;
+                _lastAnchorTarget = anchor;
                 _currentNavTargetMode = NavTargetMode.Anchor;
                 return anchor;
             }
@@ -3970,6 +4033,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             $"at {route[handoffIdx]}, distToWp={distToTarget:0.0}y; " +
                             $"transitioning Route-walk → Anchor. " +
                             $"anchor={anchorTarget}, distToAnchor={anchorDist:0.0}y.");
+
+                        // Fix BQ: track Anchor-mode entry for hysteresis (combat-handoff path).
+                        // See the direct-entry site for rationale.
+                        if (_currentNavTargetMode != NavTargetMode.Anchor)
+                            _anchorModeEnteredUtc = DateTime.UtcNow;
+                        _lastAnchorTarget = anchorTarget;
                         _currentNavTargetMode = NavTargetMode.Anchor;
                         return anchorTarget;
                     }

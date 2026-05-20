@@ -52,16 +52,22 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private bool _anchorSyncPauseActive;
     private DateTime _anchorSyncPauseStartUtc;
     private Vector3 _anchorPos;  // Fix BN: saved at OnEnter for distance check during pause
+    private double _anchorSyncPauseTimeoutSec;  // Fix BS: computed at OnEnter based on initial assist distance
 
-    // Fix BN (log-97 19:31:18:533 → 19:32:45:770, 9 of 11 ATG sync-pauses completed in 1-19 ms):
-    // distance-aware sync-pause completion. The old condition (assistNavigating || timeout)
-    // exits immediately because the assist's NavState is almost always NavigatingToLeader
-    // during patrol catch-up — proximity is ignored. New condition requires the assist to
-    // actually be near the anchor (within AnchorSyncReadyYards) OR the timeout to expire.
-    // Timeout raised 1.0s → 3.0s to give a typical catch-up window time to close.
-    // See HANDOFF Fix BN for the full log-97 evidence trail.
-    private const double AnchorSyncPauseTimeoutSec = 3.0;
+    // Fix BN (log-97 evidence) + Fix BS (log-98 evidence: 3 of 9 BN events timed out at the
+    // flat 3.0s ceiling with the assist still 19-41y from anchor, missing combats):
+    // distance-aware sync-pause completion AND distance-scaled timeout. The original Fix BN
+    // proximity gate is preserved; Fix BS replaces the constant timeout ceiling with a value
+    // computed at OnEnter based on how far the assist is — when the assist is close, a brief
+    // wait is sufficient; when far, a longer wait is needed to actually give the assist time
+    // to arrive. Cap at FarTimeoutSec to prevent indefinite leader freezing when the assist
+    // is unreachable.
+    // See HANDOFF Fix BN/BS for the full log evidence trail.
     private const float AnchorSyncReadyYards = 12.0f;
+    private const double NearTimeoutSec = 1.5;   // Fix BS: assist within 12y at OnEnter
+    private const double MidTimeoutSec  = 4.0;   // Fix BS: 12-30y at OnEnter
+    private const double FarTimeoutSec  = 6.0;   // Fix BS: 30y+ at OnEnter (cap)
+    private const float MidDistanceCutoffYards = 30.0f;  // Fix BS: boundary near→mid
     private double nextStuckCheckTime;
     private int initialTargetGuid;
     private float initialMinRange;
@@ -237,8 +243,20 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             leaderNavProvider.SetApproachStart(_anchorPos);
             logger.LogInformation($"[ATG] Published approach-start anchor: {_anchorPos}");
 
+            // Fix BS: compute the timeout from initial assist distance. Close assist → short
+            // wait (assist already in position, don't dawdle). Far assist → longer wait
+            // (give assist time to actually close the gap). The cap (FarTimeoutSec) prevents
+            // indefinite freezing when assist is truly unreachable.
+            float distAtArm = assistStateStore.GetNearestAssistDistanceYards(_anchorPos);
+            if (distAtArm <= AnchorSyncReadyYards)
+                _anchorSyncPauseTimeoutSec = NearTimeoutSec;
+            else if (distAtArm <= MidDistanceCutoffYards)
+                _anchorSyncPauseTimeoutSec = MidTimeoutSec;
+            else
+                _anchorSyncPauseTimeoutSec = FarTimeoutSec;
+
             // Arm sync-pause: hold interact presses until the assist is actually near the
-            // anchor (Fix BN: AnchorSyncReadyYards proximity) or the timeout expires.
+            // anchor (Fix BN: AnchorSyncReadyYards proximity) or the (scaled) timeout expires.
             _anchorSyncPauseActive = true;
             _anchorSyncPauseStartUtc = DateTime.UtcNow;
         }
@@ -412,20 +430,24 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             // with the assist up to 55 y from the anchor. New condition: distance
             // <= AnchorSyncReadyYards counts as ready (handles both navigating-toward
             // and co-located cases); otherwise wait for the (raised) timeout.
+            //
+            // Fix BS: timeout is now distance-scaled (computed at OnEnter, stored in
+            // _anchorSyncPauseTimeoutSec). Log-98 evidence: the flat 3.0s timeout was
+            // insufficient — 3 of 9 events timed out with assist still 19-41y away.
             float distToAnchor = assistStateStore.GetNearestAssistDistanceYards(_anchorPos);
             bool assistNearby = distToAnchor <= AnchorSyncReadyYards;
             bool assistNavigating = assistStateStore.AnyAssistNavigating();
             bool assistFollowing = assistStateStore.AnyAssistIsFollowing();
             bool assistReady = assistNearby && (assistNavigating || assistFollowing);
 
-            if (assistReady || elapsed >= AnchorSyncPauseTimeoutSec)
+            if (assistReady || elapsed >= _anchorSyncPauseTimeoutSec)
             {
                 _anchorSyncPauseActive = false;
                 logger.LogInformation(
-                    $"[ATG] [FIX-FIRE] BN: Anchor sync-pause complete: distToAnchor={distToAnchor:0.0}y " +
+                    $"[ATG] [FIX-FIRE] BN/BS: Anchor sync-pause complete: distToAnchor={distToAnchor:0.0}y " +
                     $"(threshold={AnchorSyncReadyYards}y), assistNavigating={assistNavigating} " +
                     $"assistFollowing={assistFollowing} elapsed={elapsed:0.2}s " +
-                    $"(timeout={AnchorSyncPauseTimeoutSec:0.0}s) — beginning interact approach.");
+                    $"(timeout={_anchorSyncPauseTimeoutSec:0.0}s) — beginning interact approach.");
             }
             else
             {
