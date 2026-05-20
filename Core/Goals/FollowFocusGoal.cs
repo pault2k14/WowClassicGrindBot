@@ -1232,7 +1232,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -3129,8 +3129,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         // Fix BB: when CantFollow is caused by path-rejection
         // (_lastPathFailureWasRejection=true) AND we're using the
-        // leader-direction basis AND leader ≤ 25y, NEGATE the direction
-        // vector so projection points TOWARD the leader instead of away.
+        // leader-direction basis AND leader ≤ proximity threshold,
+        // NEGATE the direction vector so projection points TOWARD the
+        // leader instead of away.
         //
         // Rationale: AB-2's away-from-leader assumes the bot is wedged in
         // terrain near an unreachable leader. For path-rejection failures
@@ -3140,19 +3141,44 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Backing away from leader deepens the routing problem AND
         // produces the user-visible "turned around" symptom.
         //
-        // Threshold tuning: 15y (initial) → 25y (Turn 3.5 / log-86).
-        // 15y missed corridor scenarios where assist trails further back
-        // during catch-up (log-86: 20.9y, BB silent, AB-2 walked bot 13y
-        // wrong-way, 50s stuck). 25y covers log-83/84/85/86 corridor cases.
-        // The _lastPathFailureWasRejection gate keeps BB tight — wedge-
-        // case escapes (where away-from-leader IS correct) have
-        // _lastPathFailureWasRejection=false and BB stays silent.
+        // Threshold tuning history:
+        //   15y (initial)
+        //   25y (Turn 3.5 / log-86):  15y missed corridor scenarios where
+        //                             assist trails further back during
+        //                             catch-up (log-86: 20.9y, BB silent,
+        //                             AB-2 walked bot 13y wrong-way, 50s
+        //                             stuck). 25y covers log-83/84/85/86
+        //                             corridor cases.
+        //   60y (Fix CD-2 / log-107): 25y missed cases where bot drifts
+        //                             AWAY during CantFollow recovery
+        //                             before BB candidate basis (away-
+        //                             from-leader) fires. Log-107
+        //                             11:54:22.393: bot at <-747.05,
+        //                             -4266.18>, leader/anchor at <-751.32,
+        //                             -4297.40> — distance 31.5y. P3's
+        //                             toward-route projection had drifted
+        //                             bot 6.7y NW (away from south leader)
+        //                             before P4 reverted to away-from-leader
+        //                             basis. By P4, leader was 6.5y past
+        //                             25y threshold, so BB stayed silent
+        //                             even with CD-1's persisted flag.
+        //                             Extending to 60y absorbs the typical
+        //                             drift accumulated across 2-3
+        //                             projections, while still gating
+        //                             genuine "leader is very far / off
+        //                             route" scenarios (where toward-leader
+        //                             may not help).
+        //
+        // The _lastPathFailureWasRejection gate (now persistent during
+        // CantFollow per CD-1) keeps BB tight — wedge-case escapes (where
+        // away-from-leader IS correct) have _lastPathFailureWasRejection
+        // =false and BB stays silent.
         //
         // Interaction with BD (route basis): BD sets usingLeaderDirection
         // =false when LoadedRoute is available, so BB is correctly skipped
         // there (route direction already points at known-good ground).
         // See HANDOFF Fix BB for full evidence.
-        const float FixBBLeaderProximityYards = 25.0f;
+        const float FixBBLeaderProximityYards = 60.0f;
         if (usingLeaderDirection && _lastPathFailureWasRejection)
         {
             float distLeader = pos.WorldDistanceXYTo(leader!.WorldPos);
@@ -6350,7 +6376,41 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // rejection (if any). Clear the rejection-cause flag so a later
         // CantFollow (e.g., from a future stuck-displacement scenario)
         // doesn't spuriously inherit the toward-leader override.
-        _lastPathFailureWasRejection = false;
+        //
+        // ── Fix CD-1 (log-107 11:54:14 evidence) ──
+        // EXCEPTION: while in CantFollow state, the bot is navigating to
+        // *projection targets* (CantFollow escape points), not to the
+        // ORIGINAL failure destination (leader/anchor). A successful path
+        // to a projection target does NOT indicate the underlying U-turn
+        // problem has resolved. Resetting the flag here would let
+        // subsequent away-from-leader projections (BB-flip candidates)
+        // miss the override, sending the bot *further* from the leader
+        // through the wedge that triggered the original rejection.
+        //
+        // Log-107 trace:
+        //   11:54:14.327  AC+AE+AI+AL rejects → flag = TRUE
+        //   11:54:14.345  P1 (BD, toward-route 5y) — path accepted →
+        //                 flag = FALSE   ← spurious reset!
+        //   11:54:17.345  P2 (toward-route 20y, +120° offset)
+        //   11:54:20.356  P3 (toward-route 10y, route[22] N of bot)
+        //   11:54:22.393  P4 — basis=away-from-leader → BB skipped because
+        //                 flag was reset on P1. Bot moved 6.7y NW.
+        //   11:54:23.444  P5 — same, bot moved 6.6y NW.
+        //   11:54:23.951  AO cumulative cap (20y) exits CantFollow.
+        //   Net effect: 20y of movement *AWAY* from leader — the user-
+        //   reported "ran opposite direction" symptom.
+        //
+        // With CD-1, the flag persists through CantFollow. When P4 fires
+        // the away-from-leader basis, BB sees flag=true and (with CD-2's
+        // threshold extension) flips direction toward leader.
+        //
+        // Reset normally on path acceptance whenever NOT in CantFollow —
+        // primary navigation toward leader succeeded, so the U-turn
+        // condition has cleared.
+        if (_navState != NavState.CantFollow)
+        {
+            _lastPathFailureWasRejection = false;
+        }
     }
 
     /// <summary>
