@@ -2289,7 +2289,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // parked. Logging every tick would spam. The mode flag
             // _currentNavTargetMode = RouteWalk, set by the most recent
             // GetNavigationTarget call, is the diagnostic record.
-            if (_currentNavTargetMode == NavTargetMode.RouteWalk)
+            //
+            // ── Fix CA (log-104 evidence) — extend to Anchor mode ──
+            // Identical failure mode also applies to Anchor mode: when the
+            // bot has arrived at the anchor (via Fix AN local-TTL, or
+            // because IsAtFinalWaypoint popped on arrival), navigation has
+            // no waypoint and dist to leader still exceeds NavigatingMinYards
+            // (the leader has moved during the approach phase). The fallback
+            // below calls GetNavigationTarget → BU returns the cached anchor
+            // (mode stays Anchor via hysteresis after HasApproachStart=false)
+            // → anchor co-located guard fires → body-chase fallback →
+            // ComputeFollowTargetWorldPos returns a target that may ALSO be
+            // co-located (Far-branch projection from assist toward a nearby
+            // leader, with possible BL safety adjustment). SetWaypoint loop
+            // ensues, same escalation to CantFollow. Sit-in-place is correct
+            // for the same reason: the anchor is the right geographic spot;
+            // the cycle resolves via BU hysteresis expiry or a new ATG.
+            // See line ~5640 (OnDestinationReached) for the matched fix and
+            // full evidence trace.
+            if (_currentNavTargetMode == NavTargetMode.RouteWalk ||
+                _currentNavTargetMode == NavTargetMode.Anchor)
             {
                 return;
             }
@@ -5639,6 +5658,59 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 // within-this-tick window between the event firing and
                 // the next UpdateNavigatingToLeader entry.
                 _routeWalkParked = true;
+                return;
+            }
+
+            // ── Fix CA (log-104 08:41:06 "stuck in open terrain" evidence) ──
+            //
+            // Identical failure mode applies to Anchor mode: when the bot
+            // arrives at the approach-start anchor and mode is still Anchor
+            // (either inside the active approach phase, or — more commonly —
+            // via BU hysteresis after HasApproachStart went false), the
+            // retry-target returned by GetNavigationTarget is the anchor
+            // again, which is within POP_DIST of the bot (we just arrived
+            // there). The legacy fallback below reverts to body-chase via
+            // ComputeFollowTargetWorldPos, which can ALSO produce a target
+            // within POP_DIST when the leader is near the anchor (Fix Z's
+            // FarTargetMaxYards=7y or BL projection-safety adjustments can
+            // place the body-chase target within ~2.5y of the bot).
+            //
+            // Result: SetWaypoint cycles between anchor and body-chase
+            // ~every 15ms; after 10 sets in 100ms the SetWaypoint loop
+            // guard escalates to CantFollow → AB-2 projection escapes —
+            // walking the bot between nearby points "in open terrain"
+            // (the user's observation in log-104).
+            //
+            // Log-104 trace at 08:41:05:998 → 08:41:06:091:
+            //   - 08:41:03:258  Mode → Anchor (target=<-731.75, -4154.32>).
+            //   - 08:41:04:895  Leader transitioned PTG (HasApproachStart=false).
+            //   - 08:41:05:873  Assist arrived at anchor via Fix AN local-TTL.
+            //   - 08:41:05:998  OnDestinationReached: dist=14.2y, retryDist=2.6y.
+            //                   Fell through past RouteWalk guard → body-chase.
+            //   - 08:41:06:013 → 06:091 — 10 SetWaypoint cycles in ~92ms.
+            //   - 08:41:06:091  Loop guard fires → CantFollow.
+            //   - 08:41:06:108 → 06:338 → 08:602 → ... — AB-2 projection
+            //     escapes carrying the bot in zig-zag pattern between
+            //     nearby points (the user's reported "between same points
+            //     over and over").
+            //
+            // The fix mirrors the RouteWalk branch above: when mode=Anchor
+            // and target is co-located, sit-in-place. The anchor is the
+            // correct geographic position (the leader's pre-engage spot);
+            // the bot SHOULD be there. Refreshing is what creates the
+            // loop. When the approach cycle resolves (HasApproachStart
+            // comes back true for a new ATG, or BU sticky expires and
+            // mode falls through to RouteWalk/PositionChase), the next
+            // UpdateNavigatingToLeader tick will compute a fresh target
+            // with non-zero drift and re-engage navigation naturally.
+            if (_currentNavTargetMode == NavTargetMode.Anchor)
+            {
+                logger.LogInformation(
+                    $"[FFG] [ANCHOR-PARKED] Parked at approach-start anchor " +
+                    $"(retryDist={retryDist:0.0}y, leader {dist:0.0}y away). " +
+                    $"Leader in approach phase (or recently exited and BU hysteresis active); " +
+                    $"waiting at anchor for cycle to resolve. " +
+                    $"Skipping waypoint refresh — no SetWaypoint, no loop-guard escalation.");
                 return;
             }
 
