@@ -2256,13 +2256,35 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // -----------------------------------------------------------------------
     private void UpdateNavigatingToLeader()
     {
-        // Fix BH-3: clear the parked flag at the top of every tick. The
-        // parked path at line ~5704 sets it true; if this tick's
-        // OnRetrySharedWaypoint doesn't re-enter the parked branch
-        // (because we've advanced or fallen out of route-walk mode),
-        // the flag drops to false here and TickActiveStuckDetection
-        // re-arms with a fresh anchor.
-        _routeWalkParked = false;
+        // Fix BM-1 (supersedes BH-3's transient flag-set, log-96
+        // 16:36:20:860 → 16:36:50:754 evidence): recompute parked-at-cap
+        // state every tick from observable fields. The original BH-3
+        // design set the flag transiently in
+        // Navigation_OnDestinationReached's RouteWalk branch (which only
+        // fires ON ARRIVAL, not on every tick while still parked) and
+        // cleared it here every tick. The result was that the flag was
+        // true only on the single tick the parked event fired; on every
+        // subsequent tick of legitimate parked-at-cap waiting, the flag
+        // was false and TickActiveStuckDetection / TickNavActiveTimeout
+        // fired unsuppressed.
+        //
+        // Concrete failure mode in log-96:
+        //   16:36:20:860  parked event fires, flag=true briefly
+        //   16:36:23:267  Stuck fires (2.5s later, flag cleared by this
+        //                 tick's UpdateNavigatingToLeader entry)
+        //   16:36:25:660  leader sees Stuck status → "assist truly
+        //                 unavailable" → leader aborts patrol resume,
+        //                 cap can never lift
+        //   16:36:50:754  TickNavActiveTimeout fires CantFollow (30s
+        //                 later, not gated by _routeWalkParked at all
+        //                 in the BH-3 design — BM-2 fixes that)
+        //
+        // IsParkedAtRouteCap reads _currentNavTargetMode (set by
+        // GetNavigationTarget on the prev tick) + _assistRouteIndex +
+        // distance to route[_assistRouteIndex] — all CURRENT state — so
+        // the flag now tracks "am I parked NOW" rather than "did the
+        // parked path fire on the previous tick."
+        _routeWalkParked = IsParkedAtRouteCap();
 
         // ── Active-time timeout ─────────────────────────────────────────────
         TickNavActiveTimeout();
@@ -3953,6 +3975,65 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         return bestIdx;
     }
 
+    /// <summary>
+    /// Fix BM-1 (log-96 16:36:20:860 → 16:36:50:754, 30 s false-stuck cascade):
+    /// Returns true when the assist is parked at its trailing-by-one cap (or
+    /// rendezvous cap) waiting for the leader to advance — the "correctly idle"
+    /// state that <see cref="TickActiveStuckDetection"/> and
+    /// <see cref="TickNavActiveTimeout"/> must NOT flag as stuck.
+    ///
+    /// <para>The parked-at-cap CONDITION is persistent (tens of seconds while
+    /// the leader is in combat, looting, etc.), but the parked-EVENT
+    /// (Navigation_OnDestinationReached's RouteWalk branch) fires only once
+    /// per arrival. BH-3's transient flag-set approach therefore left the
+    /// flag false on every tick except the arrival tick —
+    /// TickActiveStuckDetection trips at 2.5s and TickNavActiveTimeout at
+    /// 30s with no suppression.</para>
+    ///
+    /// <para>This predicate computes the parked state from observable
+    /// fields each tick, replacing the transient flag with persistent
+    /// state recognition:</para>
+    /// <list type="number">
+    ///   <item>Current nav target mode is RouteWalk (set by
+    ///     <see cref="GetNavigationTarget"/> on the previous tick; remains
+    ///     stable until the bot transitions to a different goal phase).</item>
+    ///   <item><see cref="_assistRouteIndex"/> is a valid index into
+    ///     <see cref="GoalsComponent.Navigation.LoadedRoute"/>.</item>
+    ///   <item>The bot is within <see cref="GoalsComponent.Navigation.POP_DIST"/> of
+    ///     <c>route[_assistRouteIndex]</c> — i.e., standing at the route
+    ///     waypoint it's targeting.</item>
+    /// </list>
+    /// <para>When all three hold, the bot is parked at cap (the advance
+    /// loop in GetNavigationTarget would have already incremented
+    /// <c>_assistRouteIndex</c> if the cap allowed; if it didn't, then
+    /// <c>_assistRouteIndex == advanceCap</c> or
+    /// <c>_assistRouteIndex == rendezvousCap</c>, both of which are
+    /// "at cap").</para>
+    ///
+    /// <para>False positive: bot mid-route, transiently within POP_DIST of
+    /// route[N] as it passes through. On the same tick the advance loop
+    /// will increment <c>_assistRouteIndex</c> to N+1; on the next tick
+    /// the distance to route[N+1] is &gt; POP_DIST and parked returns
+    /// false. One extra suppressed tick during waypoint passage is
+    /// harmless — the bot is making progress and the timers wouldn't
+    /// have fired anyway.</para>
+    /// </summary>
+    private bool IsParkedAtRouteCap()
+    {
+        if (_currentNavTargetMode != NavTargetMode.RouteWalk)
+            return false;
+
+        if (_assistRouteIndex < 0)
+            return false;
+
+        Vector3[] route = navigation.LoadedRoute;
+        if (_assistRouteIndex >= route.Length)
+            return false;
+
+        float distToCurrent = playerReader.WorldPos.WorldDistanceXYTo(route[_assistRouteIndex]);
+        return distToCurrent < Navigation.POP_DIST;
+    }
+
     // ── Route-walking migration: Turn 3 ──
     //
     // CheckShouldDefer is a pure read-only predicate: should the
@@ -4492,6 +4573,89 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 if (_assistRouteIndex < 0)
                 {
                     int syncIdx = FindNearestSafeRouteIndex(playerReader.WorldPos, rendezvousCap);
+
+                    // ── Fix BM-3 (log-96 16:35:25:698 reversal at 175°, 16:35:32
+                    //    and 16:35:45 same class — 3 of 8 log-96 reversals) ──
+                    //
+                    // FindNearestSafeRouteIndex picks the Euclidean-nearest
+                    // waypoint at or before rendezvousCap. After combat has
+                    // pulled the bot OFF the route into a position adjacent
+                    // to the route, the Euclidean-nearest waypoint may be
+                    // slightly BEHIND the bot's projection-position on the
+                    // route — picking it forces the bot to walk backward to
+                    // the chosen waypoint before the advance loop can fire
+                    // and head it forward to the next one.
+                    //
+                    // Apply the same projection-aware advancement that
+                    // TryPushRouteSpanForTarget uses for resumeIndex (FFG.cs
+                    // ~line 5510, mirrors FRG.RefillWaypoints ~line 1986):
+                    // if the bot's foot-of-perpendicular onto segment
+                    // [route[syncIdx], route[syncIdx+1]] projects past
+                    // route[syncIdx] toward route[syncIdx+1] (t > 0), the
+                    // bot has already passed route[syncIdx] in projection —
+                    // advance syncIdx by one.
+                    //
+                    // Bounded by rendezvousCap to preserve BJ's rendezvous
+                    // semantics (can't advance past the leader's current
+                    // target waypoint).
+                    //
+                    // Worked example from log-96 reversal 1:
+                    //   bot at <-713.84, -4193.44>, route[8]=<-718.54, -4194.08>,
+                    //   route[9]=<-714.97, -4180.76>, rendezvousCap=11.
+                    //   FindNearestSafeRouteIndex returns 8 (4.74y) over 9 (12.74y).
+                    //   Projection: ab=(3.57,13.32), |ab|²=190.16,
+                    //   ap=(4.70,0.64), t=25.30/190.16=0.133 > 0 → advance to 9.
+                    //   With BM-3, _assistRouteIndex=9. Bot walks straight
+                    //   north to route[9] without the SW excursion to
+                    //   route[8] first.
+                    if (syncIdx >= 0 && syncIdx < rendezvousCap)
+                    {
+                        Vector3 a = route[syncIdx];
+                        Vector3 b = route[syncIdx + 1];
+                        Vector3 botPos = playerReader.WorldPos;
+
+                        // Distance-based: the bot is essentially at
+                        // route[syncIdx] already, or the next waypoint is
+                        // no farther than ~1.25× the current. Mirrors
+                        // TryPushRouteSpanForTarget's incByDistance.
+                        float dHere = botPos.WorldDistanceXYTo(a);
+                        float dNext = botPos.WorldDistanceXYTo(b);
+                        bool incByDistance = dHere < 1.5f || dNext <= dHere * 1.25f;
+
+                        // Projection-based: bot's foot-of-perpendicular
+                        // onto segment a→b is past a. Catches the post-
+                        // combat off-route case where the bot is slightly
+                        // past route[syncIdx] in the route direction but
+                        // Euclidean-closest to it because b is much
+                        // farther away.
+                        bool incByProgress = false;
+                        float abx = b.X - a.X;
+                        float aby = b.Y - a.Y;
+                        float abLenSq = abx * abx + aby * aby;
+                        if (abLenSq > 0.001f)
+                        {
+                            float apx = botPos.X - a.X;
+                            float apy = botPos.Y - a.Y;
+                            float t = (apx * abx + apy * aby) / abLenSq;
+                            if (t > 0.0f) incByProgress = true;
+                        }
+
+                        if (incByDistance || incByProgress)
+                        {
+                            int advancedIdx = syncIdx + 1;
+                            logger.LogInformation(
+                                $"[FFG] [FIX-FIRE] BM-3: Initial sync projection-aware " +
+                                $"advancement {syncIdx} → {advancedIdx} " +
+                                $"(dHere={dHere:0.0}y, dNext={dNext:0.0}y, " +
+                                $"incByDistance={incByDistance}, " +
+                                $"incByProgress={incByProgress}). " +
+                                $"Euclidean-nearest was route[{syncIdx}] but bot " +
+                                $"has projection-passed it; advancing one index " +
+                                $"forward to avoid backward walk.");
+                            syncIdx = advancedIdx;
+                        }
+                    }
+
                     _assistRouteIndex = syncIdx;
                     logger.LogInformation(
                         $"[FFG] [ROUTE-WALK] Initial sync: assist at {playerReader.WorldPos}, " +
@@ -5604,6 +5768,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // ── Fix BM-2 (log-96 16:36:20:860 → 16:36:50:754) ─────────────────
+        // Parked at route cap is legitimate waiting, not a stall. The bot
+        // is correctly idle until the leader advances the published cache,
+        // and the 30s CantFollow escalation must NOT accumulate during
+        // this window.
+        //
+        // BH-3 added the parked gate to TickActiveStuckDetection but
+        // missed this companion timer. As a result, even with BM-1 fixing
+        // _routeWalkParked's persistence, this 30s wall would still fire
+        // and escalate the bot into CantFollow (where Fix BD + BG-2 then
+        // produced a stable Projection10 ping-pong, observed as 5 of 8
+        // log-96 reversals across the last 40 seconds).
+        //
+        // Reset the timestamp AND the progress anchor so that when the
+        // park ends (leader advances), the timer restarts from the unpark
+        // moment with a fresh position baseline. Without the anchor reset,
+        // partial elapsed time could carry over and cause a premature fire
+        // on the first post-unpark stall.
+        if (_routeWalkParked)
+        {
+            _navLastTickUtc = now;
+            _navActiveElapsed = TimeSpan.Zero;
+            _navProgressCheckPosW = playerReader.WorldPos;
+            return;
+        }
+
         // Accumulate elapsed only outside combat. Combat legitimately suspends
         // forward movement (cast loops, etc.) and is handled by CombatGoal —
         // FFG isn't even the active goal then in most cases. Evade-recovery
@@ -6058,11 +6248,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     $"Trailing-by-one cap reached; waiting for leader to advance. " +
                     $"Skipping waypoint refresh — no SetWaypoint, no loop-guard escalation.");
 
-                // Fix BH-3: flag this tick as "parked" so TickActiveStuckDetection
-                // (which runs earlier in UpdateNavigatingToLeader) skips the
-                // stuck trigger on the NEXT tick. UpdateNavigatingToLeader
-                // clears the flag at its top, so a single non-parked tick
-                // re-arms the detector with a fresh anchor.
+                // Fix BH-3 → BM-1: defense-in-depth set. The primary
+                // mechanism is now BM-1's IsParkedAtRouteCap() recompute
+                // at the top of UpdateNavigatingToLeader, which tracks
+                // the parked CONDITION persistently. This set covers the
+                // within-this-tick window between the event firing and
+                // the next UpdateNavigatingToLeader entry.
                 _routeWalkParked = true;
                 return;
             }
