@@ -68,6 +68,20 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private const double MidTimeoutSec  = 4.0;   // Fix BS: 12-30y at OnEnter
     private const double FarTimeoutSec  = 6.0;   // Fix BS: 30y+ at OnEnter (cap)
     private const float MidDistanceCutoffYards = 30.0f;  // Fix BS: boundary near→mid
+
+    // Fix BT (log-99 evidence: leader had 23 ATG.OnEnter events vs 9 BN/BS completions;
+    // target 872063 alone had 9 OnEnter events in 30s, anchor moving 30y between consecutive
+    // publishes from <-722,-4147> to <-691,-4149>): stable anchor across same-target
+    // re-entries. The ATG re-enters whenever the leader's pather can't reach the mob and
+    // escalates — each re-entry republishes a fresh anchor at the leader's current position,
+    // causing the assist to chase a moving target. By keeping the original anchor for the
+    // duration of one engagement attempt with the same target (within the grace period),
+    // the assist has a stable target to navigate to. Cooldown after target change or grace
+    // expiry — fresh OnEnter publishes a new anchor and arms a new sync-pause.
+    private int _stableTargetGuid;
+    private DateTime _stableAnchorUtc = DateTime.MinValue;
+    private Vector3 _stableAnchorPos;
+    private const double StableAnchorGraceSec = 10.0;  // Fix BT: same-target re-entries within this window reuse the original anchor
     private double nextStuckCheckTime;
     private int initialTargetGuid;
     private float initialMinRange;
@@ -237,16 +251,48 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         // from the same location and through the same terrain.
         if (classConfig.Mode == Mode.PartyLeader)
         {
-            // Fix BN: save the anchor position for the distance-aware sync-pause check below.
-            // Re-use playerReader.WorldPos here — same instant the anchor is published.
-            _anchorPos = playerReader.WorldPos;
-            leaderNavProvider.SetApproachStart(_anchorPos);
-            logger.LogInformation($"[ATG] Published approach-start anchor: {_anchorPos}");
+            // Fix BT (log-99): determine whether this OnEnter is a re-entry for the SAME
+            // target within the grace period. If so, reuse the original anchor instead of
+            // republishing at the leader's (now-different) current position. This stops
+            // the "moving anchor" problem observed in log-99 — target 872063 had 9 OnEnter
+            // events in 30s with the published anchor sliding ~30y from <-722,-4147> to
+            // <-691,-4149> while the assist tried to chase the moving target.
+            int currentTarget = playerReader.TargetGuid;
+            bool sameTargetWithinGrace =
+                currentTarget != 0 &&
+                currentTarget == _stableTargetGuid &&
+                (DateTime.UtcNow - _stableAnchorUtc).TotalSeconds < StableAnchorGraceSec;
+
+            if (sameTargetWithinGrace)
+            {
+                // Reuse the existing anchor. Re-publish to refresh leaderNavProvider's
+                // HasApproachStart bit (which the previous OnExit cleared); the assist sees
+                // the same anchor coordinates so its in-flight nav is preserved.
+                _anchorPos = _stableAnchorPos;
+                leaderNavProvider.SetApproachStart(_anchorPos);
+                logger.LogInformation(
+                    $"[ATG] [FIX-FIRE] BT: Re-entry for same target={currentTarget} within " +
+                    $"{StableAnchorGraceSec:0.0}s grace — reusing stable anchor {_anchorPos}.");
+            }
+            else
+            {
+                // Fix BN: save the anchor position for the distance-aware sync-pause check.
+                _anchorPos = playerReader.WorldPos;
+                leaderNavProvider.SetApproachStart(_anchorPos);
+                logger.LogInformation($"[ATG] Published approach-start anchor: {_anchorPos}");
+
+                // Fix BT: update stable-anchor tracking for future re-entries.
+                _stableTargetGuid = currentTarget;
+                _stableAnchorPos = _anchorPos;
+            }
+            _stableAnchorUtc = DateTime.UtcNow;
 
             // Fix BS: compute the timeout from initial assist distance. Close assist → short
             // wait (assist already in position, don't dawdle). Far assist → longer wait
             // (give assist time to actually close the gap). The cap (FarTimeoutSec) prevents
             // indefinite freezing when assist is truly unreachable.
+            // Compute distance against the CURRENT anchor (which may be the stable one or
+            // a fresh one) — either way it reflects the assist's distance to the target.
             float distAtArm = assistStateStore.GetNearestAssistDistanceYards(_anchorPos);
             if (distAtArm <= AnchorSyncReadyYards)
                 _anchorSyncPauseTimeoutSec = NearTimeoutSec;
@@ -257,6 +303,10 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
             // Arm sync-pause: hold interact presses until the assist is actually near the
             // anchor (Fix BN: AnchorSyncReadyYards proximity) or the (scaled) timeout expires.
+            // Re-arm fresh on every OnEnter (including BT re-entries): each entry is a
+            // chance to give the assist more time to close before the leader starts
+            // pressing interact. This is a feature, not a bug — BT only stabilizes the
+            // anchor VALUE; it keeps the leader's pause behavior responsive.
             _anchorSyncPauseActive = true;
             _anchorSyncPauseStartUtc = DateTime.UtcNow;
         }

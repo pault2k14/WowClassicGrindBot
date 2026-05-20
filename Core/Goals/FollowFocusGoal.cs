@@ -372,17 +372,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // 25y reflects realistic closing budget: ~5y/s × 5s typical approach window.
     private const float AnchorReachableYards = 25.0f;
 
-    // Fix BQ (log-98 22:07:14.616 → 22:07:16.481, 3 mode flips in 1.87s + earlier 0.45s flip
-    // at 22:06:32.475→925): anchor-mode hysteresis. The leader's HasApproachStart can flicker
-    // (ATG re-entry, polling jitter); each flicker causes a mode change with 20-60y target
-    // shift that the user observed as "going back to previous waypoints". Once we enter
-    // Anchor mode, stay in it for at least AnchorModeStickyMs even if HasApproachStart
-    // transitions false — unless the leader's status indicates a real combat/non-approach
-    // state (Patrolling with HasTargetWaypoint, or Combat/Looting/Resting), in which case
-    // exit immediately.
-    private const int AnchorModeStickyMs = 1500;
-    private DateTime _anchorModeEnteredUtc = DateTime.MinValue;
-    private Vector3 _lastAnchorTarget;  // Fix BQ: anchor coords cached for hysteresis return value
+    // Fix BQ (log-98) + Fix BU (log-99): anchor-mode hysteresis. The leader's
+    // HasApproachStart can flicker for ~1.5-3.4s windows because the leader's ATG
+    // re-enters during pathing escalation (log-99: 23 ATG.OnEnter events vs 9 BN/BS
+    // completions; same-target re-entries every 1-3s during target 872063's 30s
+    // engagement attempt). Each flicker is an OnExit→ClearApproachStart→OnEnter→
+    // SetApproachStart cycle, so the assist sees HasApproachStart toggle.
+    //
+    // Original BQ measured time since Anchor-mode ENTRY (1500ms window). Log-99 showed
+    // flips at 1.5s, 1.5s, 1.5s, 1.8s, 2.3s, 2.5s, 2.7s, 2.7s, 2.9s, 3.2s, 3.4s — most
+    // slipping past the 1500ms ceiling because the timer ticked from entry, not from
+    // "last seen true". A 2500ms entry-based ceiling would catch some but miss many.
+    //
+    // Fix BU: measure time since the last tick that saw HasApproachStart=true. Each
+    // true tick refreshes the timer; the sticky window only counts elapsed time AFTER
+    // HasApproachStart has been continuously false. This naturally handles the
+    // flicker pattern: while HasApproachStart toggles true/false rapidly, the timer
+    // keeps resetting on the true ticks, so the sticky window never expires. The
+    // window only "starts" when the leader truly stops approaching. With the leader's
+    // ATG re-entry gaps observed at ≤3.5s, a 2500ms window catches the typical case;
+    // longer gaps mean the leader has genuinely moved on (status changes also bypass
+    // the hysteresis via the Patrolling gate).
+    private const int AnchorModeStickyMs = 2500;
+    private DateTime _anchorModeEnteredUtc = DateTime.MinValue;     // retained for log/diagnostic clarity
+    private DateTime _lastHasApproachStartUtc = DateTime.MinValue;  // Fix BU: refreshed each tick HasApproachStart=true
+    private Vector3 _lastAnchorTarget;  // anchor coords cached for hysteresis return value
 
     // Fix 33 (log-53: 1000 "Position-chase: standard target ... within 6.0y
     // of assist's blacklist; projected toward assist to ..." log lines in
@@ -3454,6 +3468,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             return false;
         }
 
+        // Fix BV (log-99 22:43:07.393 → 22:43:14.801, 4 Anchor↔RouteWalk flips in 7.4s
+        // while the leader's ATG was continuously active for target 872146):
+        // once we've committed to Anchor mode for this approach phase, don't re-evaluate
+        // BR's distance-based defer. The decision was made when we first entered Anchor;
+        // staying there is more important than re-checking the 25y boundary every tick.
+        //
+        // Mechanics of the bug Fix BV addresses: when distToAnchor hovers near the
+        // AnchorReachableYards threshold (25y), small assist movements cross the threshold
+        // back and forth. CheckShouldDefer alternates true/false each tick, flipping
+        // _pendingAnchor in/out and toggling _currentNavTargetMode between Anchor and
+        // RouteWalk. The user observed this as "the assist still seems like they are
+        // turning around right around the time that the leader is pulling the mob".
+        //
+        // Latch semantics: once _currentNavTargetMode==Anchor, this check skips the BR
+        // distance test. The latch naturally releases when Anchor mode exits (status
+        // transition out of Patrolling, or BU hysteresis expires after a sustained
+        // HasApproachStart=false). On the next approach phase, the latch re-evaluates
+        // fresh — BR's protective behavior (don't drag assist off-route when far) still
+        // applies to the INITIAL defer decision; it's only the mid-phase re-evaluation
+        // that's suppressed.
+        if (_currentNavTargetMode == NavTargetMode.Anchor)
+        {
+            return false;
+        }
+
         // Fix BP+BR — assist-side response to mid-leg approach signal:
         //   - Fix BP (log-97): when the leader signals approach mid-leg, abandon route-walk
         //     and head directly to the anchor. Per user design intent #2.
@@ -3540,25 +3579,42 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // chasing the leader's live body during approach means the pather continuously recomputes
         // a route to a retreating point, arriving in different terrain. Both bots navigating to
         // the same anchor start the final interact-key approach from the same geographic location.
-        // Fix BQ (log-98 22:07:14.616→16.481, 3 mode flips in 1.87s; 22:06:32.475→925,
-        // 0.45s flip): anchor-mode hysteresis. The leader's HasApproachStart can flicker
-        // briefly false during the approach phase (ATG re-entry, polling jitter,
-        // ApproachStart-mutex with HasTargetWaypoint). Each flicker triggers Anchor →
-        // RouteWalk → Anchor, shifting the assist's nav target by 20-60 yards and forcing
-        // a turn-around. The user observed this as "going back to previous waypoints".
+        // Fix BQ + BU: anchor-mode hysteresis.
         //
-        // Suppress flickers: once in Anchor mode, stay there for at least AnchorModeStickyMs
-        // even when HasApproachStart goes false, BUT only while the leader's published
-        // Status is still Patrolling. If the leader transitioned to Combat/Looting/Resting,
-        // a real state change is happening — exit Anchor promptly (don't apply hysteresis).
+        // Fix BQ (log-98): suppress brief HasApproachStart flickers so the assist doesn't
+        // visibly turn around when the leader's ATG hiccups during approach.
+        //
+        // Fix BU (log-99): measure time since LAST TICK with HasApproachStart=true, not
+        // since Anchor-mode entry. Log-99 showed Anchor→X→Anchor patterns where the gap
+        // between flips was 1.5-3.4s — most slipped past BQ's 1500ms entry-based ceiling
+        // because the timer ran from entry, not from "last seen true". With the tick-
+        // refresh approach, every tick that sees HasApproachStart=true resets the timer;
+        // the sticky window only counts elapsed time AFTER HasApproachStart has been
+        // continuously false. During an ATG re-entry storm (HasApproachStart toggling
+        // every ~1s), the timer keeps refreshing on the true ticks, so hysteresis never
+        // expires until the leader truly stops approaching.
+        //
+        // Refresh _lastHasApproachStartUtc on every true tick — this is the heartbeat
+        // that makes BU work.
+        if (leader.HasApproachStart)
+        {
+            _lastHasApproachStartUtc = DateTime.UtcNow;
+        }
+
+        // Hysteresis check applies when:
+        //   1. we are currently in Anchor mode (not yet exited)
+        //   2. HasApproachStart is now false (we'd exit Anchor on this tick without hysteresis)
+        //   3. we've seen HasApproachStart=true at some point in the past (anchor was real)
+        //   4. leader is still Patrolling — combat/loot/rest transitions bypass hysteresis
+        //   5. we have a cached anchor coordinate to return
         if (_currentNavTargetMode == NavTargetMode.Anchor &&
             !leader.HasApproachStart &&
-            _anchorModeEnteredUtc != DateTime.MinValue &&
+            _lastHasApproachStartUtc != DateTime.MinValue &&
             leader.Status == BotStatus.Patrolling &&
             _lastAnchorTarget != default)
         {
-            double sinceEntryMs = (DateTime.UtcNow - _anchorModeEnteredUtc).TotalMilliseconds;
-            if (sinceEntryMs < AnchorModeStickyMs)
+            double sinceLastTrueMs = (DateTime.UtcNow - _lastHasApproachStartUtc).TotalMilliseconds;
+            if (sinceLastTrueMs < AnchorModeStickyMs)
             {
                 // Within sticky window AND leader still patrolling — treat as HasApproachStart
                 // flicker rather than a real exit. Return the cached anchor without changing
