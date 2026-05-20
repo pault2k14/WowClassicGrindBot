@@ -4760,6 +4760,58 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     {
         outcome = "?";
 
+        // ── Fix BZ (log-103 02:40:30→02:40:44 "circuit of waypoints") ──
+        //
+        // Anchor mode means the assist has decided to abandon the patrol route
+        // and head DIRECTLY to the approach-start anchor (the leader's body
+        // position at ATG entry). The whole point of Anchor mode is to short-
+        // circuit the route — the route is the long way around; the anchor
+        // is a beeline to where the action is.
+        //
+        // Route-span construction is `[route[resumeIndex..leaderIdx], target]`.
+        // For PositionChase/RouteWalk, this is correct — the bot walks the
+        // route to catch up with the leader. For Anchor mode, this forces the
+        // bot to walk through every intermediate route waypoint BEFORE finally
+        // reaching the anchor as the trailing waypoint. The bot effectively
+        // takes a long detour through the patrol route, defeating the purpose
+        // of Anchor mode.
+        //
+        // Evidence: log-103 02:40:30.490 → 02:40:44 (14-second window):
+        //   • Mode flipped PC → Anchor (target=<-715.83,-4222.29> = anchor).
+        //   • [FIX-FIRE] BE: route-span push — 11 waypoints
+        //     [route[8..17]=10 pre-validated waypoints + trailing target].
+        //   • Bot then POPped waypoints sequentially over the next ~10s:
+        //       02:40:32.009  POP route[8]  → newWpTop=route[9]
+        //       02:40:33.971  POP route[9]  → newWpTop=route[10]
+        //       02:40:35.968  POP route[10] → newWpTop=route[11]
+        //       02:40:37.822  POP route[11] → newWpTop=route[12]
+        //       02:40:39.926  POP route[12] → newWpTop=route[13]
+        //   • At 02:40:34.257 the leader's BN/BS sync-pause TIMED OUT because
+        //     the assist was 39y from anchor (vs the 12y "ready" threshold)
+        //     — the assist had walked AWAY from the anchor along the route
+        //     while it should have headed directly to it.
+        //   • Leader's 14.4-second stuck ATG followed because the assist
+        //     wasn't in position to engage.
+        //
+        // Why this didn't manifest in prior runs: most PTG cycles are 1-3s,
+        // so the bot doesn't have time to POP many route waypoints before
+        // mode flips back. Log-103's pathologically long 14.4-second ATG
+        // (leader couldn't reach mob) gave the bot enough time for 5+ POPs.
+        //
+        // Fix: when mode is Anchor, fall through to SetSingleWaypoint with
+        // the anchor as a single target. The pather will compute a direct
+        // route (one pather call — acceptable cost; the anchor is at most
+        // RouteSpanLeaderProximityYards=25y away in the common case).
+        //
+        // PositionChase and RouteWalk still use route-span — the original
+        // Fix BE motivation (avoid pather thrash when the assist is patrolling
+        // along with the leader) applies to those modes, not to Anchor.
+        if (_currentNavTargetMode == NavTargetMode.Anchor)
+        {
+            outcome = "anchor-mode-direct (Fix BZ — abandon route, go direct to anchor)";
+            return false;
+        }
+
         Vector3[] route = navigation.LoadedRoute;
         if (route.Length == 0)
         {
