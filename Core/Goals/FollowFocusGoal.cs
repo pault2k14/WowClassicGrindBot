@@ -393,7 +393,27 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // ATG re-entry gaps observed at ≤3.5s, a 2500ms window catches the typical case;
     // longer gaps mean the leader has genuinely moved on (status changes also bypass
     // the hysteresis via the Patrolling gate).
-    private const int AnchorModeStickyMs = 2500;
+    //
+    // ── Fix BY (log-102 PTG cycle measurement) ──
+    // Bumped from 2500ms to 4500ms after observing PTG cycle durations across log-102:
+    //   median ATG→PTG→ATG cycle: 2.4s
+    //   max (excluding 13s outlier): 3.298s at 57:29.413 → 57:32.711
+    //   plus typical poll lag of ~250ms on either side
+    // The 2500ms window narrowly missed the 3298ms case: at 57:32.097 BW's sticky
+    // expired (sinceLastTrueMs≈2.7s), the latch reset, and the bot flipped
+    // PositionChase → RouteWalk with drift=18.3y — a large visible turn-back during
+    // what was actually a single continuous approach phase.
+    // Also fixes the 56:16.391 turn-back (DIAG-BW: sinceLastTrueMs=2607ms, mode=Anchor,
+    // 7.9y drift) — that case was 107ms past the old 2500ms ceiling.
+    // 4500ms covers all observed normal PTG cycles with margin. The 13.1s outlier
+    // (56:49.692 → 57:02.806) is left uncovered — that case represents a leader
+    // pathing failure, not a normal approach phase; protecting it would mean the
+    // assist stays parked at a stale anchor for 13+ seconds.
+    // Affects both BU (mode=Anchor protection) and BW (latch+PositionChase
+    // protection). 4.5s of Anchor-mode persistence on a truly-ended approach is a
+    // tolerable cost (assist still heading roughly toward leader area) for
+    // eliminating the mid-approach turn-backs.
+    private const int AnchorModeStickyMs = 4500;
     private DateTime _anchorModeEnteredUtc = DateTime.MinValue;     // retained for log/diagnostic clarity
     private DateTime _lastHasApproachStartUtc = DateTime.MinValue;  // Fix BU: refreshed each tick HasApproachStart=true
     private Vector3 _lastAnchorTarget;  // anchor coords cached for hysteresis return value
@@ -3488,7 +3508,34 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // fresh — BR's protective behavior (don't drag assist off-route when far) still
         // applies to the INITIAL defer decision; it's only the mid-phase re-evaluation
         // that's suppressed.
-        if (_currentNavTargetMode == NavTargetMode.Anchor)
+        //
+        // ── Fix BX (log-102 57:28.140 → 57:28.388, 248ms latch-bypass turn-back) ──
+        // Symmetric latch for the PositionChase commitment path. When
+        // _approachAnchorColocated is set (line 3740 area inside the `else` branch of
+        // this method), GetNavigationTarget has already committed to PositionChase mode
+        // for the rest of this approach phase. Allowing CheckShouldDefer to return TRUE
+        // here would cause the caller (line 3684) to fall through to the RouteWalk block,
+        // bypassing the latch check entirely (the latch check lives in the `else` branch
+        // of `if (CheckShouldDefer)`, so a true return prevents it from running).
+        //
+        // Evidence: log-102 timeline showed
+        //   57:28.140  Approach-start anchor co-located (3.6y<3.6y) → latch=true,
+        //              mode=PositionChase. Bot at anchor, ready to engage.
+        //   57:28.155  [AH+AJ+AN] focus chain fires with HasApproachStart=true,
+        //              _approachAnchorColocated=true.
+        //   57:28.311  [AJ] focus-chain confirmed hostile (HasApproachStart=True).
+        //   57:28.388  mode → RouteWalk drift=0.0y. CheckShouldDefer BI-1 path
+        //              fired: idx=25, advanceCap=25, distToTarget(assist→route[25])
+        //              ≈ 1.8y ≤ POP_DIST(3.6y) → returns TRUE. Caller fell through
+        //              to RouteWalk block. Bot turns toward route waypoint AWAY from
+        //              leader instead of staying parked at the anchor.
+        // Without Fix BX, the latch is set but cannot defend against the BI-1 path —
+        // the very path that fires when the bot is at-or-past its route cap (which is
+        // exactly when the latch is most likely to be set, since the bot is parked).
+        //
+        // Both checks express the same semantic: "we've committed to a non-RouteWalk
+        // mode for this approach phase; don't let defer override that commitment."
+        if (_currentNavTargetMode == NavTargetMode.Anchor || _approachAnchorColocated)
         {
             return false;
         }
