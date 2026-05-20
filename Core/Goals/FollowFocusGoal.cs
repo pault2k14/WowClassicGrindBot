@@ -980,6 +980,40 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const float CBMaxScanDistanceYards = 35.0f;
     private const float CBImprovementMargin = 0.3f;
 
+    // ── Fix CC (log-106 11:14:16 evidence) — Geometric cache extension ──
+    //
+    // The leader's route index cache is updated only when leader publishes
+    // a TargetWaypoint matching a route index (primary path in
+    // TryFindLeaderRouteIndex). During extended ATG/PTG/Combat sequences,
+    // HasTargetWaypoint stays false (ApproachStart-mutex), and the cache
+    // doesn't update via primary. The leader's actual route progress can
+    // still be inferred geometrically from leader.WorldPos.
+    //
+    // Without this fix, the assist's advanceCap (=cache.leaderIdx - 1)
+    // stays at a stale value while the leader progresses further along the
+    // route. The bot parks at trailing-by-one (per BH-3/BM-1's parked
+    // logic) and waits indefinitely for cache to update. Meanwhile the
+    // leader is many waypoints ahead.
+    //
+    // Log-106 evidence at 11:14:16 → 11:14:29 (13s park):
+    //   Bot at route[25] = <-749.53, -4305.37> (advanceCap = 24, can't move).
+    //   Leader was 35.5y away and moving further (next anchor was 31.5y).
+    //   Cache stayed at 25 until 11:14:35 (21 seconds!) while leader
+    //   actually progressed to route[27] at 11:14:27. The cache update
+    //   missed the brief 99ms Follow window between ATGs.
+    //
+    // With Fix CC, when cache fallback fires, we check if leader.WorldPos
+    // is closer to route[leaderIdx+1] than to route[leaderIdx]. If yes,
+    // advance the cache by 1. Repeat up to CCMaxAdvancePerCall waypoints.
+    // The cache catches up to the leader's actual route progress without
+    // requiring TargetWaypoint publication.
+    //
+    // CCMaxAdvancePerCall: cap per call to prevent runaway in edge cases
+    // (leader off-route near a looped section, position jitter, etc.).
+    // 5 waypoints (~50y at typical route stride) covers normal combat-
+    // sequence drift while still bounding worst-case overshoot.
+    private const int CCMaxAdvancePerCall = 5;
+
     public FollowFocusGoal(
         ConfigurableInput input,
         PlayerReader playerReader,
@@ -1196,7 +1230,9 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"AnchorLocalTtlMs={AnchorLocalTtlMs:0}ms, " +
             $"RouteSpanLeaderProximityYards={RouteSpanLeaderProximityYards:0.0}y. " +
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
-            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE. " +
+            $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
+            $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -3349,6 +3385,47 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     $"Will revert to primary when leader publishes a route-matching " +
                     $"waypoint or cache exceeds {CachedLeaderRouteIdxMaxAgeSec:0}s TTL.");
                     _cacheFallbackInUse = true;
+                }
+
+                // ── Fix CC (log-106 11:14:16 evidence) ──
+                // Geometric cache extension: when cache is in use and the
+                // leader's actual position has progressed past route[leaderIdx],
+                // advance the cache locally using leader.WorldPos. This handles
+                // the case where the leader is in extended ATG/PTG/Combat
+                // sequences and isn't publishing TargetWaypoint, but is still
+                // geographically moving along the route.
+                //
+                // Criterion: leader.WorldPos is closer to route[leaderIdx+1]
+                // than to route[leaderIdx]. Repeat up to CCMaxAdvancePerCall
+                // times to catch up multiple stale waypoints. Bounded to
+                // prevent runaway on looped routes / off-route positions.
+                //
+                // Only refresh _cachedLeaderRouteIdxUtc when we actually
+                // advance — preserves TTL behavior for cases where leader
+                // truly stops (no advance, no refresh, TTL eventually fires).
+                int prevIdx = leaderIdx;
+                int maxIdx = Math.Min(route.Length - 1, leaderIdx + CCMaxAdvancePerCall);
+                Vector3 leaderPos = leader.WorldPos;
+                while (leaderIdx < maxIdx)
+                {
+                    float dCur = leaderPos.WorldDistanceXYTo(route[leaderIdx]);
+                    float dNext = leaderPos.WorldDistanceXYTo(route[leaderIdx + 1]);
+                    if (dNext < dCur)
+                        leaderIdx++;
+                    else
+                        break;
+                }
+                if (leaderIdx > prevIdx)
+                {
+                    logger.LogInformation(
+                        $"[FFG] [FIX-FIRE] CC: Geometric cache extension " +
+                        $"{prevIdx} → {leaderIdx} " +
+                        $"(leader.WorldPos closer to route[{leaderIdx}] than " +
+                        $"route[{prevIdx}]; +{leaderIdx - prevIdx} waypoints). " +
+                        $"TargetWaypoint stale (ApproachStart-mutex or transient); " +
+                        $"using leader's actual position to advance cache.");
+                    _cachedLeaderRouteIdx = leaderIdx;
+                    _cachedLeaderRouteIdxUtc = DateTime.UtcNow;
                 }
                 return true;
             }
