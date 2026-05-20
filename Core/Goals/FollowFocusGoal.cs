@@ -934,6 +934,52 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // by the time the assist arrives).
     private const float RouteSpanLeaderProximityYards = 25.0f;
 
+    // ── Fix CB (log-105 09:21:10 evidence) — Direction-aware Initial sync ──
+    //
+    // FindNearestSafeRouteIndex picks the Euclidean-nearest route waypoint
+    // (within rendezvousCap=leaderIdx). When the route makes a U-turn or
+    // loop, the Euclidean-nearest waypoint to the bot's post-combat position
+    // can be on the WRONG side of the U-turn — its forward direction
+    // (route[syncIdx] → route[syncIdx+1]) points AWAY from where the leader
+    // currently is. The assist walks several waypoints backward (north when
+    // leader is south, etc.) before the advance loop catches up to the
+    // leader's actual route position.
+    //
+    // Log-105 evidence at 09:21:10:495:
+    //   Bot at <-719.86, -4210.95> (post-combat, south-east area).
+    //   Leader recently published anchor <-723.24, -4215.79> (5y SW of bot),
+    //   now ~14.8y from bot doing ATG/PTG with mob 909131.
+    //   FindNearestSafeRouteIndex picks route[7]=<-720.45, -4207.66> (3.3y N).
+    //   Route[7] → route[8]=<-718.54, -4194.08> heads bot NORTH.
+    //   Leader is SOUTH. Bot walks NORTH (opposite direction).
+    //
+    // The fix: after BM-3, if walking from syncIdx forward would head bot
+    // AWAY from leader's actual current position (cos < threshold), scan
+    // forward to find a waypoint with better direction alignment. Skip
+    // straight to that index, avoiding the U-turn detour.
+    //
+    // CBLeaderProximityYards: only apply when leader is within this distance
+    // (rendezvous scenarios — assist needs to catch up quickly). When leader
+    // is far away (large patrol step or fresh OnEnter from far away), the
+    // standard Euclidean-nearest behavior is correct.
+    //
+    // CBBackwardCosThreshold: -0.3 means an angle ~107° between picked
+    // waypoint and leader directions. -0.5 (120°) was too restrictive in
+    // testing — it missed slightly-angled cases. -0.3 catches clear backward
+    // walks (>= 100°) without over-firing on moderately angled approaches.
+    //
+    // CBMaxScanDistanceYards: don't pick waypoints too far from bot — even
+    // if direction aligns better, walking 50+ y is worse than fixing the
+    // angle on the next advance cycle.
+    //
+    // CBImprovementMargin: only skip if the better waypoint's alignment is
+    // meaningfully better than the picked one. Prevents oscillation between
+    // marginally-different alignments.
+    private const float CBLeaderProximityYards = 30.0f;
+    private const float CBBackwardCosThreshold = -0.3f;
+    private const float CBMaxScanDistanceYards = 35.0f;
+    private const float CBImprovementMargin = 0.3f;
+
     public FollowFocusGoal(
         ConfigurableInput input,
         PlayerReader playerReader,
@@ -4117,6 +4163,104 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                                 $"has projection-passed it; advancing one index " +
                                 $"forward to avoid backward walk.");
                             syncIdx = advancedIdx;
+                        }
+                    }
+
+                    // ── Fix CB (log-105 09:21:10 evidence) ──
+                    // After BM-3's one-step projection advance, check if
+                    // walking from syncIdx forward would head bot AWAY from
+                    // leader's actual current position. When the route loops
+                    // back near the bot's post-combat position but the leader
+                    // is in a different geographic direction, walking the
+                    // route forward from syncIdx takes a long detour through
+                    // the U-turn before reaching the leader. The fix scans
+                    // forward to find a waypoint better aligned with the
+                    // leader's direction, skipping the detour.
+                    //
+                    // Worked example from log-105 09:21:10:
+                    //   Bot at <-719.86, -4210.95>, leader.WorldPos ~14.8y away.
+                    //   syncIdx=7 picked (route[7]=<-720.45, -4207.66>, 3.3y N).
+                    //   toRoute = route[7]-bot = (-0.59, 3.29)  |toRoute|=3.3
+                    //   Leader was SW of bot (per anchor proxy <-723.24, -4215.79>).
+                    //   toLeader = (-3.38, -4.84)               |toLeader|=5.9
+                    //   cos = (-0.59*-3.38 + 3.29*-4.84) / (3.3*5.9)
+                    //       = (1.99 - 15.93) / 19.5 = -0.71
+                    //   cos < -0.3 → fire CB scan.
+                    //   route[12]=<-743.20, -4197.20>: toCandidate=(-23.34, 13.75)
+                    //     dot_with_leader = -23.34*-3.38 + 13.75*-4.84
+                    //                     = 78.89 - 66.55 = 12.34
+                    //     cos = 12.34 / (27.09*5.9) = 0.077 (toward leader)
+                    //   Skip 7 → 12 (positive cos = aligned with leader direction).
+                    //
+                    // Bounds: only fire when leader is close (within
+                    // CBLeaderProximityYards). When leader is far, the
+                    // Euclidean-nearest behavior is what we want — the bot
+                    // has a long way to go either way.
+                    if (syncIdx >= 0 && syncIdx < rendezvousCap)
+                    {
+                        Vector3 botPosCB = playerReader.WorldPos;
+                        Vector3 leaderPosCB = leader.WorldPos;
+                        float botToLeaderXY = botPosCB.WorldDistanceXYTo(leaderPosCB);
+
+                        if (botToLeaderXY < CBLeaderProximityYards && botToLeaderXY > 0.001f)
+                        {
+                            Vector3 picked = route[syncIdx];
+                            float pickedDx = picked.X - botPosCB.X;
+                            float pickedDy = picked.Y - botPosCB.Y;
+                            float pickedLen = MathF.Sqrt(pickedDx * pickedDx + pickedDy * pickedDy);
+
+                            float leaderDx = leaderPosCB.X - botPosCB.X;
+                            float leaderDy = leaderPosCB.Y - botPosCB.Y;
+
+                            if (pickedLen > 0.001f)
+                            {
+                                float pickedCos = (pickedDx * leaderDx + pickedDy * leaderDy)
+                                                   / (pickedLen * botToLeaderXY);
+
+                                if (pickedCos < CBBackwardCosThreshold)
+                                {
+                                    // Picked waypoint heads away from leader.
+                                    // Scan forward for a better-aligned one
+                                    // within reasonable distance.
+                                    int bestIdx = syncIdx;
+                                    float bestCos = pickedCos;
+                                    for (int i = syncIdx + 1; i <= rendezvousCap; i++)
+                                    {
+                                        Vector3 candidate = route[i];
+                                        float cdx = candidate.X - botPosCB.X;
+                                        float cdy = candidate.Y - botPosCB.Y;
+                                        float clen = MathF.Sqrt(cdx * cdx + cdy * cdy);
+
+                                        // Hard stop if too far from bot —
+                                        // sticking near syncIdx is better
+                                        // than picking a 50+ y target.
+                                        if (clen > CBMaxScanDistanceYards) break;
+                                        if (clen < 0.001f) continue;
+
+                                        float ccos = (cdx * leaderDx + cdy * leaderDy)
+                                                      / (clen * botToLeaderXY);
+                                        if (ccos > bestCos + CBImprovementMargin)
+                                        {
+                                            bestCos = ccos;
+                                            bestIdx = i;
+                                        }
+                                    }
+
+                                    if (bestIdx != syncIdx)
+                                    {
+                                        logger.LogInformation(
+                                            $"[FFG] [FIX-FIRE] CB: Direction-aware Initial sync " +
+                                            $"skip {syncIdx} → {bestIdx} " +
+                                            $"(route[{syncIdx}] heads away from leader: " +
+                                            $"cos={pickedCos:0.00}; route[{bestIdx}] " +
+                                            $"cos={bestCos:0.00}). " +
+                                            $"Leader {botToLeaderXY:0.0}y away. " +
+                                            $"Skipping {bestIdx - syncIdx} route waypoints to " +
+                                            $"avoid backward walk through route U-turn / loop.");
+                                        syncIdx = bestIdx;
+                                    }
+                                }
+                            }
                         }
                     }
 
