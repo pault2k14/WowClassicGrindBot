@@ -876,9 +876,12 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.partymembercombat: " + PartyMemberInCombat());
         logger.LogInformation("GoapKey.partyleadercombat: " + PartyLeaderInCombat());
         logger.LogInformation("GoapKey.partyincombat: " + PartyInCombat());
+        // Fix CM: match the corrected partyEngaging computation in UpdateWorldState
+        // (see ~line 1302). Reads polled leader state on assist, not local nav provider.
         logger.LogInformation("GoapKey.partyEngaging: " +
             (PartyInCombat() ||
-             (classConfig.Mode == Mode.AssistFocus && leaderNavProvider.HasApproachStart)));
+             (classConfig.Mode == Mode.AssistFocus &&
+              leaderConnection.LastLeaderState?.HasApproachStart == true)));
         logger.LogInformation("GoapKey.inblacklistarea: " + navigation.IsInBlacklistArea());
         logger.LogInformation("GoapKey.focusconnected: " + bits.Focus_Connected());
         logger.LogInformation("GoapKey.party1connected: " + bits.Party1_Connected());
@@ -1287,10 +1290,56 @@ public sealed partial class GoapAgent : IDisposable
         // is preserved verbatim above — FRG.OnGoapEvent and other consumers
         // still receive the "actual combat is happening" semantics they rely on.
         //
-        // Mode gate (AssistFocus only): HasApproachStart is set by the leader's
-        // ATG.OnEnter and broadcast via LeaderNavigationProvider. The leader's
-        // own GoapAgent has no business reading the leader's own flag back —
-        // ATG is the goal that publishes it. For PartyLeader and Grind modes,
+        // ── Fix CM (log-114 evidence — CL diagnostic, 23:15:57:212 confirmation) ──
+        //
+        // The original Fix AH formulation reads `leaderNavProvider.HasApproachStart`
+        // here, intending it to mean "the leader has published an approach anchor."
+        // That is correct ON THE LEADER'S PROCESS — the leader's own ATG calls
+        // leaderNavProvider.SetApproachStart() (ApproachTargetGoal.cs:223) when it
+        // enters and ClearApproachStart() when it exits, so the leader's local
+        // LeaderNavigationProvider._hasApproachStart accurately reflects the
+        // leader's ATG state.
+        //
+        // BUT on the ASSIST, leaderNavProvider is a *separate instance* in a
+        // *separate process*. The only thing that ever sets the assist's local
+        // leaderNavProvider._hasApproachStart is the assist's *own* ATG entering
+        // — which is itself gated by partyEngaging=true (this very key). So the
+        // ORIGINAL READ HERE WAS SELF-REFERENTIAL on the assist: "ATG can fire
+        // if the assist is currently in ATG." Because the assist never is in
+        // ATG to start with, the disjunct collapsed to false, and partyEngaging
+        // on the assist was effectively just PartyInCombat() — Fix AH's intended
+        // pre-combat ATG window was never actually unblocked.
+        //
+        // Evidence — log-114 AM warning at 23:15:57:212, leader was in ATG for
+        // target 962223 (HasApproachStart published true via the API):
+        //   approachLeader.HasApproachStart = True    (polled, correct)
+        //   bits.Combat = False, bits.Focus_Combat = False
+        //   leaderNavProvider.HasApproachStart = False (local — never set on assist
+        //                                                during this entire window)
+        // The Fix CL diagnostic correctly computed partyEngaging=True using the
+        // polled HasApproachStart, but the planner — reading WorldState[partyEngaging]
+        // populated from leaderNavProvider — saw FALSE. ATG.AssistFocus precondition
+        // partyEngaging=true failed, the planner picked FFG (cost 19) instead of ATG
+        // (cost 8), and the assist sat in FFG for the entire leader-ATG window. When
+        // the leader finally entered Combat at 23:15:59:747, the assist's
+        // bits.Focus_Combat became true, PartyInCombat() became true, partyEngaging
+        // became true via the FIRST disjunct — but by then CombatGoal (cost 4 <
+        // ATG cost 8) preempted ATG. Result: ATG.OnEnter on assist fired 1× across
+        // 23 combats in log-114. User-visible: "assist not approaching a mob until
+        // after the leader already started attacking it."
+        //
+        // Fix: read HasApproachStart from the assist's polled leader state
+        // (leaderConnection.LastLeaderState.HasApproachStart), which actually
+        // reflects the leader's ATG state via the API/poller. On the leader the
+        // mode-gate evaluates false (leader's own Mode != AssistFocus) so the
+        // disjunct is unreachable and behavior is unchanged.
+        //
+        // Null-safety: leaderConnection.LastLeaderState is nullable (returns null
+        // before the first successful poll). The `?.HasApproachStart == true`
+        // pattern returns false on null — the same false value the disjunct
+        // resolved to before the leader's first poll, so no new edge case.
+        //
+        // Mode gate (AssistFocus only): For PartyLeader and Grind modes,
         // partyEngaging collapses to partyincombat (the historical semantics)
         // because the leader-approaching disjunct is mode-gated.
         //
@@ -1301,7 +1350,8 @@ public sealed partial class GoapAgent : IDisposable
         // key, computed once per UpdateWorldState, is the idiomatic match.
         WorldState[GoapKey.partyEngaging] =
             PartyInCombat() ||
-            (classConfig.Mode == Mode.AssistFocus && leaderNavProvider.HasApproachStart);
+            (classConfig.Mode == Mode.AssistFocus &&
+             leaderConnection.LastLeaderState?.HasApproachStart == true);
 
         WorldState[GoapKey.drinking]           = restHandler.IsDrinking();
         WorldState[GoapKey.eating]             = restHandler.IsEating();

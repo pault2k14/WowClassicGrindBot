@@ -120,20 +120,70 @@ public sealed class LeaderStateService
         if (leaderNavProvider.IsPausedForAssist)
             return BotStatus.Waiting;
 
-        // GoapAgent.CurrentGoal is GoapGoal? — use .Name to derive status.
+        // ── Fix CN (log-114 evidence) — goal-name string mismatch ──
+        //
+        // The original switch keys used CLASS NAMES (e.g. "ApproachTargetGoal",
+        // "LootGoal", "FollowRouteGoal"). But the actual GoapGoal.Name VALUE,
+        // produced by the base ctor `: base(nameof(XxxGoal))` plus the base
+        // class's display-formatting (strip "Goal" suffix + CamelCase-split),
+        // is the HUMAN-READABLE form: "Approach Target", "Loot", etc. The
+        // class-name keys NEVER matched goalName, so the switch always fell
+        // through to the default `_ => BotStatus.Patrolling`.
+        //
+        // Evidence (log-114 LeaderStatePoller events received by assist):
+        //   23:15:34:367  Leader status changed: Patrolling
+        //   23:15:44:385  Leader status changed: Combat
+        //   23:15:48:802  Leader status changed: Patrolling
+        //   23:16:00:920  Leader status changed: Combat
+        //   23:16:05:842  Leader status changed: Patrolling
+        //   ...
+        // Status only ever toggled between Patrolling ↔ Combat. NEVER reached
+        // Approaching, Looting, Skinning, Resting, or Evading. The leader was
+        // demonstrably in ATG/PTG repeatedly (per its own goal-plan log lines
+        // "New Plan= Approach Target", "New Plan= Pull Target"), and was
+        // looting between combats — none of which surfaced to the assist.
+        //
+        // Consequence: the assist's FFG.GetNavigationTarget reads
+        // leader.Status to decide between RouteWalk (when Patrolling) and
+        // PositionChase/Anchor (other statuses). With status frozen at
+        // Patrolling during the leader's ATG, the assist took the RouteWalk
+        // branch and pushed route-waypoint targets — including waypoints
+        // NORTH of the leader's actual position. Concrete log-114 example
+        // at 23:15:56:164: assist had walked SE to <-717.94, -4179.03>
+        // (2.4y from leader anchor <-718.63, -4181.18>). CK suppressed an
+        // OnDestinationReached Idle and called GetNavigationTarget(leader),
+        // which — because leader.Status was incorrectly Patrolling — returned
+        // route waypoint <-710.94, -4167.58>. The assist then walked back
+        // NORTH ~10y to chase the route waypoint, ending at <-711.42, -4170.02>
+        // by 23:15:58:786. User-visible: "backwards movement and travel by the
+        // assist after combat" / "during approach".
+        //
+        // Plan-log inspection confirms the actual Goal.Name values:
+        //   "Approach Target", "Pull Target", "Combat", "Loot",
+        //   "Consume Corpse", "Corpse Consumed", "Follow Focus",
+        //   "Follow <route-filename>" (FRG, variable suffix).
+        // Skinning/Drink/Eat/Rest/Evade goals follow the same base-class
+        // formatting pattern (strip "Goal" suffix; single-word names produce
+        // "Skinning", "Drink", "Eat", "Rest", "Evade").
+        //
+        // Fix: change the switch keys to the actual Name values. FRG's
+        // variable filename suffix is handled by the default Patrolling
+        // arm — which is the desired status for FRG anyway, so no special
+        // case is required. FollowFocusGoal also produces "Follow Focus"
+        // but FFG is mode-gated to AssistFocus and never runs on the leader,
+        // so no collision with the FRG-style default Patrolling arm.
         string? goalName = botController.GoapAgent?.CurrentGoal?.Name;
         return goalName switch
         {
-            "LootGoal"              => BotStatus.Looting,
-            "SkinningGoal"          => BotStatus.Skinning,
-            "DrinkGoal"
-                or "EatGoal"
-                or "RestGoal"       => BotStatus.Resting,
-            "EvadeGoal"             => BotStatus.Evading,
-            "FollowRouteGoal"       => BotStatus.Patrolling,
-            "ApproachTargetGoal"
-                or "PullTargetGoal" => BotStatus.Approaching,
-            _                       => BotStatus.Patrolling
+            "Loot"               => BotStatus.Looting,
+            "Skinning"           => BotStatus.Skinning,
+            "Drink"
+                or "Eat"
+                or "Rest"        => BotStatus.Resting,
+            "Evade"              => BotStatus.Evading,
+            "Approach Target"
+                or "Pull Target" => BotStatus.Approaching,
+            _                    => BotStatus.Patrolling
         };
     }
 }
