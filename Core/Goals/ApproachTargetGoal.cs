@@ -666,9 +666,81 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 }
                 else
                 {
-                    input.PressTargetFocus();
-                    input.PressTargetOfTarget();
-                    wait.Update();
+                    // ── Fix CT (log-118 evidence: 138 PageUp + 138 F presses) ──
+                    // The default-approach else branch unconditionally pressed
+                    // PressTargetFocus + PressTargetOfTarget every ATG.Update
+                    // iteration. After AH+AJ+AN has acquired the leader's
+                    // hostile target (one PressTargetFocus + PressTargetOfTarget
+                    // pair from FFG), subsequent ATG iterations should not need
+                    // to re-acquire — the assist's target IS the leader's
+                    // target and is hostile. Re-pressing the chain on every
+                    // iteration is wasteful keystroke spam and produces the
+                    // user-observed "increase in Target Focus / Target Focus
+                    // Target presses during the time the leader acquires a
+                    // target and before they pull it."
+                    //
+                    // Log-118 evidence:
+                    //   - 138 [PageUp] (TargetFocus) + 138 [F] (TargetOfTarget) presses
+                    //     in an 11-minute log.
+                    //   - 56 of those came from FFG's AH+AJ+AN one-shot
+                    //     (55 confirmed-hostile latches + 1 retry warning).
+                    //   - The remaining 82 came from this ATG else branch
+                    //     firing ~3–4 iterations per ATG.OnEnter (31 entries),
+                    //     each iteration re-pressing the chain.
+                    //
+                    // Worked example (02:33:01 burst, 5 PageUps in 1.5s):
+                    //   02:33:01:029 FFG AH+AJ+AN fires (1st PageUp+F)
+                    //   02:33:01:152 AJ latches hostile (guid=971418)
+                    //   02:33:01:299 Plan → ATG; ATG.Update begins iterating
+                    //   02:33:01:444 ATG iter #1 → PageUp+F (target already hostile)
+                    //   02:33:01:999 ATG iter #2 → PageUp+F (target STILL hostile)
+                    //   02:33:02:555 ATG iter #3 → PageUp+F (target STILL hostile)
+                    //   → 4 redundant PageUp+F pairs after the first acquisition.
+                    //
+                    // Skip the chain when the bot is verified to already be on
+                    // the leader's current target. "Hostile and present" is not
+                    // a sufficient gate — the bot's target may have drifted via
+                    // the Tab key press at the end of each iteration (Tab fires
+                    // TargetNearestTarget; if a closer hostile enters range it
+                    // can switch the bot off the leader's target). We need a
+                    // POSITIVE confirmation that the bot is on the leader's
+                    // current target before skipping the resync.
+                    //
+                    // The check uses three facts the assist can read locally:
+                    //   - bits.Target() && bits.Target_Hostile(): bot has a
+                    //     currently-hostile target.
+                    //   - bits.FocusTarget(): the focus (= leader) currently
+                    //     has a target. If FocusTarget is false, the leader's
+                    //     target was lost/cleared and we should resync.
+                    //   - playerReader.TargetGuid == playerReader.FocusTargetGuid:
+                    //     the bot's target guid matches the focus's target
+                    //     guid — i.e., the bot IS on the leader's target.
+                    //
+                    // If any of these fail, the focus chain fires to resync.
+                    // This is the same chain semantic as the original code,
+                    // just gated against a positive verification.
+                    //
+                    // Also handles the leader-retarget edge case: if the
+                    // leader switches target mid-ATG (e.g., the original mob
+                    // dies, leader pulls a new mob), FocusTargetGuid changes
+                    // immediately; the bot's stale TargetGuid no longer
+                    // matches, the gate fails, and the chain runs to re-sync
+                    // to the new target.
+                    //
+                    // PressApproach is always pressed — that's the
+                    // interact-key drive separate from targeting.
+                    bool botOnFocusTarget =
+                        bits.Target()
+                        && bits.Target_Hostile()
+                        && bits.FocusTarget()
+                        && playerReader.TargetGuid == playerReader.FocusTargetGuid
+                        && playerReader.TargetGuid != 0;
+                    if (!botOnFocusTarget)
+                    {
+                        input.PressTargetFocus();
+                        input.PressTargetOfTarget();
+                        wait.Update();
+                    }
                     navigation.RecordApproachPosition(playerReader.WorldPos);
                     input.PressApproach();
                     wait.Update();

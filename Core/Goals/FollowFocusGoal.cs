@@ -1399,7 +1399,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -5709,6 +5709,70 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             outcome = "no-assist-route-idx";
             return false;
+        }
+
+        // ── Fix CS (log-118 02:36:01:061 evidence) ──
+        // Honor CB's loop-aware index decision when constructing the span.
+        //
+        // closestIndex is Euclidean-nearest — it has no notion of loop
+        // topology. When the route loops back near the bot (the route's
+        // physical geometry has two arcs passing close together but at
+        // very different route indices), closestIndex picks the LOW-index
+        // arc by Euclidean nearness. If CB has already detected this and
+        // advanced _assistRouteIndex to the HIGH-index arc (the one
+        // aligned with leader's direction), closestIndex's pick contradicts
+        // CB and would walk the bot through the entire loop.
+        //
+        // GetNavigationTarget (route-walk path) returns route[_assistRouteIndex]
+        // as the navigation target. SetWaypointLoopGuarded passes this to
+        // TryPushRouteSpanForTarget. Inside, this function should respect the
+        // same loop-aware index that produced the target — not re-derive a
+        // contradictory one via raw Euclidean nearness.
+        //
+        // Use Math.Max so:
+        //   - assistIdx < 0 (no route-walk active): use closestIndex (no
+        //     loop-aware hint available, fall back to original behavior).
+        //   - assistIdx == closestIndex: no change.
+        //   - assistIdx > closestIndex (CB advanced past a loop): use
+        //     assistIdx, honoring CB's loop decision.
+        //   - assistIdx < closestIndex (bot moved past _assistRouteIndex
+        //     before the route-walking advance loop caught up): use
+        //     closestIndex — the bot is genuinely past _assistRouteIndex
+        //     in route order. Math.Max preserves both cases naturally.
+        //
+        // Worked example from log-118 02:36:01:061:
+        //   Bot at <-720.40, -4280.79>, leader 22.2y SW.
+        //   Route loops: route[3]=<-712.94, -4263.46> is ~22.6y from bot
+        //     (NE direction). route[24]=<-753.40, -4292.22> is ~34.9y
+        //     from bot (SW direction, aligned with leader).
+        //   closestIndex = FindNearestSafeRouteIndex → 3 (Euclidean-nearest)
+        //   _assistRouteIndex = 24 (CB advanced 3→24, cos=+0.78 vs leader)
+        //   leaderIdx = 27 (leader's published patrol waypoint route[27])
+        //
+        //   WITHOUT CS: resumeIndex=3, span=[route[3..27]]=25 waypoints.
+        //     Bot walks NE to route[3], then loops back SW through route[4..27]
+        //     ~360y total. (Observed: 02:36:01 → 02:36:55, 54-second detour.)
+        //
+        //   WITH CS: resumeIndex=24, span=[route[24..27]]=4 waypoints.
+        //     Bot walks SW directly (~31y to route[24], then 3 short steps
+        //     to route[27]). Total ~40y.
+        //
+        // The fix is read-only with respect to _assistRouteIndex (no
+        // assignment) — it only INFLUENCES closestIndex used downstream.
+        // The CB advance lives in the GetNavigationTarget initial-sync
+        // block and stays the source of truth for the route-walk state.
+        int assistIdx = _assistRouteIndex;
+        if (assistIdx > closestIndex && assistIdx < route.Length)
+        {
+            logger.LogInformation(
+                $"[FFG] [FIX-FIRE] CS: TryPushRouteSpanForTarget honoring " +
+                $"_assistRouteIndex={assistIdx} over closestIndex={closestIndex} " +
+                $"(Δ={assistIdx - closestIndex} indices). " +
+                $"closestIndex is Euclidean-nearest (loop-unaware); " +
+                $"_assistRouteIndex reflects CB's loop-aware advance. " +
+                $"Using _assistRouteIndex as the span start to honor CB's decision " +
+                $"and avoid the bot walking through a route U-turn / loop.");
+            closestIndex = assistIdx;
         }
 
         // Projection-aware advancement (mirrors FRG:1971-2030).
