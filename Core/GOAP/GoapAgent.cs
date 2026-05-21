@@ -900,10 +900,11 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.ismounted: " + mountHandler.IsMounted());
         logger.LogInformation("GoapKey.withinpullrange: " + playerReader.WithInPullRange());
         // Fix CW: diagnostic shows the smoothed value (matches UpdateWorldState).
-        // The raw WithInCombatRange() may differ briefly during the grace window.
+        // Fix CX: only AssistFocus has the hysteresis; PartyLeader shows raw.
         logger.LogInformation("GoapKey.incombatrange: " +
             (playerReader.WithInCombatRange() ||
-             (_lastIncombatrangeTrueUtc != DateTime.MinValue &&
+             (classConfig.Mode == Mode.AssistFocus &&
+              _lastIncombatrangeTrueUtc != DateTime.MinValue &&
               (DateTime.UtcNow - _lastIncombatrangeTrueUtc).TotalMilliseconds < IncombatrangeGraceMs)));
         logger.LogInformation("GoapKey.pulled: " + (bits.Combat() && bits.Target_Combat() && combatLog.ToPullCount() > 0));
         logger.LogInformation("GoapKey.isdead: " + b.Dead());
@@ -1013,22 +1014,58 @@ public sealed partial class GoapAgent : IDisposable
         // true, hold the published value true for IncombatrangeGraceMs even
         // if raw briefly returns false. Suppresses ATG↔FFG plan flicker at
         // the combat-range boundary.
+        //
+        // ── Fix CX (log-121 evidence: 15:20:24-26, 15:23:02-05) — mode gate ──
+        // CW was originally unconditional. Log-121 revealed a regression on
+        // the leader: 2 of 7 leader ATG→FRG transitions ran for 1992ms and
+        // 3111ms respectively (user-visible "leader started approaching then
+        // ran away"). Both correlated with CW fires within +31-46ms of the
+        // FRG start, sinceLast=30-31ms. The 5 other ATG→FRG transitions in
+        // the same log ran for only 47-155ms (sub-perception planner micro-
+        // flickers with no CW correlation).
+        //
+        // Root cause: the leader's planner is *designed* to handle rapid
+        // ATG↔PTG handoffs at the combat-range boundary via cost ordering
+        // (PTG cost 7 < ATG cost 8). When incombatrange flicks true briefly
+        // during this handoff, CW's 1500ms grace held it true, failing ATG's
+        // `incombatrange=false` precondition for the entire grace window.
+        // PTG also can't run if withinpullrange falls. The leader cascades
+        // to FRG (patrol) — i.e., walks AWAY from the mob — for the full
+        // grace window.
+        //
+        // The assist has no PTG path (its ATG → Combat transition depends on
+        // partymembercombat which fires only when someone enters combat), so
+        // the smoothing CW provides is what closes the gap. Smoothing the
+        // leader's signal breaks the leader's design.
+        //
+        // CX: only apply hysteresis in AssistFocus mode. PartyLeader (and any
+        // other mode) uses the raw WithInCombatRange() value directly.
         bool rawIncombatrange = playerReader.WithInCombatRange();
-        if (rawIncombatrange)
+        bool publishedIncombatrange;
+        if (classConfig.Mode == Mode.AssistFocus)
         {
-            _lastIncombatrangeTrueUtc = DateTime.UtcNow;
+            if (rawIncombatrange)
+            {
+                _lastIncombatrangeTrueUtc = DateTime.UtcNow;
+            }
+            bool withinIncombatrangeGrace =
+                _lastIncombatrangeTrueUtc != DateTime.MinValue &&
+                (DateTime.UtcNow - _lastIncombatrangeTrueUtc).TotalMilliseconds < IncombatrangeGraceMs;
+            publishedIncombatrange = rawIncombatrange || withinIncombatrangeGrace;
         }
-        bool withinIncombatrangeGrace =
-            _lastIncombatrangeTrueUtc != DateTime.MinValue &&
-            (DateTime.UtcNow - _lastIncombatrangeTrueUtc).TotalMilliseconds < IncombatrangeGraceMs;
-        bool publishedIncombatrange = rawIncombatrange || withinIncombatrangeGrace;
+        else
+        {
+            // Fix CX: leader (and other modes) use raw — no hysteresis.
+            publishedIncombatrange = rawIncombatrange;
+        }
         WorldState[GoapKey.incombatrange] = publishedIncombatrange;
 
         // Fix CW: one-shot log per grace activation. Fires when the hysteresis
         // is actually doing work (raw=false, but published=true via grace).
         // The flag resets when raw=true returns, so each new grace activation
-        // produces one log line.
-        if (publishedIncombatrange && !rawIncombatrange)
+        // produces one log line. Only fires in AssistFocus mode (Fix CX).
+        if (classConfig.Mode == Mode.AssistFocus &&
+            publishedIncombatrange && !rawIncombatrange)
         {
             if (!_incombatrangeGraceLogged)
             {
