@@ -1399,7 +1399,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -5806,6 +5806,145 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         int routeCount = leaderIdx - resumeIndex + 1;
         int totalLen = targetIsRouteWaypoint ? routeCount : routeCount + 1;
         Vector3 firstWp = route[resumeIndex];
+
+        // ── Fix CR (log-117 evidence) — malformed route span detection ──
+        //
+        // Symptom (user-reported in log-117):
+        //   #1 "assist moving backwards during leader approach"
+        //   #2 "assist moving backwards after combat"
+        //
+        // Concrete log-117 evidence (with directional vectors):
+        //
+        // Issue #1 — Combat 2 approach window (leader ATG 01:43:35:658 → Combat
+        //            01:43:44:504). Bot trajectory:
+        //   01:43:35:568  bot=<-715.67, -4184.08>
+        //   01:43:35:584  bot=<-715.63, -4183.97>  → POP → newWpTop=<-710.94, -4167.58>
+        //   01:43:36:975  bot=<-712.37, -4174.86>
+        //   01:43:37:607  bot=<-711.16, -4170.60>
+        //   01:43:39:445  bot=<-710.15, -4157.81>  → POP → newWpTop=<-719.05, -4179.69>
+        //                 (35:568 → 39:445: ΔY = +26.27y NORTH over 3.9s)
+        //   01:43:42:396  bot=<-716.36, -4169.88>
+        //                 (39:445 → 42:396: ΔY = -12.07y, ΔX = -6.21y SW reversal over 2.95s)
+        //
+        // Issue #2 — Post-Combat 2 window (Loot complete 01:43:50:685 → next combat
+        //            01:43:59:104). Bot trajectory:
+        //   01:43:51:815  bot=<-713.22, -4191.28>
+        //   01:43:55:334  bot=<-713.32, -4178.30>  (51:815 → 55:334: ΔY = +12.98y N over 3.5s)
+        //   01:43:56:325  bot=<-708.05, -4177.42>
+        //   01:43:57:452  bot=<-709.92, -4184.26>  (56:325 → 57:452: ΔY = -6.84y SOUTH reversal over 1.1s)
+        //
+        // Both reversals had the same triggering mechanism. Tracing the BE pushes:
+        //
+        //   01:43:34:149  BE push: [route[9..11]=3 + trailing <-719.77, -4183.91>]
+        //   01:43:35:569  BE push: [route[10..11]=2 + trailing <-718.75, -4182.68>]
+        //   01:43:36:975  BE push: [route[10..11]=2 + trailing <-719.05, -4179.69>]
+        //   01:43:42:395  BE push: [route[10..11]=2 + trailing <-717.81, -4176.73>]
+        //   (... post-combat 2 ...)
+        //   01:43:51:800  BE push: [route[9..11]=3 + trailing <-715.11, -4198.02>]
+        //   01:43:52:694  BE push: [route[9..11]=3 + trailing <-718.32, -4199.97>]
+        //   01:43:54:469  BE push: [route[10..11]=2 + trailing <-716.18, -4190.99>]
+        //   01:43:58:535  BE push: [route[10..11]=2 + trailing <-714.17, -4190.01>]
+        //
+        // In every case, route[10]=<-710.94, -4167.58> and route[11]=<-710.20, -4154.46>
+        // are NORTH of the trailing target (which tracks leader.WorldPos in
+        // PositionChase mode, hovering ~<-718, -4180> to <-718, -4200>). The route span
+        // walks the bot NORTH through the pre-validated waypoints, then the trailing
+        // forces a U-turn SOUTH to the leader. This is the observed reversal.
+        //
+        // ROOT CAUSE — stale leaderIdx cache from a brief 50ms FRG.Resume window:
+        //
+        //   At 01:43:20:761 the leader's FRG.Resume executed
+        //     leaderNavProvider.SetTargetWaypoint(<-710.19995, -4154.46, 0>)  // = route[11]
+        //   The leader's plan changed to ATG at 01:43:20:771 — 10 milliseconds later.
+        //   FRG.OnExit's ClearTargetWaypoint fires on the transition, but the assist's
+        //   250ms-cadence poller catches the brief HasTargetWaypoint=true window.
+        //   TryFindLeaderRouteIndex's primary path matches the published waypoint to
+        //   route[11] within 1.0y tolerance and initializes the cache:
+        //     [01:43:22:613] [ROUTE-WALK] Cache initialized: leaderIdx=11 at <-710.19995, -4154.46>.
+        //   The cached value persists for CachedLeaderRouteIdxMaxAgeSec (30s).
+        //
+        //   FRG.Resume's RefillWaypoints publishes the NEXT patrol target — not a
+        //   waypoint that reflects where the leader currently IS on the route. The
+        //   leader was at <-712.94, -4148.64> at FRG.Resume but published route[11]
+        //   at <-710.20, -4154.46> (a waypoint 8y ahead in the patrol direction).
+        //
+        //   The leader then immediately diverted south to engage combats:
+        //     Combat 1 fight area, Combat 1 loot, Combat 2 ATG at <-721.48, -4181.44>
+        //   leader.WorldPos at the combat 2 ATG anchor publication is 29.25y south of
+        //   route[11]. The leader's geographic position is at or near route[8]/route[9]
+        //   (the south end of this route segment), not route[11].
+        //
+        // Why Fix CC can't fix this: CC's geometric cache extension (lines 3716-3727)
+        // is strictly forward — `if (dNext < dCur) leaderIdx++; else break;`. For
+        // combat 2 with leader at <-721.48, -4181.44> and route[11]=<-710.20, -4154.46>
+        // (29.25y away), route[12] is even further north along the route (the route
+        // ascends through this segment). dNext > dCur → break → leaderIdx stays at 11.
+        // CC handles forward-stale caches (leader has moved past cached index) but
+        // not backward-stale caches (leader is geographically before cached index,
+        // typically when FRG briefly publishes a forward waypoint then immediately
+        // diverts to combat). Combat 4 in this same log shows CC working correctly
+        // for forward staleness: 11 → 16 → 19, advancing as leader progressed.
+        //
+        // Geometric fix: the route span [route[resumeIndex], …, route[leaderIdx],
+        // trailing] is only well-formed when the trailing target is geographically
+        // AT or PAST route[leaderIdx]. When the trailing target is closer to
+        // route[resumeIndex] than to route[leaderIdx], walking the span will take
+        // the bot away from the trailing, then it must come back — the observed
+        // "backwards" reversal.
+        //
+        // Verification of CR against this log's evidence (matches all pushes above):
+        //
+        //   Combat 2 first push (01:43:34:149): trailing=<-719.77, -4183.91>
+        //     trailing.dist(route[9]=<-714.97,-4180.76>)  = 5.74y      ← closer to START
+        //     trailing.dist(route[11]=<-710.20,-4154.46>) = 30.97y     ← farther from END
+        //     5.74 < 30.97 → BLOCK. (Caller uses SetSingleWaypoint to <-719.77, -4183.91>.)
+        //
+        //   Combat 2 third push (01:43:36:975): trailing=<-719.05, -4179.69>
+        //     trailing.dist(route[10]=<-710.94,-4167.58>) = 14.57y
+        //     trailing.dist(route[11]=<-710.20,-4154.46>) = 26.74y
+        //     14.57 < 26.74 → BLOCK.
+        //
+        //   Post-combat 2 first push (01:43:51:800): trailing=<-715.11, -4198.02>
+        //     trailing.dist(route[9])  = 17.26y
+        //     trailing.dist(route[11]) = 43.83y
+        //     17.26 < 43.83 → BLOCK.
+        //
+        //   Combat 4 first push (01:44:08:221): trailing=<-735.64, -4196.81>, range
+        //     route[17..19]. CC successfully advanced cache 11→16→19 because leader
+        //     was forward-stale (geometrically past route[16]). leader.WorldPos was
+        //     closer to route[19] than to route[16]. trailing tracks leader.WorldPos
+        //     in PositionChase mode, so trailing is closest to route[19] (end of
+        //     span). trailing.dist(route[17]) > trailing.dist(route[19]) → CR does
+        //     NOT block, span proceeds normally. Healthy case preserved.
+        //
+        // The guard `!targetIsRouteWaypoint` ensures CR doesn't fire for pure route
+        // spans (target equals a route waypoint, no trailing appended) — those are
+        // covered by the existing Fix BK suppression of the trailing. Without
+        // trailing there's no malformed-trailing concern by construction.
+        //
+        // Returning false → SetWaypointLoopGuarded (line 5933) calls
+        // navigation.SetSingleWaypoint(target). This OVERWRITES any in-flight
+        // navigation queue with a single direct waypoint to the trailing target.
+        // The pather computes a route directly to the leader's body. The previously-
+        // pushed malformed span (if still being walked) is replaced — important
+        // because the duplicate-suppression check below would otherwise let an
+        // existing malformed span continue to be walked.
+        if (!targetIsRouteWaypoint)
+        {
+            float trailingToStart = target.WorldDistanceXYTo(route[resumeIndex]);
+            float trailingToEnd = target.WorldDistanceXYTo(route[leaderIdx]);
+            if (trailingToStart < trailingToEnd)
+            {
+                outcome = $"malformed-span (trailing target closer to route[{resumeIndex}]={trailingToStart:0.0}y than route[{leaderIdx}]={trailingToEnd:0.0}y — caller should use SetSingleWaypoint)";
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] CR: malformed route span suppressed — " +
+                    $"trailing target {target} is closer to route[{resumeIndex}]={route[resumeIndex]} " +
+                    $"({trailingToStart:0.0}y) than to route[{leaderIdx}]={route[leaderIdx]} " +
+                    $"({trailingToEnd:0.0}y). Span would walk bot away from target. " +
+                    $"Falling back to SetSingleWaypoint.");
+                return false;
+            }
+        }
 
         // Duplicate suppression (mirrors FRG:1273-1279 + line 1936 gate).
         // See header comment "DUPLICATE SUPPRESSION" for rationale.
