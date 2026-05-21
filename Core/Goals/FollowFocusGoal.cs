@@ -1399,7 +1399,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -1973,6 +1973,47 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         bool curInBlacklistArea = navigation.IsInBlacklistArea();
                         bool curForcedFollow    = chatReader.ForcedFollow;
                         bool curBitsCombat      = bits.Combat();
+
+                        // ── Fix CL (log-113 14× AM stale-latch warnings, 17.4s worst case) ──
+                        //
+                        // Log-113 showed Fix AJ latching successfully but ATG NOT being
+                        // selected for 5 of 7 pre-combat windows. The AM warning displayed
+                        // all 8 of ATG.AssistFocus's listed preconditions as met, but two
+                        // gating values are NOT logged: evadeRecovery (an ATG precondition
+                        // directly) and partyEngaging (the GoapAgent-computed derived key
+                        // that ATG actually reads). Without these values it's impossible to
+                        // determine from the log which precondition the planner sees as
+                        // false. The original AM warning also HARDCODED "HasApproachStart=
+                        // true (still)" — a string literal, not a fresh read — so we
+                        // couldn't tell whether the leader's polled-state HasApproachStart
+                        // had silently flipped between latch and warn moments. Fix CL
+                        // closes all three gaps:
+                        //
+                        //   1. Read curHasApproachStart fresh from approachLeader (the
+                        //      same LeaderState reference used by leaderAnchorActive at the
+                        //      top of this block, so by construction it's non-null here).
+                        //   2. Read curEvadeRecoveryActive from assistStatusProvider
+                        //      (mirrored from GoapAgent's GoapKey.evadeRecovery broadcast).
+                        //   3. Compute curPartyEngaging the same way GoapAgent does:
+                        //      bits.Combat() || bits.Focus_Combat() || (AssistFocus mode &&
+                        //      HasApproachStart). Mode is implicit — FFG only registers
+                        //      Fix AJ/AM in AssistFocus mode (see this method's outer gating).
+                        //
+                        // After Fix CL, the AM warning's "ATG.AssistFocus requires:" tuple
+                        // can be checked element-by-element against the displayed CURRENT
+                        // values. The first one whose value disagrees with ATG's expected
+                        // is the blocker.
+                        //
+                        // Note: CurrentGoal is intentionally not logged. FFG.Update only
+                        // runs when the planner's CurrentGoal IS FollowFocusGoal — logging
+                        // "currentGoal=FollowFocusGoal" would be tautological.
+                        bool curHasApproachStart =
+                            approachLeader != null && approachLeader.HasApproachStart;
+                        bool curEvadeRecoveryActive = assistStatusProvider.EvadeRecoveryActive;
+                        bool curFocusCombat        = bits.Focus_Combat();
+                        bool curPartyEngaging      =
+                            curBitsCombat || curFocusCombat || curHasApproachStart;
+
                         logger.LogWarning(
                             $"[FFG] [FIX-FIRE] AM: STALE LATCH WARNING — Fix AJ latched " +
                             $"{msSinceLatch:0}ms ago (> {StaleLatchWarnAfterMs:0}ms threshold) " +
@@ -1983,11 +2024,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             $"incombatrange={curInCombatRange}, " +
                             $"inblacklistarea={curInBlacklistArea}, " +
                             $"forcedfollow={curForcedFollow}, " +
-                            $"HasApproachStart=true (still), bits.Combat={curBitsCombat}, " +
+                            $"HasApproachStart={curHasApproachStart} (CL: fresh read), " +
+                            $"bits.Combat={curBitsCombat}, bits.Focus_Combat={curFocusCombat}, " +
+                            $"partyEngaging={curPartyEngaging} (CL: bits.Combat || bits.Focus_Combat || HasApproachStart), " +
+                            $"evadeRecovery={curEvadeRecoveryActive} (CL: from assistStatusProvider), " +
                             $"currentTargetGuid={playerReader.TargetGuid}. " +
-                            $"One of the above values is blocking ATG (cost 8) from winning " +
-                            $"the plan over FFG (cost 19). Next warning in " +
-                            $"{StaleLatchWarningCooldownMs:0}ms if condition persists.");
+                            $"ATG.AssistFocus requires: partyEngaging=true, forcedfollow=false, " +
+                            $"hastarget=true, targetisalive=true, targethostile=true, " +
+                            $"incombatrange=false, inblacklistarea=false, evadeRecovery=false. " +
+                            $"Compare element-by-element: the first precondition above whose " +
+                            $"value disagrees with ATG's expected is the blocker. " +
+                            $"Next warning in {StaleLatchWarningCooldownMs:0}ms if condition persists.");
                     }
                 }
             }
@@ -6217,6 +6264,53 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         if (dist < FollowingMaxYards)
         {
+            // ── Fix CK (log-113 21:53:24:680 evidence) ──
+            // Extend Fix CJ's Idle suppression to this Navigation event handler.
+            //
+            // Evidence: post-combat #2 at 21:53:22:707 FFG.OnEnter, assist 0.6y
+            // from leader (co-located). At 21:53:23:956 leader started approaching
+            // mob, mode → Anchor (target 5.1y west). At 21:53:24:679 CJ correctly
+            // suppressed the FFG.Update Idle entry path (line 2247) at dist=4.0y
+            // with ffgIdleGuardActive=True (1972ms < 3000ms). Mode then transitioned
+            // Anchor → PositionChase (anchor co-located 2.5y < 3.6y POP_DIST).
+            // The new PositionChase target was 2.85y from bot — within POP_DIST.
+            // Navigation popped it immediately, fired OnDestinationReached, and
+            // THIS BRANCH entered Idle (dist=4.0y < 7y) — bypassing CJ entirely
+            // because CJ only guards line 2247 in UpdateNavigatingToLeader.
+            //
+            // Consequence: bot sat Idle for 1.6s (21:53:24:680 → 21:53:26:270)
+            // while leader sprinted NW to mob. Bot exited Idle 15y away. BE
+            // pushed a 5-waypoint route span (route[7..11]) heading N along the
+            // route while leader was NW off-route — bot walked N for 4s, closing
+            // only 9y to leader instead of 25y of direct N→NW travel. Combat
+            // started before bot caught up. User-visible: "turning and running
+            // away after combat" (the brief Anchor-direction turn + Idle pause +
+            // route N walk visible as direction changes).
+            //
+            // Fix: apply the same suppressIdle = (HasApproachStart || ffgIdleGuardActive)
+            // gate Fix CJ uses. When suppressed, refresh the waypoint to leader's
+            // body so the bot continues tracking via PositionChase. The bot
+            // remains close to the leader during the approach phase; when the
+            // leader engages combat, the bot is right there.
+            bool ckGuardActive =
+                (DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds < IdleGuardAfterEnterMs;
+            bool ckSuppressIdle = currentLeader.HasApproachStart || ckGuardActive;
+            if (ckSuppressIdle)
+            {
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] CK: OnDestinationReached Idle suppressed at " +
+                    $"dist={dist:0.0}y (threshold=FollowingMaxYards={FollowingMaxYards:0.0}y) — " +
+                    $"HasApproachStart={currentLeader.HasApproachStart}, " +
+                    $"ffgIdleGuardActive={ckGuardActive} " +
+                    $"({(DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds:0}ms since OnEnter " +
+                    $"vs {IdleGuardAfterEnterMs:0}ms guard). Refreshing waypoint to leader's " +
+                    $"body to keep navigation active during approach phase.");
+                Vector3 ckRefreshTarget = GetNavigationTarget(currentLeader);
+                _lastNavigatedToLeaderWorldPos = ckRefreshTarget;
+                SetWaypointLoopGuarded(ckRefreshTarget);
+                return;
+            }
+
             navigation.Stop();
             input.StopForward(true);
             ResetNavState();
@@ -6275,6 +6369,30 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // too handles the SkipBlacklistedWaypoints path (Navigation line 786)
             // where wayPoints drops to 0 without going through
             // TryConsumeReachedWaypoint — OnDestinationReached fires alone.
+            //
+            // Fix CK extension: dead-band co-located also bypasses CJ. Apply the
+            // same suppressIdle gate. When suppressed, force-refresh by pushing
+            // the target one more time (refreshTarget is already known
+            // co-located, but waypoint may yet pop in different way once the
+            // leader's position has actually moved). Better to spin briefly here
+            // than to enter Idle and miss the approach.
+            bool ck2GuardActive =
+                (DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds < IdleGuardAfterEnterMs;
+            bool ck2SuppressIdle = currentLeader.HasApproachStart || ck2GuardActive;
+            if (ck2SuppressIdle)
+            {
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] CK: OnDestinationReached dead-band-co-located Idle " +
+                    $"suppressed (leader={dist:0.0}y, refreshDist={refreshDist:0.0}y) — " +
+                    $"HasApproachStart={currentLeader.HasApproachStart}, " +
+                    $"ffgIdleGuardActive={ck2GuardActive}. Re-pushing refresh target to keep " +
+                    $"navigation engaged; if the target is genuinely unreachable the leader " +
+                    $"will move next tick and free us.");
+                _lastNavigatedToLeaderWorldPos = refreshTarget;
+                SetWaypointLoopGuarded(refreshTarget);
+                return;
+            }
+
             logger.LogInformation(
                 $"[FFG] Destination reached in dead-band (leader={dist:0.0}y, target co-located {refreshDist:0.0}y) — entering Idle.");
             _rendezvousConfirmed = true;
@@ -6479,6 +6597,35 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // movement-key log lines on the assist during the drift
             // window, yet the bot moved tens of yards forward — the
             // Forward key was held continuously the whole time.
+            //
+            // ── Fix CK (log-113 21:53:24:680 evidence — same family) ──
+            // Apply the same suppressIdle gate as CJ guards line 2247 with.
+            // OnWayPointReached fires from Navigation when an intermediate
+            // route waypoint is popped; if dist<FollowingMaxYards we'd Idle
+            // here. During post-combat approach, the next ATG anchor is often
+            // within FollowingMaxYards of the post-loot rendezvous position,
+            // so the bot pops the anchor immediately and would Idle — exactly
+            // what we saw at 21:53:24:680 via the parallel OnDestinationReached
+            // path. Same fix applied here for symmetry.
+            bool ck3GuardActive =
+                (DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds < IdleGuardAfterEnterMs;
+            bool ck3SuppressIdle = leader.HasApproachStart || ck3GuardActive;
+            if (ck3SuppressIdle)
+            {
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] CK: OnWayPointReached Idle suppressed at " +
+                    $"dist={dist:0.0}y (threshold=FollowingMaxYards={FollowingMaxYards:0.0}y) — " +
+                    $"HasApproachStart={leader.HasApproachStart}, " +
+                    $"ffgIdleGuardActive={ck3GuardActive} " +
+                    $"({(DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds:0}ms since OnEnter " +
+                    $"vs {IdleGuardAfterEnterMs:0}ms guard). Refreshing waypoint to leader's " +
+                    $"body to keep navigation active during approach phase.");
+                Vector3 ck3RefreshTarget = GetNavigationTarget(leader);
+                _lastNavigatedToLeaderWorldPos = ck3RefreshTarget;
+                SetWaypointLoopGuarded(ck3RefreshTarget);
+                return;
+            }
+
             navigation.Stop();
             if (input.IsKeyDown(input.ForwardKey))
                 input.StopForward(true);
@@ -6556,6 +6703,31 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // refreshDist ≈ 0.7y < POP_DIST). Bot drifted east 37.7y
             // in 5.85s in the worst case (11:48:19:813 → 11:48:25:646)
             // before FFG re-engaged.
+            //
+            // ── Fix CK (log-113 21:53:24:680 evidence — same family) ──
+            // Even after _rendezvousConfirmed=true above, idling during the
+            // approach phase is wrong: the leader is about to (or has just)
+            // started ATG and the bot needs to track the body. Apply CJ's
+            // suppressIdle gate. Note: when suppressed we DO NOT roll back
+            // _rendezvousConfirmed — once the geometric "as-close-as-possible"
+            // determination has been made it remains valid even while we keep
+            // the nav system warm. The next refresh on a moved leader will
+            // push a real waypoint; until then the navigation is idempotent.
+            bool ck4GuardActive =
+                (DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds < IdleGuardAfterEnterMs;
+            bool ck4SuppressIdle = leader.HasApproachStart || ck4GuardActive;
+            if (ck4SuppressIdle)
+            {
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] CK: OnWayPointReached dead-band-co-located Idle " +
+                    $"suppressed (leader={dist:0.0}y, refreshDist={refreshDist:0.0}y) — " +
+                    $"HasApproachStart={leader.HasApproachStart}, " +
+                    $"ffgIdleGuardActive={ck4GuardActive}. _rendezvousConfirmed left true; " +
+                    $"navigation kept active so the next leader-position-poll change can " +
+                    $"refresh the waypoint without going through Idle.");
+                return;
+            }
+
             navigation.Stop();
             if (input.IsKeyDown(input.ForwardKey))
                 input.StopForward(true);
