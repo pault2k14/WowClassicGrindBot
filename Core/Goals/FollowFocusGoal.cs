@@ -1337,7 +1337,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -4568,10 +4568,78 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                                         float cdy = candidate.Y - botPosCB.Y;
                                         float clen = MathF.Sqrt(cdx * cdx + cdy * cdy);
 
-                                        // Hard stop if too far from bot —
-                                        // sticking near syncIdx is better
-                                        // than picking a 50+ y target.
-                                        if (clen > CBMaxScanDistanceYards) break;
+                                        // ── Fix CH (log-111 19:30:29 evidence) ──
+                                        // Skip candidates too far from bot but
+                                        // KEEP SCANNING (was `break` before
+                                        // Fix CH, which exited the scan at the
+                                        // first too-far waypoint).
+                                        //
+                                        // The original `break` protected against
+                                        // picking 50+ y targets in normal patrol
+                                        // (the design comment said "sticking
+                                        // near syncIdx is better than picking
+                                        // a 50+ y target"). But in routes with
+                                        // LOOPS, the route temporarily extends
+                                        // FAR from the bot before wrapping back
+                                        // close to it — and the `break` exited
+                                        // the scan before reaching the wrap-back
+                                        // waypoints that are physically NEAR the
+                                        // bot AND aligned with leader direction.
+                                        //
+                                        // Log-111 worked example at 19:30:29:481:
+                                        //   bot=<-731.12,-4276.92>, leader~<-749,-4296>
+                                        //   syncIdx=3 (route[3]=<-712.94,-4263.46>,
+                                        //     22.6y from bot, cos=-0.98 against
+                                        //     leader direction — heads NE while
+                                        //     leader is SW)
+                                        //   Scan i=4: route[4] at 29.7y, cos=-0.91
+                                        //     (marginal improvement, < +0.3 margin
+                                        //     vs -0.98, no bestIdx update)
+                                        //   Scan i=5: route[5] at 42.5y > 35y
+                                        //     → OLD BEHAVIOR: break, exit scan
+                                        //                    with bestIdx=3
+                                        //   Routes 22-24 (the loop wrap-back) are
+                                        //   22-27y from bot AND cos=+0.09 to +0.97
+                                        //   (well-aligned with leader). They were
+                                        //   never seen by the scan.
+                                        //
+                                        //   → NEW BEHAVIOR: continue past route[5]
+                                        //     and onwards. Eventually reach route[22]
+                                        //     at 22.8y (within 35y), cos=+0.09; route[23]
+                                        //     at 23.5y, cos=+0.77; route[24] at 27.0y,
+                                        //     cos=+0.98. Each successive improvement
+                                        //     update bestIdx via the margin check.
+                                        //     Final bestIdx=24 (within 6y of leader).
+                                        //     Bot walks 27y to route[24], leader at
+                                        //     route[25] — trailing-by-one rendezvous.
+                                        //
+                                        //   Old behavior had the bot walking
+                                        //   route[3] → 4 → 5 → ... → 22 (a 19-waypoint,
+                                        //   ~200y loop) to reach a leader 28y direct
+                                        //   distance away. ~47s elapsed.
+                                        //
+                                        // Safety: the `ccos > bestCos +
+                                        // CBImprovementMargin` check at the
+                                        // bottom of the loop still prevents
+                                        // picking a marginal candidate. To
+                                        // override bestIdx, a candidate must
+                                        // improve cos by ≥0.3. Picking a 50y
+                                        // target requires that target to be
+                                        // significantly better-aligned than
+                                        // anything closer — which is the case
+                                        // ONLY in loop-back scenarios. In
+                                        // normal patrol, route[N+1] has the
+                                        // best alignment already (route goes
+                                        // toward leader), so the margin
+                                        // prevents far-target picks.
+                                        //
+                                        // Iteration cap: rendezvousCap bounds
+                                        // the upper limit naturally
+                                        // (rendezvousCap ≤ route.Length-1, and
+                                        // for 146-waypoint routes the worst
+                                        // case is ~146 distance computations,
+                                        // negligible).
+                                        if (clen > CBMaxScanDistanceYards) continue;
                                         if (clen < 0.001f) continue;
 
                                         float ccos = (cdx * leaderDx + cdy * leaderDy)
