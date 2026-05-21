@@ -63,9 +63,60 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     // to arrive. Cap at FarTimeoutSec to prevent indefinite leader freezing when the assist
     // is unreachable.
     // See HANDOFF Fix BN/BS for the full log evidence trail.
-    private const float AnchorSyncReadyYards = 12.0f;
-    private const double NearTimeoutSec = 1.5;   // Fix BS: assist within 12y at OnEnter
-    private const double MidTimeoutSec  = 4.0;   // Fix BS: 12-30y at OnEnter
+    //
+    // ── Fix CI (log-112 20:36:55 evidence) — tighten BN/BS proximity gate ──
+    //
+    // User complaint: "On the last combat I noticed that the assist wasn't anywhere
+    // near the leader when the leader was engaging the mob. We need to be able to
+    // get closer to the approach before the leader engages the mob."
+    //
+    // Evidence (log-112): on the LAST 3 ATG events, BN/BS completed with the assist
+    // 10.2y, 10.3y, and 10.7y from the anchor — at the EDGE of the 12y threshold.
+    // The leader proceeded immediately with the interact approach (BN/BS check
+    // passed in ~30ms because distance ≤ threshold). During the leader's 5-second
+    // run to the mob (~22y), the assist's mode-transition lag (~1.2s from
+    // HasApproachStart polling) meant the assist spent ~1 second in the wrong mode
+    // (PositionChase chasing the leader's body) before transitioning to Anchor —
+    // by which time HasApproachStart was about to clear (ATG → Pull Target at
+    // 20:36:57:411). Net effect: assist permanently lagged 8-10y behind leader
+    // throughout the engagement. At combat start (20:37:00:746), the assist was
+    // 9.8y from the leader — at the EDGE of healing/spell range.
+    //
+    // Old behavior (AnchorSyncReadyYards=12y, NearTimeoutSec=1.5s):
+    //   distToAnchor=10.3y ≤ 12y → BN/BS passes IMMEDIATELY (~30ms)
+    //   → Leader proceeds with assist still in PositionChase mode at 10.3y
+    //   → 1.2s mode-transition lag wasted while leader sprints to mob
+    //   → Final gap at engagement: 9.8y
+    //
+    // New behavior (AnchorSyncReadyYards=7y, NearTimeoutSec=2.5s):
+    //   distToAnchor=10.3y > 7y → BN/BS WAITS
+    //   → ~1.2s later assist mode-transitions to Anchor, starts navigating
+    //   → After ~2.0s total, assist is within 7y of anchor → BN/BS passes
+    //   → Leader proceeds with assist at ~5-7y (already in Anchor mode)
+    //   → Final gap at engagement: ~5-7y
+    //
+    // Why 7y? Matches FFG's "Reached follow position" threshold — the assist's
+    // natural idle distance from the leader. Below this, the assist is essentially
+    // adjacent. Above this, the assist is still in Following but visibly behind.
+    //
+    // Why bump NearTimeoutSec to 2.5s? The assist needs time to:
+    //   1. Detect HasApproachStart=true (250ms-1s polling lag)
+    //   2. Mode-transition Idle/RouteWalk → Anchor (~1 FFG tick)
+    //   3. Navigate from current pos to within 7y of anchor (~0.7-1.1s at run speed)
+    // Total ~1.5-2.0s. 2.5s gives 25% headroom for terrain/path quirks.
+    //
+    // Trade-off: ~0.5-1.5s extra wait per ATG (when assist starts at 8-12y from
+    // anchor). Worth it for the user's stated goal: assist closer at engagement.
+    // For cases where assist is ALREADY close (≤7y, common — see log-112 data:
+    // 2.5y, 2.6y, 4.7y, 5.3y, 6.2y), BN/BS still passes immediately.
+    //
+    // Mid/Far timeouts unchanged: those cover 12-30y and 30+y starts (rare,
+    // typically only during long catch-ups), and the existing 4s/6s already
+    // allows ample closing time. Tightening their proximity gate also benefits
+    // those cases (assist must reach 7y, not just 12y, before leader proceeds).
+    private const float AnchorSyncReadyYards = 7.0f;    // Fix CI: was 12.0f
+    private const double NearTimeoutSec = 2.5;   // Fix CI: was 1.5s. Applies when distAtArm ≤ AnchorSyncReadyYards (≤7y) at OnEnter
+    private const double MidTimeoutSec  = 4.0;   // Fix BS: 7-30y at OnEnter (was 12-30y; bucket boundary follows AnchorSyncReadyYards via Fix CI)
     private const double FarTimeoutSec  = 6.0;   // Fix BS: 30y+ at OnEnter (cap)
     private const float MidDistanceCutoffYards = 30.0f;  // Fix BS: boundary near→mid
 

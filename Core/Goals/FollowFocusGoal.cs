@@ -418,6 +418,62 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private DateTime _lastHasApproachStartUtc = DateTime.MinValue;  // Fix BU: refreshed each tick HasApproachStart=true
     private Vector3 _lastAnchorTarget;  // anchor coords cached for hysteresis return value
 
+    // ── Fix CJ (log-112 20:36:55 evidence) — Idle-entry guard after FFG.OnEnter ──
+    //
+    // User complaint: "the assist was sitting in place while the leader was
+    // approaching the mob and didn't move until they actually went into combat"
+    //
+    // Evidence (log-112, last combat at 20:37:00:746):
+    //   20:36:53:554  FFG.OnEnter (post-combat, leader 22.8y away → NavigatingToLeader)
+    //   20:36:55:826  Leader ATG.OnEnter (target 952768)
+    //   20:36:55:887  Leader publishes approach-start anchor
+    //   20:36:55:990  *** Assist: "Reached follow position (dist=6.9y) — entering Idle" ***
+    //                  (only 164ms after leader's ATG.OnEnter; the leader has JUST
+    //                  started the interact approach but the assist sees stale leader
+    //                  position from the previous poll cycle, ~250-500ms older)
+    //   20:36:55:990 → 20:36:57:055  *** 1.07s of assist Idle ***
+    //                  Leader is moving east toward mob via interact-key (~4y/s).
+    //                  Assist sees HasApproachStart=true once polling propagates.
+    //   20:36:57:055  "Leader resumed patrol/started approaching ...
+    //                  starting navigation immediately to match (dist=10.5y)"
+    //                  Gap has grown from 6.9y → 10.5y during the idle period.
+    //   20:37:00:746  Combat begins. Assist 9.8y from leader, never fully catches up.
+    //
+    // Root cause: the assist's polling latency for leader.HasApproachStart is
+    // ~250ms-1s. In Combat-3 (log-112), the assist crossed the Idle threshold
+    // (dist < 7y) in the same poll cycle the leader was publishing the ATG
+    // anchor. The assist's view of the leader's state was one poll old —
+    // HasApproachStart still false — so the Idle entry check passed. The leader
+    // then accelerated toward the mob while the assist sat still for ~1s
+    // waiting for the next poll cycle to deliver HasApproachStart=true.
+    //
+    // The existing leaderStartedApproaching detection in UpdateIdle (line ~2062)
+    // DOES catch the transition once polling propagates, but by then 0.5-1.5s
+    // of idle has already elapsed and the gap has grown by 3-5y. The user sees
+    // this visually as the assist "sitting in place" while the leader moves.
+    //
+    // Fix CJ: don't enter Idle in the first IdleGuardAfterEnterMs (3000ms)
+    // after FFG.OnEnter. Post-combat FFG.OnEnter is followed within ~1-3s by
+    // the leader's next ATG (the usual pull cadence). During this 3s guard,
+    // the assist stays NavigatingToLeader regardless of distance — the bot
+    // tracks the leader's body via PositionChase mode and is poised to react
+    // (mode-switch to Anchor) the moment HasApproachStart=true is observed
+    // via GetNavigationTarget, with no Idle exit overhead.
+    //
+    // After 3s elapsed (no ATG started yet), the bot is allowed to Idle
+    // normally. If the leader's ATG happens later, the existing
+    // leaderStartedApproaching detection in UpdateIdle handles it.
+    //
+    // Why 3s? The post-combat → ATG transition typically takes 1-3s:
+    //   - Loot/ConsumeCorpse (~1-2s)
+    //   - Brief Follow Route patrol (~0.5-1s)
+    //   - ATG.OnEnter (next mob found)
+    // 3s covers the typical case. Longer windows (e.g. 5s) start to feel like
+    // "assist isn't relaxing properly" when the leader is genuinely paused.
+    private const int IdleGuardAfterEnterMs = 3000;  // Fix CJ
+    private DateTime _ffgEnterTimeUtc = DateTime.MinValue;  // Fix CJ: set in OnEnter, used to gate Idle entry
+    private DateTime _lastFixCJSuppressLogUtc = DateTime.MinValue;  // Fix CJ: throttle suppression diagnostic to ≤2 Hz
+
     // Fix 33 (log-53: 1000 "Position-chase: standard target ... within 6.0y
     // of assist's blacklist; projected toward assist to ..." log lines in
     // ~100 s, ~10 Hz steady state and ~60 Hz during CantFollow flap):
@@ -1238,6 +1294,12 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         //   All other fix-firing rates unchanged from log-84 baseline
         navigation.LoadRoute();
 
+        // ── Fix CJ (log-112 evidence) ──
+        // Record OnEnter time for the Idle-entry guard. See _ffgEnterTimeUtc
+        // declaration (~line 423) and the Idle entry check (~line 2247) for
+        // the full rationale.
+        _ffgEnterTimeUtc = DateTime.UtcNow;
+
         // ── Route-walking migration: Turn 2 ──
         // Reset waypoint index so the first RouteWalk-engaged tick will
         // resync from the assist's current position. See _assistRouteIndex
@@ -1337,7 +1399,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -2243,8 +2305,24 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
         float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
 
+        // ── Fix CJ (log-112 evidence) ──
+        // Suppress Idle entry in two cases:
+        //   (a) leader.HasApproachStart=true — the leader is already in ATG and
+        //       about to sprint to the mob; the assist must stay engaged to
+        //       follow without lag.
+        //   (b) within IdleGuardAfterEnterMs (3000ms) of FFG.OnEnter — covers
+        //       the polling-lag race where leader's HasApproachStart=true is
+        //       on the way but not yet observed. The post-combat OnEnter is
+        //       followed within 1-3s by the next ATG in the typical pull
+        //       cadence; entering Idle in this window strands the assist for
+        //       ~1s while polling delivers the ATG signal.
+        // See _ffgEnterTimeUtc and IdleGuardAfterEnterMs declarations (~line 423)
+        // for full evidence and design rationale.
+        bool ffgIdleGuardActive = (DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds < IdleGuardAfterEnterMs;
+        bool suppressIdle = leader.HasApproachStart || ffgIdleGuardActive;
+
         // Within FollowingMaxYards → transition to Idle, post Following.
-        if (dist < FollowingMaxYards && !navigation.IsApproachEscapeActive)
+        if (dist < FollowingMaxYards && !navigation.IsApproachEscapeActive && !suppressIdle)
         {
             logger.LogInformation(
                 $"[FFG] Reached follow position (dist={dist:0.0}y < {FollowingMaxYards}y) — entering Idle.");
@@ -2255,6 +2333,28 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             assistStatusProvider.CurrentStatus = BotStatus.Following;
             assistStatusProvider.CantFollow = false;
             return;
+        }
+
+        // ── Fix CJ diagnostic ── log when we would have Idle'd but were suppressed.
+        // Bounded by the natural cadence (fires only once per crossing of < 7y).
+        if (dist < FollowingMaxYards && !navigation.IsApproachEscapeActive && suppressIdle)
+        {
+            // Throttle: don't log more than once per 500ms.
+            DateTime cjNow = DateTime.UtcNow;
+            if ((cjNow - _lastFixCJSuppressLogUtc).TotalMilliseconds > 500)
+            {
+                _lastFixCJSuppressLogUtc = cjNow;
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] CJ: Idle entry suppressed at dist={dist:0.0}y " +
+                    $"(threshold=FollowingMaxYards={FollowingMaxYards:0.0}y) — " +
+                    $"HasApproachStart={leader.HasApproachStart}, " +
+                    $"ffgIdleGuardActive={ffgIdleGuardActive} " +
+                    $"({(DateTime.UtcNow - _ffgEnterTimeUtc).TotalMilliseconds:0}ms since OnEnter < " +
+                    $"{IdleGuardAfterEnterMs}ms guard). " +
+                    $"Staying NavigatingToLeader to avoid the 'sit in place while leader sprints to mob' " +
+                    $"pattern. PositionChase mode will track the leader's body and switch to Anchor mode " +
+                    $"as soon as HasApproachStart is observed.");
+            }
         }
 
         // Within NavigatingExitYards (10y) — report Following so the leader knows
