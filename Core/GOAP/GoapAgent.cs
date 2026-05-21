@@ -64,6 +64,61 @@ public sealed partial class GoapAgent : IDisposable
 
     private bool _evadeLeaderWaiting;
 
+    // ── Fix CW (log-120 evidence: 14:42:52→53, 14:43:09, 14:44:56-14:45:17) ──
+    //
+    // incombatrange (WorldState key, = playerReader.WithInCombatRange()) is read
+    // by ATG.AssistFocus as a precondition: ATG.AssistFocus requires
+    // `incombatrange=false` (i.e. "only approach if not yet in range"). When
+    // the bot's distance to its target hovers around the spell/melee-range
+    // threshold, server-tick wobble and small navigation steps cause
+    // WithInCombatRange() to toggle every 200-500ms.
+    //
+    // Each toggle flips the planner's selection:
+    //   incombatrange=true  → ATG fails → planner picks FFG (next selectable)
+    //   incombatrange=false → ATG passes → ATG selected
+    //
+    // Result: sub-second ATG↔FFG plan flicker every time the bot is at the
+    // edge of combat range. Visible in log-120 as the user's complaints:
+    //   #1 turning during approach (entering range → flick → FFG turn-aside)
+    //   #2 turning after combat (next approach phase, same mechanism)
+    //   #3 running back and forth before last combat (leader stuck, bot at
+    //      edge of range for 21+ seconds, 10 flip pairs observed)
+    //
+    // Evidence: 18 of 18 AM stale-latch warnings (100%) show
+    // `incombatrange=True` as the failing precondition. HasApproachStart=true,
+    // partyEngaging=true throughout (CV doing its job correctly), only the
+    // incombatrange precondition is flickering.
+    //
+    // Fix: sticky-to-true hysteresis at the WorldState publish site. Once
+    // WithInCombatRange() returns true, hold the published value true for
+    // IncombatrangeGraceMs even if raw briefly returns false. Raw must stay
+    // false past the grace before published can fall.
+    //
+    // Why sticky-to-TRUE (not -to-false): once the bot has reached combat
+    // range, it should commit to either Combat (if party combat starts) or
+    // FFG-navigate-to-leader-and-wait. Flipping back to "approach" makes the
+    // bot press interact again, pushing it through the range threshold and
+    // sustaining the oscillation.
+    //
+    // Why 1500ms: observed flicker cadence is 200-500ms; window must be
+    // longer than that to suppress. 1500ms gives 3× margin while staying
+    // short enough that a genuine "moved well out of range" (e.g. retreated
+    // 10y after combat) clears within 1.5s.
+    //
+    // Consumer impact (audited):
+    //   • ATG.AssistFocus precondition incombatrange=false: fails sooner
+    //     once in range, stops flickering (intended).
+    //   • CombatGoal precondition incombatrange=true: passes more readily
+    //     near range (slight improvement, faster combat entry).
+    //   • ATG effect incombatrange=true: unchanged (state projection only).
+    //   • PartyMemberInCombat / PartyLeaderInCombat at GoapAgent.cs:1387
+    //     and 1512: UNAFFECTED. They call playerReader.WithInCombatRange()
+    //     directly, not via WorldState. partyincombat/partymembercombat
+    //     computations are untouched.
+    private const double IncombatrangeGraceMs = 1500.0;
+    private DateTime _lastIncombatrangeTrueUtc = DateTime.MinValue;
+    private bool _incombatrangeGraceLogged;
+
     // -----------------------------------------------------------------------
     // Session blacklist tracking (used by both PartyLeader and AssistFocus)
     //
@@ -844,7 +899,12 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.pethastarget: " + (playerReader.PetTarget() && !b.PetTarget_Dead()));
         logger.LogInformation("GoapKey.ismounted: " + mountHandler.IsMounted());
         logger.LogInformation("GoapKey.withinpullrange: " + playerReader.WithInPullRange());
-        logger.LogInformation("GoapKey.incombatrange: " + playerReader.WithInCombatRange());
+        // Fix CW: diagnostic shows the smoothed value (matches UpdateWorldState).
+        // The raw WithInCombatRange() may differ briefly during the grace window.
+        logger.LogInformation("GoapKey.incombatrange: " +
+            (playerReader.WithInCombatRange() ||
+             (_lastIncombatrangeTrueUtc != DateTime.MinValue &&
+              (DateTime.UtcNow - _lastIncombatrangeTrueUtc).TotalMilliseconds < IncombatrangeGraceMs)));
         logger.LogInformation("GoapKey.pulled: " + (bits.Combat() && bits.Target_Combat() && combatLog.ToPullCount() > 0));
         logger.LogInformation("GoapKey.isdead: " + b.Dead());
         logger.LogInformation("GoapKey.shouldloot: " + (State.LootableCorpseCount > 0));
@@ -946,7 +1006,47 @@ public sealed partial class GoapAgent : IDisposable
         WorldState[GoapKey.pethastarget]   = playerReader.PetTarget() && !b.PetTarget_Dead();
         WorldState[GoapKey.ismounted]      = mountHandler.IsMounted();
         WorldState[GoapKey.withinpullrange] = playerReader.WithInPullRange();
-        WorldState[GoapKey.incombatrange]  = playerReader.WithInCombatRange();
+
+        // ── Fix CW — sticky-to-true hysteresis on incombatrange ──
+        // See the IncombatrangeGraceMs constant block (~line 67) for full
+        // rationale and evidence. Summary: once WithInCombatRange() returns
+        // true, hold the published value true for IncombatrangeGraceMs even
+        // if raw briefly returns false. Suppresses ATG↔FFG plan flicker at
+        // the combat-range boundary.
+        bool rawIncombatrange = playerReader.WithInCombatRange();
+        if (rawIncombatrange)
+        {
+            _lastIncombatrangeTrueUtc = DateTime.UtcNow;
+        }
+        bool withinIncombatrangeGrace =
+            _lastIncombatrangeTrueUtc != DateTime.MinValue &&
+            (DateTime.UtcNow - _lastIncombatrangeTrueUtc).TotalMilliseconds < IncombatrangeGraceMs;
+        bool publishedIncombatrange = rawIncombatrange || withinIncombatrangeGrace;
+        WorldState[GoapKey.incombatrange] = publishedIncombatrange;
+
+        // Fix CW: one-shot log per grace activation. Fires when the hysteresis
+        // is actually doing work (raw=false, but published=true via grace).
+        // The flag resets when raw=true returns, so each new grace activation
+        // produces one log line.
+        if (publishedIncombatrange && !rawIncombatrange)
+        {
+            if (!_incombatrangeGraceLogged)
+            {
+                double msSinceTrue =
+                    (DateTime.UtcNow - _lastIncombatrangeTrueUtc).TotalMilliseconds;
+                logger.LogInformation(
+                    "[GoapAgent] [FIX-FIRE] CW: publishing incombatrange=TRUE via " +
+                    "hysteresis ({0:0}ms since last raw=true; grace={1:0}ms). Holds " +
+                    "ATG.AssistFocus precondition unselected to prevent flicker at " +
+                    "the combat-range boundary; FFG continues steady navigation.",
+                    msSinceTrue, IncombatrangeGraceMs);
+                _incombatrangeGraceLogged = true;
+            }
+        }
+        else if (rawIncombatrange)
+        {
+            _incombatrangeGraceLogged = false;
+        }
         WorldState[GoapKey.pulled]         = bits.Combat() && bits.Target_Combat() && combatLog.ToPullCount() > 0;
         WorldState[GoapKey.isdead]         = b.Dead();
         WorldState[GoapKey.shouldloot]     = State.LootableCorpseCount > 0;
