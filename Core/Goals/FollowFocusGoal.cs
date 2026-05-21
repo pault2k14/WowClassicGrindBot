@@ -1399,7 +1399,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -4358,6 +4358,95 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     logger.LogWarning(
                     $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
                     "anchor would be immediately popped; reverting to position-chasing for the remainder of this approach phase.");
+                    _currentNavTargetMode = NavTargetMode.PositionChase;
+                    return ComputeFollowTargetWorldPos(leader);
+                }
+
+                // ── Fix CQ (log-116 evidence) — stale-anchor detection ──
+                //
+                // Symptom (user-reported): "the assist seems to be doing a lot of
+                // running back and forth between two points when the leader is
+                // trying to pull (and this seemed to cause the leader to pause his
+                // pull) … this happened near the end of the log."
+                //
+                // Concrete log-116 evidence (01:12:13 → 01:13:13, ~60 seconds):
+                //   - Leader entered ATG for target 964527 at 01:12:13:352.
+                //     Anchor published once at 01:12:13:414 at <-752.4065, -4180.992>.
+                //   - Leader's PTG hit "No range progress after 3000ms" and entered
+                //     pather-escape mode. Escape never completed — leader cycled
+                //     through ATG → NO PLAN → ATG → PTG repeatedly for 60s while
+                //     escapeSec ticked up to 39.3s.
+                //   - Fix BT's grace timer (_stableAnchorUtc = DateTime.UtcNow on
+                //     every ATG.OnEnter, see ApproachTargetGoal.cs:339) refreshed
+                //     the 10s grace period EVERY re-entry. Result: the same anchor
+                //     at <-752.41, -4181> kept being republished for the full 60s
+                //     even as the leader's actual body drifted south to <-749, -4200>
+                //     and then east to <-742, -4196>. Final anchor-to-body drift:
+                //     ~17-19y, sustained.
+                //   - Assist mode log over the back-and-forth window shows 34 mode
+                //     changes. Anchor target stayed at the stale <-752.41, -4180.992>
+                //     while PositionChase targets tracked the moving leader body:
+                //     <-749.74, -4197.57>, <-742.39, -4196.16>, etc. Each Anchor
+                //     re-fire showed drift=16.8y, 18.3y, 18.2y vs the previous
+                //     PositionChase target — a 17y target jump every cycle.
+                //   - Bot positions oscillated W ↔ E by ~6y, period ~3-4s, between
+                //     two clusters: west cluster (~<-751, -4196>, near anchor X)
+                //     and east cluster (~<-744, -4194>, near leader's body). Matches
+                //     the user's description exactly.
+                //
+                // Why BU/BW hysteresis didn't catch this: the sticky window is
+                // 4500ms (AnchorModeStickyMs). The leader's escape cycle ran for
+                // 60+ seconds with HasApproachStart toggling false→true every
+                // 250-1500ms. BU/BW preserve mode across BRIEF false windows; they
+                // cannot indefinitely hold a stale anchor against a 60-second
+                // sustained leader-stuck condition. DIAG-BW evidence at 01:12:30:761
+                // shows cond_time=False with sinceLastTrueMs=4707 — sticky window
+                // exceeded — confirming BU/BW cannot mask this duration.
+                //
+                // Why the latch (_approachAnchorColocated) didn't help: the latch
+                // was set when the bot first reached the anchor area, but every
+                // expiration of the BW sticky window resets the latch (line 4475).
+                // On the next HasApproachStart=true tick the anchor-co-located check
+                // at line 4355 found anchorDist >> POP_DIST (bot had followed the
+                // leader south during the latched window), so Anchor mode re-engaged
+                // — pulling the bot back NORTH to the stale anchor.
+                //
+                // Geometric fix: if the bot is closer to the leader's actual body
+                // than to the published anchor, the anchor is geometrically
+                // irrelevant — walking toward it would walk AWAY from where the
+                // leader actually is. Track the body instead.
+                //
+                // Self-correcting in healthy approaches: in a normal pre-combat ATG
+                // the bot starts BEHIND the leader's start position, so distToAnchor
+                // is small while distToBody grows as the leader moves toward the
+                // mob. The condition below is FALSE in this case → Anchor mode
+                // chosen correctly. Only when the bot has caught up to the leader's
+                // body (stale-anchor case) does distToBody drop below distToAnchor
+                // and CQ fires.
+                //
+                // The distToBody > POP_DIST guard skips firing when the bot is
+                // essentially at the leader (≤ 3.6y) — the existing latch path
+                // handles that case correctly and we don't want to interfere.
+                //
+                // Setting _approachAnchorColocated = true is semantically correct
+                // ("the assist has logically settled with the leader's position;
+                // the anchor is no longer the convergence target"). It also enables
+                // BW's existing hysteresis to preserve the PositionChase decision
+                // through subsequent HasApproachStart=false flickers, eliminating
+                // the cycle that was reasserting Anchor mode.
+                float distToBody = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+                if (distToBody < anchorDist && distToBody > Navigation.POP_DIST)
+                {
+                    if (_currentNavTargetMode != NavTargetMode.PositionChase)
+                    {
+                        logger.LogInformation(
+                            $"[FFG] [FIX-FIRE] CQ: bot closer to leader body ({distToBody:0.0}y) " +
+                            $"than to published anchor ({anchorDist:0.0}y), anchor-to-body drift " +
+                            $"{anchor.WorldDistanceXYTo(leader.WorldPos):0.0}y. Anchor appears stale " +
+                            $"(leader has moved past its published anchor — escape, stuck, or fresh " +
+                            $"ATG with bot already caught up). PositionChase to track actual leader.");
+                    }
+                    _approachAnchorColocated = true;
                     _currentNavTargetMode = NavTargetMode.PositionChase;
                     return ComputeFollowTargetWorldPos(leader);
                 }
