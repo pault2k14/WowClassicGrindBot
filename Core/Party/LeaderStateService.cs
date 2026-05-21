@@ -172,7 +172,63 @@ public sealed class LeaderStateService
         // case is required. FollowFocusGoal also produces "Follow Focus"
         // but FFG is mode-gated to AssistFocus and never runs on the leader,
         // so no collision with the FRG-style default Patrolling arm.
-        string? goalName = botController.GoapAgent?.CurrentGoal?.Name;
+        // ── Fix CO (log-115 evidence) — Goal.Name has a leading space ──
+        //
+        // Fix CN updated the switch keys from class names ("ApproachTargetGoal")
+        // to what we believed were the actual Name values ("Approach Target").
+        // But the LeaderStatePoller log in log-115 still showed status broadcasts
+        // toggling only between Patrolling and Combat — never Approaching, never
+        // Looting. CN didn't take effect.
+        //
+        // Hex-dump of the assist plan log lines revealed that Goal.Name has a
+        // LEADING SPACE for every goal:
+        //   "New Plan= {name}" template produces "New Plan=  Approach Target"
+        //   with TWO spaces between '=' and 'Approach'. Since the template
+        //   contributes only one space, the value of `name` must be the string
+        //   " Approach Target" (leading space included). Same for every other
+        //   goal: " Combat", " Loot", " Follow Focus", and even the FRG name
+        //   " Follow 01-04_ Durotar_ Valley of Trials" — including FRG which
+        //   passes an explicit string ("Follow ..." without leading space) to
+        //   the base ctor, confirming the leading space is added inside the
+        //   base GoapGoal class regardless of how Name is derived.
+        //
+        // So the CN switch keys "Loot", "Approach Target" etc. (without leading
+        // space) never matched the actual goalName values, and the switch fell
+        // through to the default Patrolling arm — exactly the symptom the user
+        // continued to report in log-115.
+        //
+        // Concrete evidence at 00:07:04-11 in log-115:
+        //   00:07:04:571 LEADER plan: Approach Target  (Name = " Approach Target")
+        //   00:07:05:943 ASSIST BE push: 11-waypoint route span heading NORTH
+        //                from bot position <-716.04, -4189.87>. BE makes this
+        //                push because FFG.GetNavigationTarget(leader) takes the
+        //                RouteWalk branch when leader.Status == Patrolling —
+        //                which it was, incorrectly, because the CN switch missed.
+        //   00:07:07:698 Bot moved NORTH to <-716.27, -4180.93> (~9y N).
+        //                Mode flips PositionChase → Anchor at <-717.06, -4190.48>
+        //                (SOUTH of bot). Bot must walk SOUTH ~9.6y back.
+        //   00:07:11:735 FFG.OnExit: assist at 35.3y from leader (lost worse).
+        //
+        // The polled status broadcasts during this whole sequence — 6.5 seconds
+        // covering leader's ATG → PTG → ATG → NO PLAN → PTG → Combat cycle —
+        // showed only Patrolling, then Combat at 00:07:11:620. No Approaching
+        // status was ever broadcast, confirming the switch never matched.
+        //
+        // Fix: trim the goalName before the switch. The base GoapGoal class's
+        // leading-space convention is now neutralized; the switch keys remain
+        // the readable forms (no leading space hard-coded into source). If the
+        // base class is ever fixed to omit the leading space, this code keeps
+        // working unchanged.
+        //
+        // ── Update (Fix CP) ──
+        // The base GoapGoal constructor was inspected after CO was deployed
+        // (file `GoapGoal.cs`) and Fix CP was applied to strip the leading
+        // space at the source. So `Name` no longer has a leading space and
+        // the `.Trim()` below is now redundant. It is intentionally retained
+        // as defensive belt-and-suspenders: if CP is ever reverted by
+        // accident, the switch keeps working here. Cost is one Trim() call
+        // per 250 ms poll cycle, negligible.
+        string? goalName = botController.GoapAgent?.CurrentGoal?.Name?.Trim();
         return goalName switch
         {
             "Loot"               => BotStatus.Looting,
