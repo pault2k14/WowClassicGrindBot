@@ -1058,6 +1058,67 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // sequence drift while still bounding worst-case overshoot.
     private const int CCMaxAdvancePerCall = 5;
 
+    // ── Fix CG (log-110 17:30:28 evidence) — Geometric leaderIdx reacquisition on cache expiry ──
+    //
+    // CC (Fix CC above) extends a still-valid cache geometrically during
+    // long ATG/PTG/Combat sequences where TargetWaypoint isn't published.
+    // But CC only runs inside the cache-still-fresh branch. Once the cache
+    // hits the 30s TTL and expires, TryFindLeaderRouteIndex returns false,
+    // the caller falls through to PositionChase, and RouteWalk (along with
+    // CF body-chase override) becomes unavailable for the rest of the
+    // catch-up. The bot loses access to the pre-validated route waypoints
+    // and relies on the pather to navigate to leader.WorldPos directly.
+    //
+    // Log-110 manifestation at 17:30:28:552:
+    //   "Cache fallback expired: age=31.0s > 30s TTL. TryFindLeaderRouteIndex
+    //   now returns false; caller will fall back to PositionChase."
+    //   Bot at <-481.94, -4390.29>, leader at ~<-477, -4395>. Bot's
+    //   PHYSICAL position was near route[~130] (per "closestIndex=130" in
+    //   subsequent Route-span log). Route loops in this area — route[55]
+    //   and route[130] are physically close. Leader had walked from
+    //   route[55] (where cache was set 31s earlier) to ~route[130] during
+    //   the intervening combat/loot/loop sequences.
+    //   Without CG: PositionChase target = leader's body. Pather can't
+    //   path through terrain between bot and leader (the "two hills"
+    //   the user observed). 17:30:36:241 "Path wait timeout". Bot stuck
+    //   at <-476.70, -4387.40> for 12+ seconds (moved 0.35y in 2.5s,
+    //   reported as Stuck). Leader walked off to engage another mob;
+    //   by 17:30:50 bot was 47.1y from leader.
+    //   With CG: leader.WorldPos is ~5y from route[130]. CG fires:
+    //   reacquire leaderIdx=130, refresh cache, return true. Caller's
+    //   RouteWalk gate engages. Initial sync picks route waypoint near
+    //   bot's position. Bot walks pre-validated route waypoints through
+    //   the hills.
+    //
+    // Approach: when the cache is expired (about to return false), search
+    // globally for the route waypoint closest to leader.WorldPos. If the
+    // distance is within CGLeaderProximityYards, reacquire that index.
+    //
+    // Safety: tight CGLeaderProximityYards (20y) ensures we only reacquire
+    // when the leader is genuinely on or near the route. If leader is
+    // truly off-route (rescue scenario, mob roamed far), the geometric
+    // search will return a too-far index and CG won't fire — fallthrough
+    // to PositionChase remains the correct behavior.
+    //
+    // Direction guard: prefer indices >= the LAST cached value to avoid
+    // backward jumps when the route loops past where the leader was.
+    // If no forward index is within tolerance, fall back to global nearest
+    // (which may be backward — accept this as a recovery from a stale
+    // cache that missed a loop wrap-around).
+    //
+    // Why not just extend CC's TTL? The 30s TTL protects against truly
+    // stale data (leader teleported, was kicked from group, etc.).
+    // Extending it indefinitely risks acting on data that no longer
+    // reflects the leader's actual route position. CG re-derives the
+    // index from current geometry, which is always fresh.
+    //
+    // CGLeaderProximityYards: 20y — covers typical route stride (~10y)
+    //   plus normal off-route drift during combat positioning. Beyond
+    //   this distance, the leader is sufficiently off-route that route-
+    //   walking would mislead the bot.
+    private const float CGLeaderProximityYards = 20.0f;
+
+
     public FollowFocusGoal(
         ConfigurableInput input,
         PlayerReader playerReader,
@@ -1276,7 +1337,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -3543,6 +3604,103 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 $"back to PositionChase.");
                 _cacheFallbackInUse = false;
             }
+        }
+
+        // ── Fix CG (log-110 17:30:28 evidence) — Geometric leaderIdx reacquisition ──
+        // See the CGLeaderProximityYards constant block (~line 1060) for full
+        // design rationale and worked example.
+        //
+        // After the cache-expired branch above failed, before returning false,
+        // try one more recovery: if the leader's WorldPos is geographically
+        // close to a route waypoint, reacquire leaderIdx from geometry. This
+        // re-enables RouteWalk (and CF body-chase override) for the next
+        // FFG.Update tick, keeping the bot on pre-validated route terrain
+        // instead of falling back to a pather-driven PositionChase that may
+        // not be able to navigate terrain obstacles (the user-observed "two
+        // hills" pinch).
+        //
+        // Direction-aware: prefer the closest waypoint at index >= the
+        // PREVIOUSLY cached index (forward progression). If no forward
+        // waypoint is within CGLeaderProximityYards, accept the globally
+        // nearest — covers the case where a loop wrap-around happened
+        // while the cache was expired and the leader is now physically
+        // close to an earlier-index waypoint.
+        if (route.Length > 0)
+        {
+            Vector3 leaderPos = leader.WorldPos;
+
+            // Pass 1: forward-only search (>= last cached index).
+            // Limits backward jumps that would mislead RouteWalk's
+            // trailing-by-one cap into thinking the leader retreated.
+            int forwardStart = _cachedLeaderRouteIdx >= 0 ? _cachedLeaderRouteIdx : 0;
+            int forwardBestIdx = -1;
+            float forwardBestDist = float.MaxValue;
+            for (int i = forwardStart; i < route.Length; i++)
+            {
+                float d = leaderPos.WorldDistanceXYTo(route[i]);
+                if (d < forwardBestDist)
+                {
+                    forwardBestDist = d;
+                    forwardBestIdx = i;
+                }
+            }
+
+            // Pass 2: global search if forward didn't find anything within
+            // tolerance. Handles the case where the leader has moved past
+            // a loop wrap-around or the cache was completely stale.
+            int chosenIdx = -1;
+            float chosenDist = float.MaxValue;
+            string acquisitionMode = "";
+            if (forwardBestIdx >= 0 && forwardBestDist <= CGLeaderProximityYards)
+            {
+                chosenIdx = forwardBestIdx;
+                chosenDist = forwardBestDist;
+                acquisitionMode = "forward";
+            }
+            else
+            {
+                int globalBestIdx = -1;
+                float globalBestDist = float.MaxValue;
+                for (int i = 0; i < route.Length; i++)
+                {
+                    float d = leaderPos.WorldDistanceXYTo(route[i]);
+                    if (d < globalBestDist)
+                    {
+                        globalBestDist = d;
+                        globalBestIdx = i;
+                    }
+                }
+                if (globalBestIdx >= 0 && globalBestDist <= CGLeaderProximityYards)
+                {
+                    chosenIdx = globalBestIdx;
+                    chosenDist = globalBestDist;
+                    acquisitionMode = "global";
+                }
+            }
+
+            if (chosenIdx >= 0)
+            {
+                int prevCached = _cachedLeaderRouteIdx;
+                leaderIdx = chosenIdx;
+                _cachedLeaderRouteIdx = chosenIdx;
+                _cachedLeaderRouteIdxUtc = DateTime.UtcNow;
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] CG: Geometric leaderIdx reacquisition " +
+                    $"({acquisitionMode} search). " +
+                    $"Cache had expired or was absent (prevCached={prevCached}). " +
+                    $"leader.WorldPos {leaderPos} is {chosenDist:0.0}y from " +
+                    $"route[{chosenIdx}] (within CGLeaderProximityYards=" +
+                    $"{CGLeaderProximityYards:0.0}y tolerance). " +
+                    $"Reacquired leaderIdx={chosenIdx}, refreshing cache. " +
+                    $"Avoids PositionChase fallback when leader is still " +
+                    $"geographically on the route — keeps assist on pre-" +
+                    $"validated route terrain instead of pathing through " +
+                    $"unvalidated terrain obstacles.");
+                return true;
+            }
+            // No route waypoint within tolerance — leader is genuinely off-
+            // route (rescue scenario, mob roamed far, etc.). Fallthrough to
+            // PositionChase is the correct behavior here.
         }
 
         return false;
