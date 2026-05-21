@@ -1,6 +1,8 @@
 using System;
 using System.Numerics;
 
+using Microsoft.Extensions.Logging;
+
 namespace Core.Party;
 
 /// <summary>
@@ -15,6 +17,7 @@ namespace Core.Party;
 /// </summary>
 public sealed class LeaderStateService
 {
+    private readonly ILogger<LeaderStateService> logger;
     private readonly PlayerReader playerReader;
     private readonly AddonBits bits;
     private readonly IBotController botController;
@@ -25,12 +28,85 @@ public sealed class LeaderStateService
     // rather than sending the assist a bogus ~4400y distance (sqrt(700²+4350²) ≈ 4406y).
     private Vector3 _lastValidWorldPos;
 
+    // ── Fix CV (log-119 evidence: 03:55:46-52 issue #2, 04:01:30-04:02:08 issue #1) ──
+    //
+    // Background: HasApproachStart's raw bit lifecycle is bound entirely to the
+    // leader's ApproachTargetGoal — ATG.OnEnter SETs (or Fix BT re-publishes on
+    // re-entry), ATG.OnExit CLEARs unconditionally. PTG and Combat do not touch
+    // the bit (verified from PullTargetGoal.cs and CombatGoal.cs source). This
+    // means the published bit goes false during ANY ATG.OnExit, including:
+    //
+    //   • ATG → PTG transitions (PTG is part of the same engagement; PTG cycles
+    //     up to 3.298s observed in log-102)
+    //   • ATG → Combat transitions (Focus_Combat propagation gap on assist
+    //     ~100-500ms before PartyInCombat() takes over)
+    //   • ATG → NO PLAN cycles (planner failed momentarily; observed re-entry
+    //     within 295-531ms when loop-back is the eventual outcome)
+    //   • Brief ATG → FRG → ATG flicker (observed 328ms in log-119)
+    //
+    // Each false-then-true cycle propagates to the assist via polling and flips
+    // partyEngaging (GoapAgent's ATG.AssistFocus precondition) and FFG's anchor-
+    // mode selection. In log-119's 38-second stuck window, this caused 11
+    // assist ATG↔FFG plan flips and 4-point oscillation between cluster of
+    // <-378,-4188>, <-378,-4183>, <-374,-4184>, <-371,-4187> (user's
+    // "running back and forth" complaint).
+    //
+    // Fix CV semantics: the API-published HasApproachStart reflects whether the
+    // leader is "in/near an approach phase" rather than "currently in ATG
+    // specifically." Computed as the disjunction of three signals:
+    //
+    //   1. Raw bit (leaderNavProvider.HasApproachStart) — leader's ATG is active
+    //   2. Engaging goal (currentGoalName ∈ {ATG, PTG, Combat}) — leader is
+    //      in a goal that conceptually IS the approach/engagement phase, even
+    //      though the raw bit was cleared by ATG.OnExit on the way in
+    //   3. Within TTL — recently saw signals 1 or 2; bridges brief gaps
+    //
+    // Why two TTL values:
+    //   • TransientTtlMs (2000ms): bridges NO PLAN cycles. Log-119 measured
+    //     loop-back NO PLAN durations up to 531ms; longer NO PLANs (1.8s-17s)
+    //     resolved to FRG (real abandonment). 2000ms covers loop-back with
+    //     1.5s headroom while still expiring during long abandonment NO PLANs.
+    //   • DefinitiveAbandonmentTtlMs (500ms): used when the leader is in an
+    //     explicit non-engaging goal (FRG, Loot, Rest, etc.). Bridges brief
+    //     FRG flickers between ATG cycles (328ms observed worst case) but
+    //     exits quickly on genuine "leader gave up and returned to patrol"
+    //     so the assist can transition to following within ~500ms.
+    //
+    // Goal name match: trim and compare against the same canonical forms
+    // DetermineStatus() uses below (e.g., "Approach Target" not the class
+    // name "ApproachTargetGoal" — see Fix CN/CO/CP notes there).
+    //
+    // Consumers that benefit (verified by audit of every HasApproachStart read):
+    //   • GoapAgent.UpdateWorldState — partyEngaging stays true through PTG/
+    //     Combat handoff/NO PLAN cycles → no ATG↔FFG plan flicker
+    //   • FollowFocusGoal.GetNavigationTarget — Anchor mode stays selected
+    //     through transients → no PositionChase turn-aside
+    //   • FollowFocusGoal Idle suppression (Fix CJ/CK variants) — assist
+    //     stays alert when close to leader, ready to react
+    //   • FollowFocusGoal.AH+AJ+AN — focus-chain acquisition continues
+    //     attempting (idempotent at WoW key level)
+    //   • FollowFocusGoal leaderStartedApproaching edge — fires once per real
+    //     approach event instead of repeatedly during ATG-flicker cycles
+    //     (improvement, not just compatibility)
+    //
+    // Side effect: FollowFocusGoal_BM.cs:4206-4220 (Fix BU's anchor-mode
+    // stickiness) gates on `!leader.HasApproachStart`. With CV, the published
+    // value stays true during the very window BU was designed to handle, so
+    // BU's condition never fires. BU becomes dead code but is left intact for
+    // now — separate cleanup decision.
+    private const double TransientTtlMs = 2000.0;
+    private const double DefinitiveAbandonmentTtlMs = 500.0;
+    private DateTime _lastEngagingActivityUtc = DateTime.MinValue;
+    private bool _ttlGraceLogged;
+
     public LeaderStateService(
+        ILogger<LeaderStateService> logger,
         PlayerReader playerReader,
         AddonBits bits,
         IBotController botController,
         LeaderNavigationProvider leaderNavProvider)
     {
+        this.logger = logger;
         this.playerReader = playerReader;
         this.bits = bits;
         this.botController = botController;
@@ -54,6 +130,65 @@ public sealed class LeaderStateService
 
         Vector3 map = playerReader.MapPos;
 
+        // ── Fix CV — compute published HasApproachStart with engaging-goal
+        // awareness and dual TTL. See constants block (~line 30) for full
+        // rationale, evidence, and consumer impact. Summary: published value
+        // is true if any of (raw bit, leader in engaging goal, within TTL).
+        string? currentGoalName = botController.GoapAgent?.CurrentGoal?.Name?.Trim();
+        bool currentGoalIsEngaging =
+            currentGoalName is "Approach Target" or "Pull Target" or "Combat";
+        bool definitiveAbandonment =
+            currentGoalName is not null && !currentGoalIsEngaging;
+
+        bool rawHasApproachStart = leaderNavProvider.HasApproachStart;
+
+        if (rawHasApproachStart || currentGoalIsEngaging)
+        {
+            _lastEngagingActivityUtc = DateTime.UtcNow;
+        }
+
+        double effectiveTtlMs = definitiveAbandonment
+            ? DefinitiveAbandonmentTtlMs
+            : TransientTtlMs;
+        double sinceLastMs = _lastEngagingActivityUtc == DateTime.MinValue
+            ? double.MaxValue
+            : (DateTime.UtcNow - _lastEngagingActivityUtc).TotalMilliseconds;
+        bool withinTtl = sinceLastMs < effectiveTtlMs;
+
+        bool publishedHasApproachStart =
+            rawHasApproachStart || currentGoalIsEngaging || withinTtl;
+
+        // Fix CV: one-shot log per grace activation. Fires the first poll cycle
+        // where the TTL is actually doing work — raw=false, leader not in an
+        // engaging goal, but published=true via TTL grace. The _ttlGraceLogged
+        // flag throttles to once per activation; it resets when an engaging
+        // signal (raw bit or engaging goal) returns. Makes CV's effectiveness
+        // measurable on the leader's log: count CV fires = count of plan
+        // flickers / mode flickers suppressed on the assist side.
+        bool graceIsDoingWork =
+            publishedHasApproachStart && !rawHasApproachStart && !currentGoalIsEngaging;
+        if (graceIsDoingWork)
+        {
+            if (!_ttlGraceLogged)
+            {
+                string gapKind = definitiveAbandonment
+                    ? $"definitive abandonment (goal=\"{currentGoalName}\")"
+                    : "transient (NO PLAN)";
+                logger.LogInformation(
+                    "[LeaderStateService] [FIX-FIRE] CV: publishing HasApproachStart=TRUE " +
+                    "via TTL grace ({0:0}ms since last engaging activity; window={1:0}ms; " +
+                    "gap={2}). Smoothing prevents assist plan/mode flicker during the gap.",
+                    sinceLastMs, effectiveTtlMs, gapKind);
+                _ttlGraceLogged = true;
+            }
+        }
+        else if (rawHasApproachStart || currentGoalIsEngaging)
+        {
+            // Engaging signal returned — reset the throttle so the next grace
+            // activation logs again.
+            _ttlGraceLogged = false;
+        }
+
         return new LeaderState
         {
             WorldX = world.X,
@@ -74,7 +209,13 @@ public sealed class LeaderStateService
             TargetWaypointWorldY = leaderNavProvider.TargetWaypointWorldY,
 
             // Approach-start anchor — only meaningful when leader is Approaching.
-            HasApproachStart = leaderNavProvider.HasApproachStart,
+            // Fix CV: HasApproachStart is the smoothed value (see ~line 30 for design).
+            // Anchor coords are passed through raw from leaderNavProvider — when the
+            // TTL holds HasApproachStart=true after raw went false, consumers see
+            // the most recently published anchor (which is the right answer for the
+            // bridged transients: PTG and Combat reuse the same anchor, NO PLAN
+            // cycles re-publish via Fix BT on re-entry).
+            HasApproachStart = publishedHasApproachStart,
             ApproachStartWorldX = leaderNavProvider.ApproachStartWorldX,
             ApproachStartWorldY = leaderNavProvider.ApproachStartWorldY,
 

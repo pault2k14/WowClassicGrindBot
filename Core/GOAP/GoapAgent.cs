@@ -64,35 +64,6 @@ public sealed partial class GoapAgent : IDisposable
 
     private bool _evadeLeaderWaiting;
 
-    // ── Fix CU (log-119 04:01:30 → 04:02:08 evidence) — partyEngaging hysteresis ──
-    //
-    // partyEngaging (WorldState key, the AssistFocus ATG.AssistFocus precondition
-    // for the leader's pre-combat approach window) reads
-    // leaderConnection.LastLeaderState.HasApproachStart on every UpdateWorldState
-    // tick. HasApproachStart toggles rapidly because the leader's ATG.OnExit
-    // (ApproachTargetGoal.cs:374) calls ClearApproachStart on EVERY exit —
-    // including exits to PullTargetGoal and NO PLAN cycles where the leader
-    // re-enters ATG within ~250-2500ms (Fix BT re-publishes the same anchor).
-    //
-    // Without hysteresis: partyEngaging flips with each toggle, the planner
-    // picks FFG (cost 19) over ATG (cost 8) for the false windows, then picks
-    // ATG again when HasApproachStart returns. Sub-second ATG↔FFG plan
-    // flicker, each flip changing the navigation target direction.
-    //
-    // Mirrors the existing Fix BU pattern (FFG anchor-mode hysteresis) which
-    // uses the same 4500ms window for the same flicker but inside FFG's
-    // navigation-mode selection. Fix BU's evidence trail measured PTG cycles
-    // up to 3298ms; 4500ms covers all observed normal PTG cycles and the
-    // ~500-1500ms NO PLAN cycles seen in log-119, with margin. When the
-    // leader genuinely abandons the approach (no HasApproachStart=true tick
-    // within the window), the timer expires and partyEngaging falls cleanly.
-    //
-    // See also: GoapAgent.cs:1351 (the partyEngaging computation site) and
-    // FollowFocusGoal_BM.cs:416 (Fix BU's AnchorModeStickyMs = 4500).
-    private const double PartyEngagingGraceMs = 4500.0;
-    private DateTime _lastHasApproachStartUtc = DateTime.MinValue;
-    private bool _partyEngagingGraceLogged;
-
     // -----------------------------------------------------------------------
     // Session blacklist tracking (used by both PartyLeader and AssistFocus)
     //
@@ -907,15 +878,10 @@ public sealed partial class GoapAgent : IDisposable
         logger.LogInformation("GoapKey.partyincombat: " + PartyInCombat());
         // Fix CM: match the corrected partyEngaging computation in UpdateWorldState
         // (see ~line 1302). Reads polled leader state on assist, not local nav provider.
-        // Fix CU: includes the hysteresis branch — partyEngaging stays true for up to
-        // PartyEngagingGraceMs after the most recent HasApproachStart=true tick. See
-        // the PartyEngagingGraceMs constant block (~line 65) for design rationale.
         logger.LogInformation("GoapKey.partyEngaging: " +
             (PartyInCombat() ||
              (classConfig.Mode == Mode.AssistFocus &&
-              (leaderConnection.LastLeaderState?.HasApproachStart == true ||
-               (_lastHasApproachStartUtc != DateTime.MinValue &&
-                (DateTime.UtcNow - _lastHasApproachStartUtc).TotalMilliseconds < PartyEngagingGraceMs)))));
+              leaderConnection.LastLeaderState?.HasApproachStart == true)));
         logger.LogInformation("GoapKey.inblacklistarea: " + navigation.IsInBlacklistArea());
         logger.LogInformation("GoapKey.focusconnected: " + bits.Focus_Connected());
         logger.LogInformation("GoapKey.party1connected: " + bits.Party1_Connected());
@@ -1382,59 +1348,10 @@ public sealed partial class GoapAgent : IDisposable
         // is never selected for planning at all (the planner short-circuits on
         // unsatisfied preconditions before reaching the goal's body). A new
         // key, computed once per UpdateWorldState, is the idiomatic match.
-        //
-        // ── Fix CU (log-119 04:01:30 → 04:02:08 evidence) — hysteresis ──
-        // See the PartyEngagingGraceMs constant block (~line 65) for full
-        // design rationale and evidence. Summary: the leader's
-        // HasApproachStart toggles rapidly during ATG→PTG and ATG→NO PLAN
-        // cycles. Without hysteresis, partyEngaging flips with each toggle,
-        // causing ATG↔FFG plan flicker on the assist. With hysteresis,
-        // partyEngaging stays true for up to PartyEngagingGraceMs after
-        // the most recent HasApproachStart=true observation.
-        bool leaderApproachStartNow =
-            classConfig.Mode == Mode.AssistFocus &&
-            leaderConnection.LastLeaderState?.HasApproachStart == true;
-        if (leaderApproachStartNow)
-        {
-            _lastHasApproachStartUtc = DateTime.UtcNow;
-        }
-        bool withinPartyEngagingGrace =
-            classConfig.Mode == Mode.AssistFocus &&
-            _lastHasApproachStartUtc != DateTime.MinValue &&
-            (DateTime.UtcNow - _lastHasApproachStartUtc).TotalMilliseconds < PartyEngagingGraceMs;
-
         WorldState[GoapKey.partyEngaging] =
             PartyInCombat() ||
-            leaderApproachStartNow ||
-            withinPartyEngagingGrace;
-
-        // Fix CU: emit a one-shot log line each time grace begins doing work
-        // (HasApproachStart fell false but grace keeps partyEngaging true).
-        // Reset the flag when HasApproachStart returns true so the next grace
-        // activation logs again. This makes CU's effectiveness measurable in
-        // future logs (count CU fires = count of suppressed ATG↔FFG flickers).
-        if (classConfig.Mode == Mode.AssistFocus &&
-            !leaderApproachStartNow &&
-            withinPartyEngagingGrace &&
-            !PartyInCombat())
-        {
-            if (!_partyEngagingGraceLogged)
-            {
-                double msSinceTrue =
-                    (DateTime.UtcNow - _lastHasApproachStartUtc).TotalMilliseconds;
-                logger.LogInformation(
-                    $"[GoapAgent] [FIX-FIRE] CU: partyEngaging held TRUE via " +
-                    $"hysteresis ({msSinceTrue:0}ms since last HasApproachStart=true; " +
-                    $"grace={PartyEngagingGraceMs:0}ms). Suppresses ATG↔FFG plan flicker " +
-                    $"during the leader's brief HasApproachStart=false windows " +
-                    $"(ATG→PTG cycle ~2.4s, ATG→NO PLAN→ATG cycle ~500-1500ms).");
-                _partyEngagingGraceLogged = true;
-            }
-        }
-        else if (leaderApproachStartNow)
-        {
-            _partyEngagingGraceLogged = false;
-        }
+            (classConfig.Mode == Mode.AssistFocus &&
+             leaderConnection.LastLeaderState?.HasApproachStart == true);
 
         WorldState[GoapKey.drinking]           = restHandler.IsDrinking();
         WorldState[GoapKey.eating]             = restHandler.IsEating();
