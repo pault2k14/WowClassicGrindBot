@@ -70,6 +70,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     }
 
     private DateTime onEnterTime;
+
+    // Fix CY one-shot log throttle — set true after first FIX-FIRE CY log
+    // within a single grace window, reset when grace elapses.
+    private bool _cyGraceLogged;
     private DateTime _lastRefillWaypointsUtc = DateTime.MinValue;
     private Vector3 _lastRefillTopMap = default;
     private int _lastRefillWaypointCount = -1;
@@ -133,6 +137,49 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // See HANDOFF Fix BO for full evidence.
     private const double SyncPauseTimeoutSec = 2.0;
     private const float FrgSyncReadyYards = 14.0f;
+
+    // ── Fix CY (log-122 evidence: 16:00:11:635 and 16:00:39:003) ──
+    //
+    // Two leader-side ATG→FRG→ATG planner micro-flickers (32ms and 31ms FRG
+    // duration respectively) caused the leader's target to switch from the
+    // mob it was approaching to a different (further) mob. Mechanism:
+    //
+    //   1. ATG running on target A
+    //   2. Brief precondition flicker → planner picks FRG for one tick (32ms)
+    //   3. FRG.OnEnter → Resume() → sync-pause check: timer carried from
+    //      previous Resume long ago, so "Sync-pause complete" fires IMMEDIATELY
+    //      (BO log shows elapsed=01s or 41s on re-entry — already past 2s
+    //      timeout from previous activation)
+    //   4. Sync-pause-complete path calls TryEnableSideTargetFinding() →
+    //      sideActivityManualReset.Set()
+    //   5. Thread_LookingForTarget's Wait returns within ~1ms; calls
+    //      targetFinder.Search() which presses Tab
+    //   6. Tab cycles target to a different nearby hostile (target B)
+    //   7. Plan flicks back to ATG, but ATG.OnEnter now uses the NEW target B
+    //   8. ATG warns "Stick to initial target!" and tries G (PressLastTarget)
+    //      to restore, but the OnEnter/OnExit reset initialTargetGuid before
+    //      the restore — leader proceeds to engage B instead of A
+    //
+    // Verified: at both 16:00:11:666 and 16:00:39:035, the post-flicker ATG
+    // OnEnter shows a different target GUID (1018241 vs prior 1018283;
+    // 1022541 vs prior 1022416), with Tab pressed within 50ms after the
+    // plan change and "Found target!" logged from FollowRouteGoal even
+    // though FRG is no longer active — confirming the side thread was
+    // mid-Search across the plan boundary.
+    //
+    // CY fix: add a brief grace check inside Thread_LookingForTarget after
+    // the manual-reset Wait, before targetFinder.Search. If onEnterTime
+    // is within FrgSideThreadOnEnterGraceMs (500ms — 15× margin over
+    // observed 32ms flickers), skip the Search and loop back to Wait. Brief
+    // plan-flicker FRG runs (sub-100ms typical, sub-500ms safe margin) won't
+    // trigger Tab presses; the side thread re-enables itself on the next
+    // legitimate FRG.OnEnter (or stays paused if FRG.OnExit fires first,
+    // which cancels the thread anyway).
+    //
+    // Legitimate FRG behavior unaffected: post-combat patrol FRG runs are
+    // multi-second windows, sync-pause itself is 2s — both well past the
+    // 500ms grace.
+    private const double FrgSideThreadOnEnterGraceMs = 500.0;
 
     // Stale logging — avoid spamming every tick
     private bool _assistWasStaleLogged;
@@ -1405,6 +1452,33 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         while (!sideActivityCts.IsCancellationRequested)
         {
             sideActivityManualReset.Wait();
+
+            // ── Fix CY: brief plan-flicker guard ──
+            // See the FrgSideThreadOnEnterGraceMs constant block (~line 138)
+            // for full evidence and rationale. Summary: skip targetFinder.Search
+            // if FRG.OnEnter fired within FrgSideThreadOnEnterGraceMs. Prevents
+            // brief ATG→FRG→ATG planner micro-flickers (32ms observed) from
+            // letting the side thread press Tab and swap the leader's target
+            // mid-approach.
+            double sinceOnEnterMs =
+                (DateTime.UtcNow - onEnterTime).TotalMilliseconds;
+            if (sinceOnEnterMs < FrgSideThreadOnEnterGraceMs)
+            {
+                if (!_cyGraceLogged)
+                {
+                    logger.LogInformation(
+                        "[FRG] [FIX-FIRE] CY: side-thread Search skipped " +
+                        "({0:0}ms since FRG.OnEnter < {1:0}ms grace). Prevents " +
+                        "Tab press during brief plan-flicker FRG runs that would " +
+                        "otherwise swap the leader's approach target.",
+                        sinceOnEnterMs, FrgSideThreadOnEnterGraceMs);
+                    _cyGraceLogged = true;
+                }
+                wait.Update();
+                continue;
+            }
+            // Out of grace — reset the throttle so the next OnEnter logs again.
+            _cyGraceLogged = false;
 
             if (pathSettings.CanRunSideActivity() &&
                 targetFinder.Search(NpcNameToFind, bits.Target_NotDead, sideActivityCts.Token))

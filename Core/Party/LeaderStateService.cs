@@ -28,6 +28,51 @@ public sealed class LeaderStateService
     // rather than sending the assist a bogus ~4400y distance (sqrt(700²+4350²) ≈ 4406y).
     private Vector3 _lastValidWorldPos;
 
+    // ── Fix CZ (log-122 evidence: 15:55:37, 15:59:07, 15:59:24, 16:00:35) ──
+    //
+    // The published HasApproachStart is smoothed by Fix CV (TTL grace bridges
+    // brief ATG.OnExit → ATG.OnEnter gaps), but the X/Y coords are pulled raw
+    // from leaderNavProvider. Empirically, leaderNavProvider's coords go to
+    // (0,0) any time ATG.OnExit calls ClearApproachStart — i.e. ALL the
+    // transients CV was designed to smooth.
+    //
+    // Worse: Fix BT (ATG re-entry within 10s grace) decided NOT to re-publish
+    // the anchor on re-entry. The BT log "reusing stable anchor <x,y>" reports
+    // BT's INTERNAL cache; the leaderNavProvider remains zero from the prior
+    // OnExit. Verified all 21 BT re-entries in log-122: zero publish events
+    // followed them. So during CV's TTL window, the assist can see:
+    //
+    //   HasApproachStart=true (smoothed by CV)
+    //   ApproachStartWorldX/Y=0/0 (zeroed by ATG.OnExit, not re-published)
+    //
+    // The assist's FFG then enters Anchor mode with target=<0,0,0>, walks
+    // briefly toward the origin (4366y away), and snaps back when the leader
+    // eventually re-publishes. The traced motion is a narrow oval/ellipse —
+    // exactly the user's complaint #2 in log-122.
+    //
+    // Observed instances in log-122 (4 of 4 are this pattern):
+    //   15:55:37:014  PositionChase → Anchor (target=<0,0,0>, drift=0.0y)
+    //   15:59:07:477  PositionChase → Anchor (target=<0,0,0>, drift=0.0y)
+    //   15:59:24:674  PositionChase → Anchor (target=<0,0,0>, drift=4493.2y)
+    //   16:00:35:917  PositionChase → Anchor (target=<0,0,0>, drift=4366.7y)
+    //
+    // At 16:00:35:917, leader log shows the BT re-entry 508ms earlier
+    // (16:00:35:409) "reusing stable anchor <-411.94775, -4348.463>" — exactly
+    // the anchor the assist SHOULD have seen but didn't, because BT chose not
+    // to re-publish.
+    //
+    // CZ fix: cache the last non-zero ApproachStartWorld value in this service.
+    // When raw is (0,0) but publishedHasApproachStart is true (i.e. CV is
+    // smoothing), serve the cache. This makes the published HasApproachStart
+    // and the published X/Y mutually consistent — what CV's design comment
+    // already claimed ("the right answer for the bridged transients") but
+    // that the actual implementation didn't deliver.
+    private float _lastValidApproachStartX;
+    private float _lastValidApproachStartY;
+
+    // One-shot log throttle for Fix CZ — flips false on next raw-valid sample.
+    private bool _czCacheServeLogged;
+
     // ── Fix CV (log-119 evidence: 03:55:46-52 issue #2, 04:01:30-04:02:08 issue #1) ──
     //
     // Background: HasApproachStart's raw bit lifecycle is bound entirely to the
@@ -189,6 +234,39 @@ public sealed class LeaderStateService
             _ttlGraceLogged = false;
         }
 
+        // ── Fix CZ: cache last valid anchor; serve cache when raw is zero but
+        //   publishedHasApproachStart is true (CV is smoothing). See ~line 30
+        //   field declarations for full evidence and rationale.
+        float rawApproachX = leaderNavProvider.ApproachStartWorldX;
+        float rawApproachY = leaderNavProvider.ApproachStartWorldY;
+
+        if (rawApproachX != 0f || rawApproachY != 0f)
+        {
+            _lastValidApproachStartX = rawApproachX;
+            _lastValidApproachStartY = rawApproachY;
+            _czCacheServeLogged = false;
+        }
+
+        bool czCacheServe =
+            publishedHasApproachStart &&
+            rawApproachX == 0f && rawApproachY == 0f &&
+            (_lastValidApproachStartX != 0f || _lastValidApproachStartY != 0f);
+
+        float publishedApproachX = czCacheServe ? _lastValidApproachStartX : rawApproachX;
+        float publishedApproachY = czCacheServe ? _lastValidApproachStartY : rawApproachY;
+
+        if (czCacheServe && !_czCacheServeLogged)
+        {
+            logger.LogInformation(
+                "[LeaderStateService] [FIX-FIRE] CZ: serving cached " +
+                "ApproachStart=<{0:0.0}, {1:0.0}> because raw=<0,0> while " +
+                "publishedHasApproachStart=true (CV smoothing window). Prevents " +
+                "the assist from navigating to anchor=<0,0,0> and tracing an " +
+                "oval/ellipse path during the bridged transient.",
+                _lastValidApproachStartX, _lastValidApproachStartY);
+            _czCacheServeLogged = true;
+        }
+
         return new LeaderState
         {
             WorldX = world.X,
@@ -210,14 +288,14 @@ public sealed class LeaderStateService
 
             // Approach-start anchor — only meaningful when leader is Approaching.
             // Fix CV: HasApproachStart is the smoothed value (see ~line 30 for design).
-            // Anchor coords are passed through raw from leaderNavProvider — when the
-            // TTL holds HasApproachStart=true after raw went false, consumers see
-            // the most recently published anchor (which is the right answer for the
-            // bridged transients: PTG and Combat reuse the same anchor, NO PLAN
-            // cycles re-publish via Fix BT on re-entry).
+            // Fix CZ: ApproachStartWorldX/Y are also smoothed via last-valid cache.
+            // Together they keep HasApproachStart=true ⇒ anchor coords are valid.
+            // Before CZ, the X/Y were raw and could be (0,0) while HasApproachStart
+            // was held true by CV's TTL — the assist would navigate to <0,0,0>
+            // creating the oval/ellipse path in user's log-122 complaint #2.
             HasApproachStart = publishedHasApproachStart,
-            ApproachStartWorldX = leaderNavProvider.ApproachStartWorldX,
-            ApproachStartWorldY = leaderNavProvider.ApproachStartWorldY,
+            ApproachStartWorldX = publishedApproachX,
+            ApproachStartWorldY = publishedApproachY,
 
             // Mob blacklist — cumulative for the session.
             BlacklistedMobGuids = leaderNavProvider.BlacklistedMobGuidsSnapshot,
