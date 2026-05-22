@@ -590,6 +590,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private bool _anchorReached;
     private Vector3 _anchorReachedPos;
 
+
     /// <summary>
     /// Fix DM: a published anchor farther than this from <see cref="_anchorReachedPos"/>
     /// is treated as a NEW pull, re-arming Anchor-mode rendezvous. The same pull's
@@ -598,6 +599,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// anchor is the leader's new stop, almost always well beyond this.
     /// </summary>
     private const float AnchorReachedResetYards = 6.0f;
+
+    /// <summary>
+    /// Fix DP (log-129 01:06:30→34): reactive route-walk-first fallback for a failing
+    /// direct-Anchor pather. When the direct Anchor approach stops making progress toward
+    /// the anchor (the defective-corridor pather times out / null-refs / returns a detour),
+    /// <see cref="_anchorPatherFallback"/> is armed and the approach is deferred to
+    /// route-walk: the assist advances up to the leader's own route index (the anchor is the
+    /// leader's position) using the clean usePather=false route-walk, then the existing
+    /// combat-handoff pathers the short final hop. <see cref="_anchorFallbackUsed"/> latches
+    /// once that handoff fires so the final hop is not re-deferred (loop guard). Progress is
+    /// tracked via the closest distance achieved to <see cref="_dpTrackedAnchor"/>; the
+    /// tracker resets when the anchor moves (new pull) or the approach ends.
+    /// </summary>
+    private bool _anchorPatherFallback;
+    private bool _anchorFallbackUsed;
+    private float _anchorApproachBestDist = float.MaxValue;
+    private DateTime _anchorApproachProgressUtc = DateTime.MinValue;
+    private Vector3 _dpTrackedAnchor;
+    private const double AnchorProgressTimeoutMs = 2000.0;
+    private const float AnchorProgressEpsilonYards = 1.0f;
 
     /// <summary>
     /// Fix AH (log-73 16:43:37 → 16:44:15): one-shot latch — true once
@@ -1484,7 +1505,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM, DN. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM, DN, DP. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -1519,6 +1540,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _lastLeaderHadTargetWaypoint = false; // force waypoint-published detection on first UpdateIdle tick
         _lastLeaderHadApproachStart = false;  // force approach-start detection on first UpdateIdle tick
         _approachAnchorColocated = false;     // reset co-located latch on each FFG entry
+        _anchorPatherFallback = false;         // Fix DP: reset reactive-fallback state on each FFG entry
+        _anchorFallbackUsed = false;
+        _anchorApproachBestDist = float.MaxValue;
+        _anchorApproachProgressUtc = DateTime.MinValue;
         _approachTargetAcquired = false;       // Fix AH: reset focus-chain one-shot latch on each FFG entry
         _approachTargetLastAttemptUtc = DateTime.MinValue;  // Fix AJ: reset focus-chain retry timestamp
         _approachTargetLatchedUtc = DateTime.MinValue;  // Fix AM: reset stale-latch diagnostic timestamp
@@ -2507,6 +2532,48 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             EnterState(NavState.Idle);
             assistStatusProvider.CurrentStatus = BotStatus.Following;
             return;
+        }
+
+        // ── Fix DP (log-129 01:06:30→34) — reactive route-walk-first fallback arming ──
+        // While the assist is directly pathering to the approach anchor (Anchor mode), watch
+        // its closest distance to the anchor. If that stops improving for
+        // AnchorProgressTimeoutMs, the defective-corridor pather is failing — it timed out /
+        // null-ref'd and idled, or returned a detour that walks the wrong way. Arm the
+        // fallback: CheckShouldDefer then defers to route-walk up to the leader's own route
+        // index (the clean usePather=false walk), and the existing combat-handoff pathers the
+        // short final hop. Tracking resets when the anchor moves (new pull) or the approach ends.
+        if (leader.HasApproachStart
+            && _currentNavTargetMode == NavTargetMode.Anchor
+            && !_anchorFallbackUsed)
+        {
+            Vector3 anchorW = new(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
+            float distToAnchor = playerReader.WorldPos.WorldDistanceXYTo(anchorW);
+            DateTime nowUtc = DateTime.UtcNow;
+
+            if (_anchorApproachProgressUtc == DateTime.MinValue
+                || anchorW.WorldDistanceXYTo(_dpTrackedAnchor) > AnchorReachedResetYards)
+            {
+                // First Anchor tick this approach, or anchor moved (new pull): (re)start tracking.
+                _dpTrackedAnchor = anchorW;
+                _anchorApproachBestDist = distToAnchor;
+                _anchorApproachProgressUtc = nowUtc;
+            }
+            else if (distToAnchor < _anchorApproachBestDist - AnchorProgressEpsilonYards)
+            {
+                _anchorApproachBestDist = distToAnchor;
+                _anchorApproachProgressUtc = nowUtc;
+            }
+            else if (!_anchorPatherFallback
+                     && (nowUtc - _anchorApproachProgressUtc).TotalMilliseconds > AnchorProgressTimeoutMs)
+            {
+                _anchorPatherFallback = true;
+                logger.LogWarning(
+                    $"[FFG] [FIX-FIRE] DP: direct-Anchor pather not progressing toward anchor " +
+                    $"(dist={distToAnchor:0.0}y, best={_anchorApproachBestDist:0.0}y, " +
+                    $"{(nowUtc - _anchorApproachProgressUtc).TotalMilliseconds:0}ms since last gain > " +
+                    $"{AnchorProgressTimeoutMs:0}ms). Falling back to route-walk up to leaderIdx, " +
+                    $"then pather the short final hop.");
+            }
         }
 
         // ── Fix CJ (log-112 evidence) ──
@@ -4135,6 +4202,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         if (idx < 0) return false;
         if (idx > rendezvousCap) idx = rendezvousCap;
 
+        // Fix DP: reactive fallback armed — the direct Anchor pather failed this approach.
+        // Force a defer to route-walk regardless of the at-waypoint / distance checks below,
+        // so the assist route-walks toward leaderIdx (clean usePather=false) and the
+        // combat-handoff then pathers the short final hop. The handoff sets
+        // _anchorFallbackUsed so this does not re-fire for the final hop (loop guard).
+        if (_anchorPatherFallback && !_anchorFallbackUsed)
+        {
+            anchorCoords = new Vector3(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
+            return true;
+        }
+
         float distToTarget = playerReader.WorldPos.WorldDistanceXYTo(navigation.LoadedRoute[idx]);
         if (distToTarget <= Navigation.POP_DIST)
         {
@@ -4745,6 +4823,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // (poll interval ~250ms).
             _approachAnchorColocated = false;
             _anchorReached = false;  // Fix DM: clear the persistent anchor-reached latch at phase end
+            _anchorPatherFallback = false;        // Fix DP: clear reactive-fallback state at phase end
+            _anchorFallbackUsed = false;
+            _anchorApproachBestDist = float.MaxValue;
+            _anchorApproachProgressUtc = DateTime.MinValue;
 
             // Fix AN: gate the latch resets on the local-TTL state. The old
             // unconditional reset would clear _approachTargetAcquired and
@@ -5133,7 +5215,15 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 //
                 // Loop in case multiple close-packed waypoints are
                 // within POP_DIST simultaneously.
-                while (_assistRouteIndex < advanceCap)
+                // Fix DP: while the reactive fallback is armed, advance up to the leader's own
+                // route index (rendezvousCap) rather than the steady-state trailing-by-one cap
+                // (advanceCap). The anchor is the leader's position, so leaderIdx lands the
+                // assist right next to it; the leader has stopped (it's pulling), so advancing
+                // to its index can't overrun a moving leader.
+                int dpAdvanceLimit = (_anchorPatherFallback && !_anchorFallbackUsed)
+                    ? rendezvousCap
+                    : advanceCap;
+                while (_assistRouteIndex < dpAdvanceLimit)
                 {
                     float distToCurrent = playerReader.WorldPos.WorldDistanceXYTo(route[_assistRouteIndex]);
                     if (distToCurrent > Navigation.POP_DIST)
@@ -5183,6 +5273,19 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         _pendingAnchor = default;
                         int handoffIdx = _assistRouteIndex;
                         _assistRouteIndex = -1; // leaving RouteWalk mode
+
+                        // Fix DP: if this handoff is the reactive-fallback recovery completing,
+                        // latch _anchorFallbackUsed and clear the fallback so the short final
+                        // Anchor pather hop from here is NOT re-deferred (loop guard).
+                        if (_anchorPatherFallback)
+                        {
+                            _anchorPatherFallback = false;
+                            _anchorFallbackUsed = true;
+                            logger.LogInformation(
+                                $"[FFG] [FIX-FIRE] DP: reactive fallback reached route idx={handoffIdx} " +
+                                $"(near anchor) — committing to the short final Anchor pather hop, " +
+                                $"no further re-defer this approach.");
+                        }
 
                         // Inline co-location guard — mirrors the direct
                         // Anchor branch. If the route waypoint is
