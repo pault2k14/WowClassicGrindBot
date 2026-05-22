@@ -550,6 +550,44 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private bool _approachAnchorColocated;
 
     /// <summary>
+    /// Fix DM (log-128 00:16:33 evidence) — PERSISTENT "anchor reached" latch.
+    /// <para>
+    /// <see cref="_approachAnchorColocated"/> commits the assist to
+    /// position-chasing once it reaches the approach anchor, but it is reset on
+    /// every <c>FFG.OnEnter</c>. When the plan flickers ATG→FFG mid-approach
+    /// (log-128: <c>incombatrange</c> flips true the instant the interact-walk
+    /// brings the mob into combat range, before combat actually starts, which
+    /// fails ATG's <c>incombatrange=false</c> precondition and drops the planner
+    /// to FFG), that OnEnter reset wipes the latch. FFG then re-locks to the
+    /// approach anchor the assist has ALREADY reached and walked PAST while
+    /// approaching the mob, turning it ~180° backward to the anchor (the
+    /// user-observed "full 360° turn in place before the first Smite").
+    /// </para>
+    /// <para>
+    /// This latch persists across FFG.OnEnter (it is NOT reset there). Once the
+    /// assist has been to the anchor for the current pull, the assist never
+    /// turns back to it — it keeps position-chasing forward toward the
+    /// leader/target so it continues closing the gap (valuable for anchors far
+    /// from the mob and for melee classes that must reach melee range). Scoped
+    /// to the anchor position via <see cref="_anchorReachedPos"/>: a NEW pull
+    /// (anchor more than <see cref="AnchorReachedResetYards"/> away) re-arms
+    /// normal Anchor-mode rendezvous. Reset on a new anchor and when the
+    /// approach phase ends (<c>HasApproachStart=false</c> observed).
+    /// </para>
+    /// </summary>
+    private bool _anchorReached;
+    private Vector3 _anchorReachedPos;
+
+    /// <summary>
+    /// Fix DM: a published anchor farther than this from <see cref="_anchorReachedPos"/>
+    /// is treated as a NEW pull, re-arming Anchor-mode rendezvous. The same pull's
+    /// anchor is republished at identical coordinates (leader Fix BT reuses a stable
+    /// anchor within its 10s grace), so same-anchor drift is ~0y; a fresh pull's
+    /// anchor is the leader's new stop, almost always well beyond this.
+    /// </summary>
+    private const float AnchorReachedResetYards = 6.0f;
+
+    /// <summary>
     /// Fix AH (log-73 16:43:37 → 16:44:15): one-shot latch — true once
     /// FollowFocusGoal has pressed the focus chain
     /// (<c>PressTargetFocus</c> + <c>PressTargetOfTarget</c>) during the
@@ -1434,7 +1472,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -4388,6 +4426,28 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
                 Vector3 anchor = new(leader.ApproachStartWorldX, leader.ApproachStartWorldY, 0f);
 
+                // ── Fix DM — persistent "anchor reached" guard (see field docs) ──
+                // The within-session latch above is wiped on FFG.OnEnter, so a
+                // plan flicker (ATG→FFG when incombatrange flips true on reaching
+                // combat range) loses it and the assist re-locks to an anchor it
+                // already reached and walked past while approaching the mob —
+                // turning ~180° backward to it. Once reached for THIS pull, never
+                // go back: keep position-chasing forward toward the leader/target
+                // so the assist keeps closing on the mob. A new pull (anchor moved
+                // > AnchorReachedResetYards) re-arms normal Anchor-mode rendezvous.
+                if (_anchorReached)
+                {
+                    if (anchor.WorldDistanceXYTo(_anchorReachedPos) > AnchorReachedResetYards)
+                    {
+                        _anchorReached = false;  // new pull / new anchor — evaluate fresh below
+                    }
+                    else
+                    {
+                        _currentNavTargetMode = NavTargetMode.PositionChase;
+                        return ComputeFollowTargetWorldPos(leader);
+                    }
+                }
+
                 // Co-location guard: the approach-start anchor is the leader's world position
                 // at ATG entry. If the assist had been navigating toward the same location as
                 // the FRG patrol waypoint (common — the leader was just there), it may have
@@ -4402,6 +4462,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 if (anchorDist < Navigation.POP_DIST)
                 {
                     _approachAnchorColocated = true;
+                    _anchorReached = true;          // Fix DM: persists across FFG.OnEnter
+                    _anchorReachedPos = anchor;     // Fix DM: scope to this pull's anchor
                     logger.LogWarning(
                     $"[FFG] Approach-start anchor co-located ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
                     "anchor would be immediately popped; reverting to position-chasing for the remainder of this approach phase.");
@@ -4609,6 +4671,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // assist observes HasApproachStart=false at least once between phases
             // (poll interval ~250ms).
             _approachAnchorColocated = false;
+            _anchorReached = false;  // Fix DM: clear the persistent anchor-reached latch at phase end
 
             // Fix AN: gate the latch resets on the local-TTL state. The old
             // unconditional reset would clear _approachTargetAcquired and
@@ -5059,6 +5122,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         if (anchorDist < Navigation.POP_DIST)
                         {
                             _approachAnchorColocated = true;
+                            _anchorReached = true;            // Fix DM: persists across FFG.OnEnter
+                            _anchorReachedPos = anchorTarget; // Fix DM: scope to this pull's anchor
                             logger.LogWarning(
                                 $"[FFG] [COMBAT-HANDOFF] Route waypoint idx={handoffIdx} " +
                                 $"is co-located with anchor ({anchorDist:0.0}y < {Navigation.POP_DIST}y) — " +
