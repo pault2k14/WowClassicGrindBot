@@ -382,6 +382,16 @@ public sealed partial class Navigation : IDisposable
     // Center is 3y ahead (1y gap + 2y half-size).
     private const float StuckRectHalfSizeY = 2f;
 
+    // ── Fix DJ (log-127 22:40:30) ── A stuck rect is only a useful
+    // approach-escape DIRECTION hint if it is near the player. Stuck rects
+    // accumulate across the whole patrol (5 scattered ~140y apart in log-127);
+    // using the most-recent one for direction when it is far away points the
+    // escape in a bogus direction AND places the freshly-added rect on the
+    // leader's own path to the mob, self-blocking the approach. Any stuck-rect
+    // center farther than this is ignored as a direction source (the selection
+    // falls through to the facing direction toward the approach target).
+    private const float StuckRectDirectionMaxYards = 25f;
+
     /// <summary>How far outside a forbidden rect detour points are placed (WORLD units).</summary>
     public float DetourMargin { get; set; } = 12f;
 
@@ -2556,11 +2566,27 @@ public sealed partial class Navigation : IDisposable
     /// Boxes a region around the stuck position as a blacklisted area so the pather
     /// routes around it on future requests.
     /// </summary>
+    /// <summary>
+    /// Fix DJ: true only if the most-recent stuck rect's center is within
+    /// StuckRectDirectionMaxYards of posW — i.e. close enough to be a relevant
+    /// direction hint for the current approach escape. Far/stale rects return
+    /// false so the caller falls through to the facing direction.
+    /// </summary>
+    private bool LastStuckRectNearForDirection(Vector3 posW)
+    {
+        if (_stuckWorldRects.Count == 0) return false;
+        var r = _stuckWorldRects[_stuckWorldRects.Count - 1];
+        float rcx = (r.MinX + r.MaxX) * 0.5f;
+        float rcy = (r.MinY + r.MaxY) * 0.5f;
+        float dx = rcx - posW.X;
+        float dy = rcy - posW.Y;
+        return (dx * dx + dy * dy) <= StuckRectDirectionMaxYards * StuckRectDirectionMaxYards;
+    }
+
     private void AddStuckRect(Vector3 posW, Vector3 forwardDir = default)
     {
         Vector3 center = posW;
 
-        if (forwardDir != default)
         {
             float len = MathF.Sqrt(forwardDir.X * forwardDir.X + forwardDir.Y * forwardDir.Y);
             if (len > 0.01f)
@@ -2741,7 +2767,8 @@ public sealed partial class Navigation : IDisposable
                     0f);
                 logger.LogInformation("[NAV] ApproachEscape: using chase target for stuck rect direction.");
             }
-            else if (_stuckWorldRects.Count > 0)
+            else if (_stuckWorldRects.Count > 0 &&
+                     LastStuckRectNearForDirection(Nav2D(playerReader.WorldPos)))
             {
                 var prevRect = _stuckWorldRects[_stuckWorldRects.Count - 1];
                 float rcx = (prevRect.MinX + prevRect.MaxX) * 0.5f;
@@ -3427,7 +3454,8 @@ public sealed partial class Navigation : IDisposable
             dx = rcx - currentW.X;
             dy = rcy - currentW.Y;
             float rlen = Sqrt(dx * dx + dy * dy);
-            if (rlen >= 0.5f)
+            // Fix DJ: ignore a far/stale stuck rect as a direction hint.
+            if (rlen >= 0.5f && rlen <= StuckRectDirectionMaxYards)
             {
                 directionFound = true;
                 logger.LogInformation($"[NAV] ApproachEscape: using stuck rect center {new Vector3(rcx, rcy, 0f)} for direction.");

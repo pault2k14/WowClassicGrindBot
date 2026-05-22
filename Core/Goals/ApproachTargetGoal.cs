@@ -544,6 +544,21 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             if (assistReady || elapsed >= _anchorSyncPauseTimeoutSec)
             {
                 _anchorSyncPauseActive = false;
+                // ── Fix DK (log-127 22:40:30) ── The sync-pause is an
+                // INTENTIONAL hold (the leader stands at its approach anchor
+                // waiting for the assist), but ApproachDurationMs accrues during
+                // it, so nextStuckCheckTime is already "due" the instant the
+                // pause ends. The very next NonCombatApproach then samples
+                // !bits.Moving() (line ~814) ~1ms after the leader presses
+                // Approach — before it has begun moving — and falsely logs
+                // "Seems stuck! Attempting pather escape," triggering an escape
+                // the leader never needed (it was never wedged on anything).
+                // Re-arm the not-moving check so the leader gets a fresh
+                // STUCK_INTERVAL_MS (400ms) to begin the interact-walk / react
+                // to a too-far UI error before the instantaneous check can fire.
+                // The 3s range-progress check below remains the real backstop
+                // for a genuine stall, so this only defers a true stuck by ≤400ms.
+                SetNextStuckTimeCheck();
                 logger.LogInformation(
                     $"[ATG] [FIX-FIRE] BN/BS: Anchor sync-pause complete: distToAnchor={distToAnchor:0.0}y " +
                     $"(threshold={AnchorSyncReadyYards}y), assistNavigating={assistNavigating} " +
