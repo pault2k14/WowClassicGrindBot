@@ -1434,7 +1434,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -1923,7 +1923,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     // Fix AJ: verify the chain produced a HOSTILE target before
                     // latching. See the comment block above for the full
                     // race-condition analysis and evidence trail from log-75.
-                    if (bits.Target() && bits.Target_Hostile())
+                    //
+                    // Fix DF (log-124 19:27:34:442): also require the target to
+                    // be ALIVE. A just-killed mob keeps its hostile flag for a
+                    // moment, so `Target() && Target_Hostile()` alone latches the
+                    // corpse (log-124: guid=1034619 latched with dead=True right
+                    // after CombatGoal finished it). ATG cannot engage a corpse,
+                    // so the planner never selects ATG, the one-shot latch never
+                    // clears, and AM logs stale-latch warnings for ~8s while the
+                    // assist holds in approach state instead of following/idling.
+                    // The dead check is already computed below for the AM
+                    // diagnostic (diagTargetDead); gate the latch on it too.
+                    if (bits.Target() && bits.Target_Hostile() && !bits.Target_Dead())
                     {
                         _approachTargetAcquired = true;
                         _approachTargetLatchedUtc = DateTime.UtcNow;  // Fix AM: record for stale-latch warning
@@ -6465,6 +6476,41 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             // already reported. The chase watchdog (TickChaseWatchdog,
             // 15 s on Navigation.ChaseSinceBestSec) is the escalation
             // path when Stuck persists too long.
+            return;
+        }
+
+        // ── Fix DE (log-124 19:27:34-37 corridor-exit false stuck) ──
+        // Don't TRIGGER a new stuck report while the assist is within follow
+        // distance of the leader. Post-combat, FFG.OnEnter starts a 3s idle-
+        // guard (Fix CJ's ffgIdleGuardActive) that suppresses Idle so the
+        // assist stays ready for the leader's next sprint-to-mob. When the
+        // leader is instead stationary (looting / fighting in place), the
+        // assist holds co-located (~6y < FollowingMaxYards) and doesn't move —
+        // which is correct (it's AT its follow position), but this detector
+        // reads "moved <1y in 2.5s" as stuck and reports it, flipping the
+        // leader's pause from distance- to stuck-gating (sticky; escalates to
+        // CantFollow). Same rationale as the BH-3 parked guard above:
+        // correctly stationary near the leader, not stuck.
+        //
+        // Evidence log-124: OnEnter 19:27:34:011 (mob died) → assist held at
+        // <-492,-4450>, ~6.2y from leader → false Stuck 19:27:36:645 (paused
+        // the leader) → guard expired 19:27:37:011 → assist idled "Reached
+        // follow position (dist=6.2y)". It was within follow distance the
+        // whole time; never actually stuck.
+        //
+        // Within follow distance the leader needn't pause for the assist (it
+        // is already close enough), so suppressing the report here is safe and
+        // preserves CJ's "stay active, don't formally Idle" intent without the
+        // false pause. Only the TRIGGER path is gated; the _activeStuckReported
+        // resume path above is untouched, and once the leader moves away
+        // (dist ≥ FollowingMaxYards) the detector re-engages for genuine
+        // stalls. The window is reset so it restarts fresh from here.
+        LeaderState? stuckLeader = leaderConnection.LastLeaderState;
+        if (stuckLeader != null &&
+            currentPos.WorldDistanceXYTo(stuckLeader.WorldPos) < FollowingMaxYards)
+        {
+            _activeStuckSinceUtc = DateTime.MinValue;
+            _activeStuckCheckPosW = currentPos;
             return;
         }
 
