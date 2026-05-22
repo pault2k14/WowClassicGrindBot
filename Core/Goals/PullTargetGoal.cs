@@ -458,7 +458,25 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         if (PullDurationMs >= _rangeStuckCheckAtMs && !navigation.IsApproachEscapeActive)
         {
             float currentRange = playerReader.MinRange();
-            if (currentRange >= _rangeStuckLastMinRange)
+            // ── Fix DS (log-131 13:42:03 — leader "ran away and came back") ──
+            // MinRange()==0 is the sentinel for "target not in any detectable
+            // range bracket" (out of every range check, or LOS-blocked), NOT a
+            // real 0y distance — incombatrange would be true if it were melee.
+            // The detector seeded _rangeStuckLastMinRange with that 0 (see the
+            // seed block below) and then read 0 again 3s later, so 0 >= 0 gave a
+            // false "No range progress (0.0 -> 0.0y)" and fired a pointless
+            // ApproachEscape: the leader detoured ~18y away from mob 1094502 and
+            // returned to the SAME spot, where combat started 12s later (via the
+            // mob aggroing the party). It was the ONLY escape in the entire run.
+            // Skip the progress comparison on invalid (0) readings and defer to
+            // the next interval. Genuine physical stuck is still caught by the
+            // !IsMoving() escape below; genuine no-progress across VALID readings
+            // still escapes.
+            if (currentRange <= 0f)
+            {
+                _rangeStuckCheckAtMs = PullDurationMs + RangeStuckIntervalMs;
+            }
+            else if (currentRange >= _rangeStuckLastMinRange)
             {
                 logger.LogInformation(
                     $"[PTG] No range progress after {RangeStuckIntervalMs:0}ms " +
@@ -475,7 +493,11 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         }
         else if (_rangeStuckLastMinRange == float.MaxValue)
         {
-            _rangeStuckLastMinRange = playerReader.MinRange();
+            // Fix DS: only seed the tracker with a VALID (non-zero) reading so a
+            // transient 0 sentinel can't become the baseline that yields 0 >= 0.
+            float seed = playerReader.MinRange();
+            if (seed > 0f)
+                _rangeStuckLastMinRange = seed;
         }
 
         if (!stuckDetector.IsMoving())
