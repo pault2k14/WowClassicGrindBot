@@ -1766,6 +1766,39 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     assistStatusProvider.CurrentStatus = BotStatus.Following;
                 }
             }
+            else if (leader != null && leader.HasApproachStart
+                     && distToLeader <= LeaderPauseYards)
+            {
+                // Fix DT (log-132 15:03:02-10): the leader is actively engaging
+                // (HasApproachStart), so the assist is exiting FFG to JOIN the pull on
+                // the leader's target -- its own ATG just became selectable via
+                // partyEngaging (= PartyInCombat() || (AssistFocus && HasApproachStart)).
+                // It is NOT stopping out of position. Reporting Waiting here would make
+                // the leader's assistisfollowing GoapKey False, failing ApproachTargetGoal's
+                // PartyLeader precondition (assistisfollowing=true, ATG line 182): the
+                // leader then gets NO PLAN and stops approaching, HasApproachStart drops,
+                // the assist returns to FFG/Following, the leader can approach again, the
+                // assist leaves again -- a leader<->assist oscillation in which the leader
+                // never closes on the mob and the squishy assist engages it first
+                // (operator-observed in log-132). Report NavigatingToLeader instead, which
+                // AnyAssistIsFollowing() counts as available (see ~line 2272), so
+                // assistisfollowing stays true and the leader can complete its approach.
+                // ATG's own anchor sync-pause (BN/BS) still holds the leader at the anchor
+                // until the assist is in position, so the leader does not pull without the
+                // healer. Bounded by LeaderPauseYards (25y) -- the leader's own pause-for-
+                // assist threshold -- so a genuinely lagging assist still reports Waiting.
+                if (assistStatusProvider.CurrentStatus != BotStatus.NavigatingToLeader)
+                {
+                    logger.LogInformation(
+                        $"[FFG] [FIX-FIRE] DT: assist at {distToLeader:0.0}y from leader " +
+                        $"(beyond FollowingMaxYards={FollowingMaxYards}y) but leader is engaging " +
+                        $"(HasApproachStart) within LeaderPauseYards={LeaderPauseYards}y -- reporting " +
+                        $"NavigatingToLeader instead of Waiting so the leader's assistisfollowing " +
+                        $"precondition stays satisfied and it keeps approaching " +
+                        $"(was {assistStatusProvider.CurrentStatus}).");
+                    assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
+                }
+            }
             else
             {
                 if (assistStatusProvider.CurrentStatus != BotStatus.Waiting)
