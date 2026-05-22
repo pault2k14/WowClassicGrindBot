@@ -799,6 +799,41 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private int _navAttempt;
     private bool _navRewindActive;
     private Vector3 _navRewindAnchorW;
+
+    // ── Fix DA (log-123 16:49:58 corridor between hill and tree) ──
+    //
+    // Counter for consecutive intermediate-step retries on a positional
+    // U-turn rejection. See Navigation_OnPathFailed for the full mechanism.
+    // Reset to 0 wherever _navAttempt is reset (StartNavigatingToLeader,
+    // ResetNavState) so each fresh navigation / cleared pocket gets a full
+    // step budget.
+    private int _daIntermediateStepCount;
+
+    // Short straight-line step length toward the rejected far target.
+    //
+    // MUST stay ≤ AvgDistance*2 for a single pushed waypoint so Navigation's
+    // usePather test (Navigation.cs:3651 `usePather = distance > MaxDistance
+    // || distance > AvgDistance*2`) evaluates FALSE. For a single waypoint
+    // AvgDistance = OutDoorMinDistance = 3y, so the threshold is 6y; 5y keeps
+    // usePather=false with margin. That matters because usePather=false makes
+    // Navigation build a DIRECT straight-line route (builtDirectRoute) rather
+    // than calling the pather — and the pather is precisely what is broken in
+    // this corridor (it returns ~140-node U-turn detours; see OnPathFailed).
+    // A direct straight-line step is exactly how the LEADER traverses the
+    // corridor (it logged builtDirectRoute at the same spot and walked
+    // straight through), so DA reproduces the leader's working mechanism
+    // instead of relying on the pather returning a clean short path.
+    private const float DAStepYards = 5.0f;
+
+    // Cap on consecutive intermediate steps before falling through to the
+    // existing rewind/CantFollow escalation. One 5y direct step already drops
+    // the remaining route leg under the route-span usePather threshold (~14y
+    // for the assist's typical 2-waypoint span), after which normal RouteWalk
+    // resumes directly; 3 steps (15y of guaranteed forward progress) covers
+    // deeper pockets while bounding the probe if the target is a genuine dead
+    // zone rather than a pather-defective but walkable corridor.
+    private const int DAMaxIntermediateSteps = 3;
+
     /// <summary>Last recorded position used to detect forward progress during navigation.
     /// Reset each time the assist moves <see cref="NavigationProgressResetYards"/>, which
     /// resets <see cref="_navActiveElapsed"/> so the timeout only accumulates when truly stuck.</summary>
@@ -1399,7 +1434,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -4122,6 +4157,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         Vector3 target = GetNavigationTarget(leader);
         _lastNavigatedToLeaderWorldPos = target;
         _navAttempt = 0;
+        _daIntermediateStepCount = 0;
         _navRewindActive = false;
         _navRewindAnchorW = default;
         _navTimerInit = false;
@@ -6183,6 +6219,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private void ResetNavState()
     {
         _navAttempt = 0;
+        _daIntermediateStepCount = 0;
         _navRewindActive = false;
         _navRewindAnchorW = default;
         _navTimerInit = false;
@@ -7034,6 +7071,78 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     {
         if (_navState != NavState.NavigatingToLeader)
             return;
+
+        // ── Fix DA (log-123 16:49:58:082 corridor between hill and tree) ──
+        //
+        // ROOT CAUSE (corrected): the corridor navmesh is defective for
+        // PATHER queries. Any pathfind through it returns a ~140-node U-turn
+        // detour — confirmed for BOTH bots: assist reqId=95/96 pathLen=140
+        // (<-515.68,-4445.42> → wp[47]=<-499.19,-4448.87>, 16.85y) AND leader
+        // reqId=7 pathLen=142 (<-493.04,-4449.85> → <-515.57,-4445.47>,
+        // 22.95y). The straight line is physically walkable — the LEADER
+        // walked it: at the SAME spot <-515.53,-4445.15> (0.34y from where the
+        // assist later stuck) the leader logged builtDirectRoute wpCount=99
+        // usePather=false and walked straight to wp[47].
+        //
+        // Why the leader sails through and the assist didn't: Navigation only
+        // calls the (broken) pather when usePather=true, where (Navigation.cs:
+        // 3651) `usePather = distance > MaxDistance(200) || distance >
+        // AvgDistance*2`, and `AvgDistance = wpCount>1 ? max(mapDistanceXY/
+        // wpCount, OutDoorMin=3) : OutDoorMin=3`.
+        //   • Leader loads its whole remaining route → wpCount=99 →
+        //     AvgDistance≈10y → 16.75 > 20? NO → usePather=FALSE → direct walk.
+        //   • Assist trails the leader by one route index, so its route span
+        //     is just [route[47..48]] = 2 waypoints → AvgDistance≈7y →
+        //     16.85 > 14? YES → usePather=TRUE → pather → defective U-turn →
+        //     AC+AE+AI+AL rejects → rewind/retry (same spot, same target,
+        //     identical re-reject) → CantFollow → 4 escape hops over ~4s
+        //     (the user's "back and forth / stuck").
+        //
+        // FIX: on the rejection, step DAStepYards (5y ≤ AvgDistance*2=6y for a
+        // single pushed waypoint) toward the rejected target. A ≤6y single
+        // waypoint keeps usePather=FALSE → builtDirectRoute → a straight-line
+        // walk that NEVER touches the broken pather — reproducing the leader's
+        // mechanism. One step also drops the remaining route leg under the
+        // route-span usePather threshold (~14y), so normal RouteWalk resumes
+        // directly on the next tick. Capped at DAMaxIntermediateSteps; on
+        // exhaustion fall through to the existing rewind/CantFollow logic
+        // (which still sees _lastPathFailureWasRejection=true, preserving
+        // Fix BB's toward-leader escape direction).
+        if (_lastPathFailureWasRejection &&
+            _daIntermediateStepCount < DAMaxIntermediateSteps)
+        {
+            float dx = endW.X - startW.X;
+            float dy = endW.Y - startW.Y;
+            float dist = MathF.Sqrt(dx * dx + dy * dy);
+            if (dist > DAStepYards)
+            {
+                float inv = DAStepYards / dist;
+                Vector3 step = new Vector3(
+                    startW.X + dx * inv,
+                    startW.Y + dy * inv,
+                    startW.Z);
+
+                bool stepBlocked =
+                    navigation.AreaBlacklist != null &&
+                    navigation.AreaBlacklist.ContainsWorld(step);
+
+                if (!stepBlocked)
+                {
+                    _daIntermediateStepCount++;
+                    logger.LogInformation(
+                        $"[FFG] [FIX-FIRE] DA: pather-defective corridor — far target " +
+                        $"{endW} ({dist:0.0}y) U-turned. Stepping {DAStepYards:0}y along the " +
+                        $"heading to {step} as a single waypoint (≤6y ⇒ usePather=false ⇒ " +
+                        $"builtDirectRoute straight-line walk, bypassing the broken pather — " +
+                        $"the same mechanism the leader uses through this corridor). " +
+                        $"Step {_daIntermediateStepCount}/{DAMaxIntermediateSteps}; one step " +
+                        $"drops the remaining leg under the route-span usePather threshold so " +
+                        $"normal RouteWalk resumes.");
+                    navigation.SetSingleWaypoint(step);
+                    return;
+                }
+            }
+        }
 
         if (_navAttempt >= 1)
         {

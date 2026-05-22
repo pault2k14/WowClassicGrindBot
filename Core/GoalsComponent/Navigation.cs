@@ -2216,7 +2216,51 @@ public sealed partial class Navigation : IDisposable
             wayPoints.Push(Nav2D(point));
         }
 
-        AvgDistance = wayPoints.Count > 1 ? Max(mapDistanceXY / wayPoints.Count, OutDoorMinDistance) : OutDoorMinDistance;
+        // ── Fix DC (supersedes DB for the route-loaded case) ──
+        //
+        // AvgDistance is the "typical stride between consecutive route
+        // waypoints," consumed solely by the usePather test (`distance >
+        // AvgDistance*2`) to decide whether the next leg is too long to walk
+        // directly and must be pathed. The stride is an INTRINSIC property of
+        // the route (~13-14y for this route), independent of how many
+        // waypoints happen to be pushed right now.
+        //
+        // The bug this addresses: deriving the stride from the pushed span
+        // distorts it whenever the pushed set isn't representative of the
+        // route. The leader pushes its whole remaining route (pathMap[
+        // resumeIndex..], ~99 wp), so its span-derived stride ≈ the true
+        // stride. The assist pushes a truncated [route[resumeIndex..leaderIdx]]
+        // span (2 wp when it trails the leader by one index) whose
+        // span-derived stride is just one segment's length — and on a dense
+        // stretch of route that under-counts and trips usePather on a normal
+        // leg, invoking the corridor's defective pather (the log-123 "back and
+        // forth"). DB's ÷(N-1) fixed the worst arithmetic but the value was
+        // still span-composition-sensitive.
+        //
+        // Fix: when a route is loaded (assist), compute the stride from a
+        // local window of LoadedRoute (RouteLocalStride) so the leader's
+        // full-route push and the assist's truncated span yield the SAME
+        // stride for the same route position — true parity in the usePather
+        // decision, with the truncated span left to govern MOVEMENT only.
+        //
+        // The leader's FRG never calls LoadRoute(), so its LoadedRoute is
+        // empty → RouteLocalStride returns 0 → it falls back to the DB
+        // per-span value (mapDistanceXY/(N-1)) over its full-route push, which
+        // equals its current behavior. So the leader is provably unchanged;
+        // only the assist's value moves (toward the leader's). The Count==1
+        // branch (single-waypoint targets: body-chase, anchor, escape/DA
+        // steps) is untouched — those aren't route legs.
+        if (wayPoints.Count > 1)
+        {
+            float routeStride = RouteLocalStride(wayPoints.Peek());
+            float spanStride = mapDistanceXY / (wayPoints.Count - 1); // per-span fallback (former Fix DB, now subsumed)
+            float stride = routeStride > 0f ? routeStride : spanStride;
+            AvgDistance = Max(stride, OutDoorMinDistance);
+        }
+        else
+        {
+            AvgDistance = OutDoorMinDistance;
+        }
 
         escapeRouteInProgress = false;
         escapeActive = false;
@@ -2228,6 +2272,50 @@ public sealed partial class Navigation : IDisposable
                 p.X is >= 0 and <= 100 &&
                 p.Y is >= 0 and <= 100;
         }
+    }
+
+    // ── Fix DC helper ──
+    // Average segment length of LoadedRoute over a local window centered on
+    // the route waypoint nearest to `nearTopW` (the span's lead waypoint,
+    // which for a route span IS a route member, so the nearest match is
+    // exact). Returns the route's intrinsic local stride — stable regardless
+    // of how many waypoints are currently pushed — so the leader's full-route
+    // push and the assist's truncated span produce the SAME usePather stride.
+    //
+    // Returns 0 when no usable route is loaded (LoadedRoute.Length < 2). The
+    // leader's FRG never calls LoadRoute(), so its LoadedRoute is empty and it
+    // takes the per-span fallback (unchanged behavior). LoadedRoute is stored
+    // in world coords (normalized at load), matching wayPoints/WorldPos.
+    private float RouteLocalStride(Vector3 nearTopW)
+    {
+        Vector3[] route = LoadedRoute;
+        if (route.Length < 2)
+            return 0f;
+
+        // Nearest route index to the lead waypoint (exact for route spans).
+        int nearest = 0;
+        float best = float.MaxValue;
+        Vector3 probe = Nav2D(nearTopW);
+        for (int i = 0; i < route.Length; i++)
+        {
+            float d = probe.WorldDistanceXYTo(Nav2D(route[i]));
+            if (d < best) { best = d; nearest = i; }
+        }
+
+        // Average segment length over [nearest-W .. nearest+W] (up to 2W
+        // segments). W=3 samples the local route density without smearing
+        // across distant, differently-spaced sections.
+        const int W = 3;
+        int lo = Math.Max(0, nearest - W);
+        int hi = Math.Min(route.Length - 1, nearest + W);
+        float sum = 0f;
+        int segs = 0;
+        for (int i = lo; i < hi; i++)
+        {
+            sum += Nav2D(route[i]).WorldDistanceXYTo(Nav2D(route[i + 1]));
+            segs++;
+        }
+        return segs > 0 ? sum / segs : 0f;
     }
 
     /// <summary>
@@ -4928,7 +5016,33 @@ public sealed partial class Navigation : IDisposable
 
     private void V1_AttemptToKeepRouteToWaypoint()
     {
-        float totalDistance = VectorExt.TotalDistance<Vector3>(TotalRoute, VectorExt.WorldDistanceXY);
+        // ── Fix DD (parity with DC) ──
+        // This keep/clear gate asks "is the journey substantial enough that
+        // keeping the pathed leg is worth it?" via TotalDistance(TotalRoute),
+        // where TotalRoute = routeToNextWaypoint + wayPoints. For the leader,
+        // TotalRoute IS the full remaining route, so it is correctly judged
+        // LONG and takes the nuanced keep/clear branch. For the assist,
+        // TotalRoute is the truncated movement span (the
+        // [route[resumeIndex..leaderIdx]] push + its sub-route, ~14-30y), so
+        // the gate always judges the journey "short" and force-clears the
+        // pathed leg — even though the assist is patrolling the same long
+        // route. Like DC, classify by the route-intrinsic length (LoadedRoute)
+        // when a route is loaded, so the assist is judged like the leader.
+        //
+        // The leader's FRG never calls LoadRoute() → its LoadedRoute is empty
+        // → it falls back to TotalRoute, byte-for-byte its current behavior.
+        // Only the assist's classification changes (toward the leader's).
+        //
+        // LATENT: this path does NOT currently execute for the assist — its
+        // pather is RemotePathingAPIV3, which is gated out at the Resume()
+        // callsite (`pather.GetType() != typeof(RemotePathingAPIV3)`). In
+        // log-123 V1 fires 0× for the assist vs 4× for the leader. This is a
+        // latent-correctness fix; it only takes effect if the assist is ever
+        // run on a non-V3 (e.g. LocalPathingApi) pather. The MOVEMENT span is
+        // untouched — only this classification reads the full route.
+        float totalDistance = LoadedRoute.Length > 1
+            ? VectorExt.TotalDistance<Vector3>(LoadedRoute, VectorExt.WorldDistanceXY)
+            : VectorExt.TotalDistance<Vector3>(TotalRoute, VectorExt.WorldDistanceXY);
         if (totalDistance > MaxDistance / 2)
         {
             Vector3 playerW = Nav2D(playerReader.WorldPos);
