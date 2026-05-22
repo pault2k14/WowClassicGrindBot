@@ -52,6 +52,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// leader can resume patrol before the assist reaches the minimum following distance.</summary>
     private const float NavigatingExitYards = 10f;
 
+    /// <summary>
+    /// Fix DN (log-129 evidence): sanity cap on leader distance for the
+    /// "hold while in combat range during a pre-combat engage" guard. While the
+    /// assist is within its own combat range of the target and the leader is
+    /// approaching (HasApproachStart) but combat has not started, the assist holds
+    /// position instead of pather-chasing the leader — UNLESS the leader is farther
+    /// than this, in which case a genuinely departing leader is still followed so
+    /// the assist is not stranded. Generous (beyond a caster's combat range) so it
+    /// only releases the hold when the leader has clearly left the engagement.
+    /// </summary>
+    private const float HoldInCombatRangeMaxLeaderYards = 30f;
+
     /// <summary>Leader must be this close before the assist exits CantFollow.
     /// MUST exceed <c>Navigation.POP_DIST</c> (3.6y) — the leader's navigation considers
     /// a waypoint reached at POP_DIST and parks there. If LeaderArrivedYards were below
@@ -1472,7 +1484,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM, DN. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -2133,6 +2145,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
     }
 
+    /// <summary>
+    /// Fix DN (log-129 evidence): true when the assist should HOLD position rather
+    /// than pather-chase the leader. Fires when the assist is already within its own
+    /// combat range of the target during an active pre-combat engage (leader
+    /// HasApproachStart, combat not yet started). In that window the assist is
+    /// positioned to cast/strike, so chasing the (out-of-follow-range) leader the
+    /// rest of the way only drives FFG's PositionChase through the defective-navmesh
+    /// corridor — which returns rear-pointing/convoluted routes and a jittering follow
+    /// target, producing the wide left/right re-aim swings seen right before the first
+    /// cast. Holding avoids the swings without losing approach (already in range);
+    /// Combat starts within ~1-3s and the Combat goal takes over facing+casting.
+    /// <para>
+    /// Complements Fix CJ: CJ keeps the assist chasing while it still needs to close
+    /// distance (NOT in combat range); DN holds once it IS in range. The two are
+    /// mutually exclusive on <see cref="PlayerReader.WithInCombatRange"/>. Bounded by
+    /// <see cref="HoldInCombatRangeMaxLeaderYards"/> so a departing leader is followed.
+    /// </para>
+    /// </summary>
+    private bool ShouldHoldInCombatRange(LeaderState leader, float distToLeader)
+    {
+        return leader.HasApproachStart
+            && !bits.Combat()
+            && playerReader.WithInCombatRange()
+            && distToLeader < HoldInCombatRangeMaxLeaderYards;
+    }
+
     // -----------------------------------------------------------------------
     // State: Idle — within FollowingMaxYards, posting Following
     // -----------------------------------------------------------------------
@@ -2153,6 +2191,21 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // Beyond dead-band upper threshold → start navigating.
         if (dist > NavigatingMinYards)
         {
+            // Fix DN: if already in combat range of the target during a pre-combat
+            // engage, hold here instead of starting a pather-chase toward the leader.
+            if (ShouldHoldInCombatRange(leader, dist))
+            {
+                if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+                {
+                    logger.LogInformation(
+                        $"[FFG] [FIX-FIRE] DN: in combat range during engage " +
+                        $"(leader {dist:0.0}y, HasApproachStart=true, bits.Combat=false) — " +
+                        $"holding instead of chasing leader (avoids pre-cast pather swings).");
+                    assistStatusProvider.CurrentStatus = BotStatus.Following;
+                }
+                wait.Update();
+                return;
+            }
             logger.LogInformation(
                 $"[FFG] Leader out of range ({dist:0.0}y > {NavigatingMinYards}y) — starting navigation.");
             StartNavigatingToLeader(leader);
@@ -2435,6 +2488,26 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
 
         float dist = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
+
+        // Fix DN (log-129 evidence): if we have entered combat range of the target
+        // mid-chase during a pre-combat engage, abort the chase and hold (Idle). This
+        // is what stops the PositionChase pather from swinging the bot left/right right
+        // before the first cast — the assist is already in range to fight. The Idle
+        // state's own DN guard then keeps it holding until combat starts (Combat goal
+        // takes over) or the leader leaves combat range. See ShouldHoldInCombatRange.
+        if (ShouldHoldInCombatRange(leader, dist))
+        {
+            logger.LogInformation(
+                $"[FFG] [FIX-FIRE] DN: entered combat range during engage " +
+                $"(leader {dist:0.0}y, HasApproachStart=true, bits.Combat=false) — " +
+                $"aborting chase, holding (avoids pre-cast pather swings).");
+            navigation.Stop();
+            input.StopForward(true);
+            ResetNavState();
+            EnterState(NavState.Idle);
+            assistStatusProvider.CurrentStatus = BotStatus.Following;
+            return;
+        }
 
         // ── Fix CJ (log-112 evidence) ──
         // Suppress Idle entry in two cases:
