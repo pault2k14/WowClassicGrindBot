@@ -1434,7 +1434,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -5858,6 +5858,84 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 resumeIndex++;
             else
                 break;
+        }
+
+        // ── Fix DH (log-126 20:32:14 evidence) — direction-aware span start ──
+        // CB applies a direction-aware skip on the Initial-sync path: when the
+        // bot is near the leader and route[syncIdx] heads AWAY from the leader,
+        // it scans forward for a better-aligned index. But the resumeIndex
+        // computed above (distance/progress projection + POP) has NO such
+        // check, so the span can START at a waypoint that heads away from the
+        // target — the bot walks BACKWARD to it before progressing.
+        //
+        // log-126 20:32:14:698: BE pushed route[8..18] from closestIndex=7;
+        // route[8]=<-718.5,-4194.1> was ~19y NORTH while the trailing target
+        // (leader's body) was SOUTH at <-720.9,-4213.0>, so the assist turned
+        // north (backward). 0.6s later CB's Initial sync skipped 7→18
+        // (route[7] cos=-0.69), but BE had already pushed the backward span.
+        // The flip between BE's backward span (north) and CR's forward
+        // body-chase (south) was the post-combat N/S oscillation the user saw.
+        //
+        // CR (below) does not catch this: once resumeIndex projects to 8, the
+        // trailing target is closer to route[leaderIdx]=18 than to route[8]
+        // (route[8] is far north), so CR's malformed check passes and the
+        // backward span is pushed anyway.
+        //
+        // Apply CB's skip here against `target` (what the span must lead
+        // toward): if the bot is within CBLeaderProximityYards of the target
+        // and route[resumeIndex] heads away (cos < CBBackwardCosThreshold),
+        // scan forward [resumeIndex+1..leaderIdx] for the best-aligned index
+        // (CBMaxScanDistanceYards / CBImprovementMargin gates, identical to
+        // CB). If the skip reaches leaderIdx, the resumeIndex>=leaderIdx check
+        // below falls through to SetSingleWaypoint (forward body-chase) — no
+        // backward span. In healthy patrol route[resumeIndex] heads TOWARD the
+        // target (cos > 0), so DH is inert.
+        if (resumeIndex < leaderIdx)
+        {
+            float botToTargetDH = playerPos.WorldDistanceXYTo(target);
+            if (botToTargetDH < CBLeaderProximityYards && botToTargetDH > 0.001f)
+            {
+                Vector3 pickedDH = route[resumeIndex];
+                float pdx = pickedDH.X - playerPos.X;
+                float pdy = pickedDH.Y - playerPos.Y;
+                float plen = MathF.Sqrt(pdx * pdx + pdy * pdy);
+                float tdx = target.X - playerPos.X;
+                float tdy = target.Y - playerPos.Y;
+                if (plen > 0.001f)
+                {
+                    float pickedCosDH = (pdx * tdx + pdy * tdy) / (plen * botToTargetDH);
+                    if (pickedCosDH < CBBackwardCosThreshold)
+                    {
+                        int bestIdxDH = resumeIndex;
+                        float bestCosDH = pickedCosDH;
+                        for (int i = resumeIndex + 1; i <= leaderIdx; i++)
+                        {
+                            Vector3 cand = route[i];
+                            float cdx = cand.X - playerPos.X;
+                            float cdy = cand.Y - playerPos.Y;
+                            float clen = MathF.Sqrt(cdx * cdx + cdy * cdy);
+                            if (clen > CBMaxScanDistanceYards) continue;
+                            if (clen < 0.001f) continue;
+                            float ccos = (cdx * tdx + cdy * tdy) / (clen * botToTargetDH);
+                            if (ccos > bestCosDH + CBImprovementMargin)
+                            {
+                                bestCosDH = ccos;
+                                bestIdxDH = i;
+                            }
+                        }
+                        if (bestIdxDH != resumeIndex)
+                        {
+                            logger.LogInformation(
+                                $"[FFG] [FIX-FIRE] DH: direction-aware span-start skip " +
+                                $"{resumeIndex} → {bestIdxDH} (route[{resumeIndex}]={pickedDH} " +
+                                $"heads away from target: cos={pickedCosDH:0.00}; " +
+                                $"route[{bestIdxDH}] cos={bestCosDH:0.00}). Target {target} " +
+                                $"{botToTargetDH:0.0}y away. Prevents backward span-start walk.");
+                            resumeIndex = bestIdxDH;
+                        }
+                    }
+                }
+            }
         }
 
         if (resumeIndex >= leaderIdx)

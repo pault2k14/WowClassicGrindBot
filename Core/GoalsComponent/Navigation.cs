@@ -2752,10 +2752,38 @@ public sealed partial class Navigation : IDisposable
             }
             else
             {
-                logger.LogWarning("[NAV] ApproachEscape: no direction data (prev=<0,0,0>, no stuck rects, " +
-                    "no chase target) — SKIPPING stuck rect to avoid player-inside-own-rect. " +
-                    "Pather escape runs without rect hint. (Typically caused by BUG B state wipe.)");
-                goto AFTER_STUCK_RECT;
+                // ── Fix DI (log-126 20:33:18 / 20:34:44 / 20:36:57) ──
+                // 3 of 4 ApproachEscape activations reached here: no movement
+                // history (prev=<0,0,0>), no chase target, no prior stuck rect.
+                // The leader got stuck so early in the approach that only ONE
+                // approach position had been recorded (RecordApproachPosition
+                // needs a second qualifying move ≥0.75y to populate prev, and
+                // the chase watchdog hadn't set _chaseProgTarget yet). The old
+                // code SKIPPED the stuck rect here, so the obstacle the leader
+                // was wedged against (a tree the navmesh doesn't mark blocked)
+                // never got blacklisted — the pather then routed back through /
+                // awkwardly around it (the observed "ran into the tree, then
+                // curved behind to the rocks before re-approaching").
+                //
+                // ProjectApproachEscapeTarget ALREADY falls back to the facing
+                // direction in exactly this case, so use the same facing
+                // direction for the rect: the rect direction then matches the
+                // projection direction, identical to the proven path where
+                // movement history IS available (e.g. the 20:33:50 activation).
+                //
+                // Safe vs the original "player-inside-own-rect" concern:
+                // AddStuckRect offsets the center 5y along forwardDir, and a
+                // unit facing vector is non-default, so the rect lands 3-7y
+                // AHEAD (StuckRectHalfSizeY=2) — on the obstacle, never on the
+                // player. The 10y escape target stays OUTSIDE the rect (>7y), so
+                // the escape remains reachable; the pather now routes AROUND the
+                // blacklisted obstacle, and the re-approach avoids re-entering it.
+                float facingDI = playerReader.Direction;
+                approachDir = new Vector3(Cos(facingDI), Sin(facingDI), 0f);
+                logger.LogInformation(
+                    "[NAV] ApproachEscape: no movement/chase/rect direction — using facing " +
+                    $"direction {facingDI:0.00}rad for stuck rect (Fix DI); rect placed ~5y " +
+                    "ahead on the obstacle instead of being skipped.");
             }
             if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
             {
@@ -2764,7 +2792,6 @@ public sealed partial class Navigation : IDisposable
                     $"player={Nav2D(playerReader.WorldPos)}");
             }
             AddStuckRect(Nav2D(playerReader.WorldPos), approachDir);
-            AFTER_STUCK_RECT:;
         }
 
         if (_approachEscapeCurrentYards > ApproachEscapeEndYards)
