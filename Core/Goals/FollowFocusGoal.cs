@@ -1505,7 +1505,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM, DN, DP. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM, DN, DP, DQ, DR. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -2366,6 +2366,55 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
             else
             {
+                // ── Fix DR (log-130 issue #2: ping-pong → CantFollow) ──
+                //
+                // Extends DN's combat-range hold into the dead-band. DN's GUARD-2
+                // (UpdateNavigatingToLeader, ~line 2557) stops the chase and drops
+                // to Idle when the assist is already in combat range during a
+                // pre-combat engage. But DN's GUARD-1 (above, ~line 2221) only
+                // fires when dist > NavigatingMinYards (14y). In the dead-band
+                // (NavigatingExitYards 10y < dist < 14y) neither DN guard applies,
+                // so this branch fired StartNavigatingToLeader to "close the gap"
+                // every tick — which DN's GUARD-2 then immediately stopped,
+                // producing a rapid Idle↔NavigatingToLeader flip. Each flip issued
+                // a SetWayPoints(count=1) while the bot stood still (DN keeps
+                // stopping it), so 10 stationary sets accumulated within the
+                // SetWaypointLoopGuarded 100ms window → "Navigation exhausted" →
+                // CantFollow.
+                //
+                // Evidence (log-130 12:33:19:130-207, ~77ms): DN "entered combat
+                // range during engage (leader 10.5y)" → Stop → Idle → "Dead-band
+                // (10.6y) — closing gap to confirm rendezvous" → SetWayPoints →
+                // Idle→Nav → DN fires again → ... ×10 → loop guard → CantFollow.
+                // All 10 escalations in 130 carry this exact signature (3 DN-fires
+                // + 4 dead-band lines in the 25 lines preceding each); log-129
+                // (no DN) had 0 escalations. Fix O's co-located guard (below)
+                // can't catch this because the leader is ~10y away, not within
+                // POP_DIST.
+                //
+                // The hold is safe: ShouldHoldInCombatRange requires
+                // HasApproachStart (the leader is engaging a mob nearby, NOT
+                // patrolling away) and WithInCombatRange (the assist can already
+                // cast from here — no need to close to <7y). When combat starts
+                // (bits.Combat becomes true) the predicate releases and normal
+                // gap-closing resumes; when the leader resumes patrol
+                // (HasApproachStart clears) it also releases.
+                if (ShouldHoldInCombatRange(leader, dist))
+                {
+                    if (assistStatusProvider.CurrentStatus != BotStatus.Following)
+                    {
+                        logger.LogInformation(
+                            $"[FFG] [FIX-FIRE] DR: in combat range during engage " +
+                            $"(dead-band {dist:0.0}y) — holding, NOT closing rendezvous gap " +
+                            $"(extends DN's hold into the dead-band; avoids the " +
+                            $"DN-vs-dead-band Idle↔Nav oscillation that trips the " +
+                            $"SetWaypoint loop guard → CantFollow).");
+                        assistStatusProvider.CurrentStatus = BotStatus.Following;
+                    }
+                    wait.Update();
+                    return;
+                }
+
                 // Navigate to close the gap: either status is not yet Following, or rendezvous
                 // has not been confirmed since the last OnEnter. Both cases require reaching
                 // < FollowingMaxYards (7y) before the leader pulls too far ahead.
@@ -4915,12 +4964,46 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 Vector3[] route = navigation.LoadedRoute;
 
                 // Initial sync (or re-sync after non-RouteWalk tick).
-                // Use rendezvousCap so the assist can target
-                // route[leaderIdx] if it's the closest at-or-before
-                // the leader's target waypoint.
+                //
+                // ── Fix DQ (log-130 issue #1: trailing-by-one not honored) ──
+                //
+                // The advance loop caps at advanceCap (leaderIdx-1) — the
+                // trailing-by-one contract. The Initial sync, however, used
+                // rendezvousCap (leaderIdx) as its ceiling, so a re-sync could
+                // land the assist on route[leaderIdx] — the LEADER's own target
+                // waypoint — instead of trailing by one. These two contracts
+                // contradicted each other, and because the grind cycle resets
+                // _assistRouteIndex constantly (non-Patrolling status line 5414,
+                // CF body-chase override line 5382, every Anchor/PositionChase
+                // excursion), the sync runs FAR more often than the advance loop
+                // (log-130: 59 Initial syncs vs 1 Advanced index; log-129: 203 vs
+                // 5). So the sync's ceiling dominated and the assist shadowed
+                // leaderIdx in the normal case.
+                //
+                // Evidence (log-130 line 441, 12:33:24):
+                //   "nearest safe index=9 of 146 (leaderIdx=9, rendezvousCap=9,
+                //    advanceCap=8) ... distToTarget=11.9y" — synced to 9
+                //   (=leaderIdx), then "Parked at idx=9 ... Trailing-by-one cap
+                //   reached" (line 480) although idx=9 is AT leaderIdx, not
+                //   leaderIdx-1.
+                //
+                // Fix: clamp the sync to advanceCap in the normal case, matching
+                // the advance loop. rendezvousCap (leaderIdx) is permitted ONLY in
+                // the DP reactive fallback (the documented "problem scenario"
+                // where the assist must rendezvous AT the leader's waypoint). This
+                // mirrors dpAdvanceLimit in the advance loop. leaderIdx==0 →
+                // advanceCap=-1 → Math.Max(0,-1)=0 so the assist still syncs to
+                // route[0] and waits (preserves the BJ leaderIdx==0 semantics).
+                //
+                // syncCap also bounds BM-3's projection advance (below) and CB's
+                // forward scan, so neither can push the index past leaderIdx-1 in
+                // the normal case.
                 if (_assistRouteIndex < 0)
                 {
-                    int syncIdx = FindNearestSafeRouteIndex(playerReader.WorldPos, rendezvousCap);
+                    int syncCap = (_anchorPatherFallback && !_anchorFallbackUsed)
+                        ? rendezvousCap
+                        : Math.Max(0, advanceCap);
+                    int syncIdx = FindNearestSafeRouteIndex(playerReader.WorldPos, syncCap);
 
                     // ── Fix BM-3 (log-96 16:35:25:698 reversal at 175°, 16:35:32
                     //    and 16:35:45 same class — 3 of 8 log-96 reversals) ──
@@ -4956,7 +5039,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     //   With BM-3, _assistRouteIndex=9. Bot walks straight
                     //   north to route[9] without the SW excursion to
                     //   route[8] first.
-                    if (syncIdx >= 0 && syncIdx < rendezvousCap)
+                    if (syncIdx >= 0 && syncIdx < syncCap) // Fix DQ: was rendezvousCap
                     {
                         Vector3 a = route[syncIdx];
                         Vector3 b = route[syncIdx + 1];
@@ -5062,7 +5145,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                                     // within reasonable distance.
                                     int bestIdx = syncIdx;
                                     float bestCos = pickedCos;
-                                    for (int i = syncIdx + 1; i <= rendezvousCap; i++)
+                                    for (int i = syncIdx + 1; i <= syncCap; i++) // Fix DQ: was rendezvousCap
                                     {
                                         Vector3 candidate = route[i];
                                         float cdx = candidate.X - botPosCB.X;
