@@ -1434,7 +1434,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"Active fix list: AA, AB-1, AB-2, AC+AE+AI+AL, AD, AG, AH+AJ+AN, " +
             $"AJ, AL, AM, AO, AQ, AT, AU, AV+AW, AX, AY, AZ, BA, BB, BC, BD, BE, " +
             $"BF, BG-2, BH-2, BH-3, BI-1, BI-2, BJ, BK, BL, BM-1, BM-2, BM-3, " +
-            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF. " +
+            $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
 
@@ -7377,6 +7377,35 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 bool isComplexWraparound =
                     snap.SimplifiedRouteCount >= COMPLEX_WRAPAROUND_MIN_ROUTECOUNT;
 
+                // ── Fix DG (log-125 20:11:51 corridor body-chase U-turn at ~140°) ──
+                // A genuine dead-zone wraparound can present with a simplified
+                // routeTop just UNDER the 150° angle gate (Fix AI) yet still be
+                // unmistakable: log-125 reqId=17/18 returned 144 RAW nodes for a
+                // 7-9.6y straight-line target (16 simplified, routeTop ~140°
+                // rear). angleExceedsThreshold was false (140°<150°), so the
+                // path was accepted and the assist walked the U-turn west (the
+                // "turning back"). DC doesn't help (single-waypoint body-chase,
+                // not a route span) and DA never fired (no rejection).
+                //
+                // The raw pathLength is the cleanest dead-zone signature: clean
+                // /detour paths run ≤~2.4 nodes/yard (log-125 reqId 16=0.8,
+                // 19=1.0, 21=2.4; log-74 tree-detour=1.9), while corridor
+                // wraparounds run 15-20 nodes/yard (reqId 17=15.0, 18=20.6).
+                // Reject when the path leans rear (dot<0), is complex
+                // (count≥8), AND its raw node count is grossly disproportionate
+                // to the straight-line distance. The rear + count guards ensure
+                // a legitimate long FORWARD path is never rejected; the ratio
+                // (6 nodes/yard) sits well above any observed detour and well
+                // below any observed wraparound. On reject this routes into the
+                // same OnPathFailed → DA 5y direct-step recovery as the angle
+                // path, walking the assist straight through the corridor.
+                const float DeadZonePathNodesPerYard = 6.0f;
+                float straightDist = MathF.Sqrt(snap.ForwardLenSq);
+                bool rearLeaning = dot < 0f;
+                bool grosslyLongPath =
+                    straightDist > 0.5f &&
+                    snap.PathLength > DeadZonePathNodesPerYard * straightDist;
+
                 if (angleExceedsThreshold && isComplexWraparound)
                 {
                     // Compute readable cos/angle for the log message. Only
@@ -7409,6 +7438,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     // to TOWARD-leader when the leader is close. See the field
                     // doc comment near _lastPathFailureWasRejection for full
                     // rationale and evidence.
+                    _lastPathFailureWasRejection = true;
+                    return;
+                }
+                else if (rearLeaning && isComplexWraparound && grosslyLongPath)
+                {
+                    float topDist = MathF.Sqrt(toTopDistSq);
+                    float fwdLen = MathF.Sqrt(snap.ForwardLenSq);
+                    float cosA = dot / (fwdLen * topDist);
+                    if (cosA < -1f) cosA = -1f;
+                    else if (cosA > 1f) cosA = 1f;
+                    float angleDeg = MathF.Acos(cosA) * (180f / MathF.PI);
+
+                    logger.LogError(
+                        $"[FFG] [FIX-FIRE] DG: rejecting dead-zone WRAPAROUND by raw path length " +
+                        $"(rear-leaning angle={angleDeg:0.0}° > 90° AND simplified count " +
+                        $"{snap.SimplifiedRouteCount} ≥ {COMPLEX_WRAPAROUND_MIN_ROUTECOUNT} AND " +
+                        $"pathLen={snap.PathLength} > {DeadZonePathNodesPerYard:0}×{straightDist:0.0}y " +
+                        $"straight-line = {snap.PathLength / straightDist:0.0} nodes/yard). " +
+                        $"Simplified routeTop {snap.SimplifiedRouteTop} is {topDist:0.00}y from start. " +
+                        $"This is a corridor dead-zone wraparound whose routeTop sits under Fix AI's " +
+                        $"150° gate (~140°) but whose grossly-long node count is unambiguous. " +
+                        $"start={snap.StartW} end={snap.EndW}. " +
+                        $"Signalling Reject — Navigation will clear route and fire OnPathFailed " +
+                        $"(→ Fix DA 5y direct-step recovery).");
+                    snap.Reject = true;
+                    snap.RejectCooldownMs = 500;
                     _lastPathFailureWasRejection = true;
                     return;
                 }
