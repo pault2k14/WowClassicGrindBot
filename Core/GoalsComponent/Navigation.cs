@@ -569,7 +569,35 @@ public sealed partial class Navigation : IDisposable
     // from positions recorded after each escape movement.
     private Vector3 _approachEscapeLockedRecordedW;
     private Vector3 _approachEscapeLockedPrevRecordedW;
+    // ── Fix DY (logs 133d/133f vs 133e) ──
+    // The locked direction is captured ONCE from recent recorded positions and
+    // preserved across the whole 10y->30y escalation. When that initial lock points
+    // to the wrong side of an obstacle (mob behind a rock), every escalation pushes
+    // the bot FURTHER the wrong way and the run exhausts, then switches mobs.
+    // Evidence: 133d/133f locked +X/-Y (away from the mob at -X/-Y) and exhausted;
+    // 133e succeeded only because a re-lock from a shifted position happened to
+    // project the ~180°-opposite -X/+Y and rounded the rock. The mob's world position
+    // is NOT available to Navigation (no playerReader.TargetWorldPos accessor; the
+    // pull-approach delegates "walk to mob" to the game's straight-line interact key),
+    // so we cannot deliberately aim at the mob here. But we CAN, at the give-up point,
+    // reverse the proven-failed direction 180° and retry once — deterministically
+    // reproducing 133e's rescue. This triggers ONLY at exhaustion, which the success
+    // case never reaches, so it cannot regress a working escape.
+    private float _approachEscapeDirFlip = 1f;   // -1f reverses ProjectApproachEscapeTarget 180°
+    private bool _approachEscapeFlipTried;        // ensures the flip retry happens at most once per episode
     private int _approachEscapeTargetGuid;
+    // ── Fix EA (mob-anchored escape) ── Estimated mob world position + bot->mob unit
+    // bearing captured ONCE at the first stuck of an episode (when facing is still on
+    // the mob), via playerReader.TargetMapPos. Held fixed for the whole episode and
+    // used by ProjectApproachEscapeTarget to aim the escape AT the mob (and past it),
+    // instead of along a blind locked direction. Survives the transient same-target
+    // reset/flicker (NOT cleared by the generic ResetApproachEscape); cleared only at
+    // genuine episode end (different target, or give-up). Re-capture is gated on
+    // !_approachEscapeMobAnchorValid so a flicker can't re-read it with the bot now
+    // facing the escape waypoint instead of the mob.
+    private Vector3 _approachEscapeMobAnchorW;
+    private Vector3 _approachEscapeMobBearing;
+    private bool _approachEscapeMobAnchorValid;
     // Tracks which integer second the TryUnstuck(active) heartbeat last fired.
     // Prevents double-fire when two consecutive calls both straddle a second boundary.
     private int _approachEscapeHeartbeatLastSec = -1;
@@ -2712,9 +2740,26 @@ public sealed partial class Navigation : IDisposable
 
                 if (_approachEscapeCurrentYards >= ApproachEscapeEndYards)
                 {
-                    logger.LogWarning("[NAV] ApproachEscape: max escalation level stuck — marking exhausted immediately.");
-                    IsApproachEscapeExhausted = true;
-                    _approachEscapeLastAttemptUtc = DateTime.UtcNow.AddSeconds(PostExhaustionCooldownSec);
+                    // ── Fix DY ── Stuck at max escalation in the locked direction. The
+                    // actual 180° reversal happens at the next re-trigger (the lower
+                    // TryUnstuck block), which is the SINGLE point common to both ways a
+                    // locked direction fails: completing-but-drifting (133d) and getting
+                    // stuck (133f). Here we only decide whether to give up: if the flip
+                    // has ALREADY been tried, both directions are exhausted -> give up;
+                    // otherwise DEFER (do not mark exhausted, which would make the bot
+                    // switch mobs) and leave yards at max so the re-trigger flips.
+                    if (_approachEscapeFlipTried)
+                    {
+                        logger.LogWarning("[NAV] ApproachEscape: max escalation level stuck (both directions tried) — marking exhausted immediately.");
+                        IsApproachEscapeExhausted = true;
+                        _approachEscapeLastAttemptUtc = DateTime.UtcNow.AddSeconds(PostExhaustionCooldownSec);
+                    }
+                    else
+                    {
+                        logger.LogWarning(
+                            $"[NAV] [FIX-FIRE] DY: stuck at max {ApproachEscapeEndYards:0}y in locked direction — " +
+                            $"deferring give-up so the next attempt reverses 180°. [guid={_approachEscapeTargetGuid}]");
+                    }
                 }
 
                 return false;
@@ -2740,6 +2785,44 @@ public sealed partial class Navigation : IDisposable
                 $"stuckRects={_stuckWorldRects.Count} guid={_approachEscapeTargetGuid}");
 
         _approachEscapeLastAttemptUtc = now;
+
+        // ── Fix DY (logs 133d/133f vs 133e) ── This is the single point common to BOTH
+        // ways a locked escape direction fails to reach the mob: a phase that completed
+        // but only drifted further the wrong way (133d, escapes all "complete"), and a
+        // phase that got stuck at max (133f, "max escalation level stuck"). When we are
+        // re-triggering and the locked direction has already escalated to the max yards,
+        // the direction is wrong — reverse the projection 180° and restart escalation
+        // from the base, once per episode. If the reversed direction ALSO reaches max,
+        // give up. The mob's world position is not available to Navigation, but 133e
+        // proved the ~opposite direction rounds the rock. Bounded and per-episode, so a
+        // working escape (which reaches the mob before maxing out) is never altered.
+        if (_approachEscapeCurrentYards >= ApproachEscapeEndYards)
+        {
+            // Fix EA: when we have a usable mob anchor the projection already aims at the
+            // mob, so the blind 180° flip would point us AWAY from it — skip the flip and
+            // give up once the behind-levels (M, +10, +20) are spent.
+            if (!_approachEscapeMobAnchorValid && !_approachEscapeFlipTried)
+            {
+                _approachEscapeFlipTried = true;
+                _approachEscapeDirFlip = -1f;
+                _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f; // -> +=10 below = base 10y
+                logger.LogWarning(
+                    $"[NAV] [FIX-FIRE] DY: locked direction escalated to {ApproachEscapeEndYards:0}y without reaching the " +
+                    $"target — reversing projection 180° and restarting escalation from {ApproachEscapeStartYards:0}y. " +
+                    $"[guid={_approachEscapeTargetGuid} lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW}]");
+            }
+            else
+            {
+                logger.LogWarning(_approachEscapeMobAnchorValid
+                    ? "[NAV] [FIX-FIRE] EA: mob-anchored escape exhausted all levels (M, +10, +20) without reaching the target — giving up (exhausted)."
+                    : "[NAV] [FIX-FIRE] DY: both directions escalated to max without reaching the target — giving up (exhausted).");
+                IsApproachEscapeExhausted = true;
+                _approachEscapeMobAnchorValid = false; // Fix EA: episode genuinely ended — release anchor so the next episode re-captures.
+                _approachEscapeLastAttemptUtc = now.AddSeconds(PostExhaustionCooldownSec);
+                return false;
+            }
+        }
+
         _approachEscapeCurrentYards += 10f;
 
         if (_approachEscapeTargetGuid == 0)
@@ -2747,6 +2830,43 @@ public sealed partial class Navigation : IDisposable
 
         if (_approachEscapeLockedRecordedW == default)
         {
+            // ── Fix EA: capture the estimated mob position ONCE per episode, here at
+            // the first stuck — BEFORE any escape projection turns the bot away. This
+            // block re-runs after a transient flicker (which wipes the lock), so the
+            // capture is additionally gated on !valid: facing is only trustworthy now,
+            // at the first stuck while the bot is still oriented at the mob. The guard
+            // rejects a degenerate range read (MaxRange()==0 ⇒ unit beyond the furthest
+            // checker, where the bracket midpoint is meaningless) and falls back to the
+            // existing bot-anchored escape.
+            if (!_approachEscapeMobAnchorValid)
+            {
+                int eaMinR = playerReader.MinRange();
+                int eaMaxR = playerReader.MaxRange();
+                Vector3 eaMobMap = playerReader.TargetMapPos;
+                if (eaMobMap != Vector3.Zero && eaMaxR != 0 && eaMinR <= eaMaxR)
+                {
+                    Vector3 eaMobW = WorldMapAreaDB.ToWorld_FlipXY(eaMobMap, playerReader.WorldMapArea);
+                    Vector3 eaCurW = Nav2D(playerReader.WorldPos);
+                    float eaDx = eaMobW.X - eaCurW.X;
+                    float eaDy = eaMobW.Y - eaCurW.Y;
+                    float eaLen = Sqrt(eaDx * eaDx + eaDy * eaDy);
+                    if (eaLen > 0.01f)
+                    {
+                        _approachEscapeMobAnchorW = eaMobW;
+                        _approachEscapeMobBearing = new Vector3(eaDx / eaLen, eaDy / eaLen, 0f);
+                        _approachEscapeMobAnchorValid = true;
+                        logger.LogWarning(
+                            $"[NAV] [FIX-FIRE] EA: captured mob anchor M={eaMobW} " +
+                            $"bearing=({eaDx / eaLen:0.00},{eaDy / eaLen:0.00}) dist={eaLen:0.0}y " +
+                            $"minR={eaMinR} maxR={eaMaxR} facing={playerReader.Direction:0.00} player={eaCurW}");
+                    }
+                }
+                if (!_approachEscapeMobAnchorValid)
+                    logger.LogInformation(
+                        $"[NAV] [FIX-FIRE] EA: mob anchor unavailable (mapZero={eaMobMap == Vector3.Zero} " +
+                        $"minR={eaMinR} maxR={eaMaxR}) — falling back to bot-anchored escape.");
+            }
+
             _approachEscapeLockedRecordedW = _approachRecordedW;
             bool anchorUsable = _approachEscapeAnchorW != default &&
                                  _approachEscapeAnchorW != _approachRecordedW;
@@ -3337,6 +3457,11 @@ public sealed partial class Navigation : IDisposable
         _approachEscapeTargetGuid = 0;
         IsApproachEscapePhysicallyStuck = false;
         IsApproachEscapeExhausted = false;
+        // ── Fix DY ── reset the 180° flip state for the next episode. This runs on a
+        // full wipe only (e.g. a different-target switch via ResetApproachEscapeForTarget);
+        // same-target re-entry deliberately preserves it so the flipped retry can run.
+        _approachEscapeDirFlip = 1f;
+        _approachEscapeFlipTried = false;
     }
 
     public void ResetApproachEscapeForTarget(int targetGuid)
@@ -3414,6 +3539,8 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation(
                 $"[NAV] ApproachEscape: different target {targetGuid} (was {_approachEscapeTargetGuid}) — full reset.");
             ResetApproachEscape();
+            // Fix EA: a genuinely different target voids the captured mob anchor.
+            _approachEscapeMobAnchorValid = false;
             _approachEscapeLockedRecordedW = default;
             _approachEscapeLockedPrevRecordedW = default;
             if (targetGuid != 0)
@@ -3424,6 +3551,26 @@ public sealed partial class Navigation : IDisposable
     private Vector3 ProjectApproachEscapeTarget(float yards)
     {
         Vector3 currentW = Nav2D(playerReader.WorldPos);
+
+        // ── Fix EA (mob-anchored escape) ── When a usable mob estimate was captured at
+        // episode start, aim the escape at the mob rather than along a blind locked
+        // direction. behind=0 paths straight to the estimate M (the most accurate
+        // attempt — closest range, best facing at capture); higher levels project PAST M
+        // along the fixed bot->mob bearing, handing the pather a far anchor on the far
+        // side of the obstacle so it must route AROUND the rock and through the mob's
+        // vicinity. M and the bearing are frozen at capture and never re-derived here
+        // (mid-escape, facing tracks the escape waypoint, not the mob). This also bypasses
+        // the DY flip negation below — irrelevant once we are aimed at the mob.
+        if (_approachEscapeMobAnchorValid)
+        {
+            float behind = yards - ApproachEscapeStartYards; // 10->0 (at M), 20->10, 30->20
+            if (behind < 0f)
+                behind = 0f;
+            return new Vector3(
+                _approachEscapeMobAnchorW.X + _approachEscapeMobBearing.X * behind,
+                _approachEscapeMobAnchorW.Y + _approachEscapeMobBearing.Y * behind,
+                currentW.Z);
+        }
 
         float dx = 0f, dy = 0f;
         bool directionFound = false;
@@ -3527,6 +3674,17 @@ public sealed partial class Navigation : IDisposable
                 dy = Sin(facing);
                 len = 1f;
             }
+        }
+
+        // ── Fix DY ── During the post-exhaustion retry, reverse the (proven-failed)
+        // projection direction 180°. We negate AFTER all fallbacks resolve so the flip
+        // applies to whatever direction was actually chosen. |dx,dy| is unchanged, so
+        // dx/len just flips sign — the bot is projected the opposite way around the
+        // obstacle (e.g. 133d/f's +X/-Y becomes 133e's winning -X/+Y).
+        if (_approachEscapeDirFlip < 0f)
+        {
+            dx = -dx;
+            dy = -dy;
         }
 
         return new Vector3(
