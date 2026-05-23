@@ -4536,7 +4536,7 @@ public sealed partial class Navigation : IDisposable
 
         if (AreaBlacklist != null)
         {
-            bool startedInside = AreaBlacklist.ContainsWorld(Nav2D(result.StartW));
+            bool startedInside = IsBlacklistedPoint(Nav2D(result.StartW)); // Fix DV: escape-aware
 
             if (!startedInside)
             {
@@ -4568,7 +4568,7 @@ public sealed partial class Navigation : IDisposable
                 {
                     Vector3 cur = Nav2D(steps[i]);
 
-                    if (AreaBlacklist.ContainsWorld(cur))
+                    if (IsBlacklistedPoint(cur)) // Fix DV: escape-aware (was AreaBlacklist.ContainsWorld)
                     {
                         logger.LogWarning(
                             $"[BL] Path node inside blacklist; rejecting. " +
@@ -5288,8 +5288,23 @@ public sealed partial class Navigation : IDisposable
         }
     }
 
+    // Fix DV (completes DU, log-133 16:04:58): point-containment counterpart of
+    // the escape-aware segment check. While an approach escape is active, test
+    // against the STATIC map blacklist only, exempting the dynamic StuckRects --
+    // the escape deliberately traverses the stuck area it just marked. Without
+    // this, an escape route whose NODE lands inside the freshly-placed StuckRect
+    // is still rejected ("[BL] Path node inside blacklist; rejecting") even
+    // though DU made the segment-crossing check escape-aware, so the self-defeat
+    // recurs through a different check (observed twice during episode #5's 45y
+    // escape, contributing to its 8s budget exhaustion). Used for the
+    // post-simplification node check (4539/4571), escape midpoints (~3849) and
+    // detour candidates (~4864); all are escape-path validation that should honor
+    // the same exemption. Reverts to the composite the instant the escape ends.
     private bool IsBlacklistedPoint(Vector3 worldPoint)
-        => AreaBlacklist != null && AreaBlacklist.ContainsWorld(worldPoint);
+    {
+        IAreaBlacklist? bl = _approachEscapeActive ? _staticAreaBlacklist : AreaBlacklist;
+        return bl != null && bl.ContainsWorld(worldPoint);
+    }
 
     private bool TryGetBlockingRectEscapeAware(Vector3 startW, Vector3 endW, out BlacklistRect blockingRect)
     {
@@ -5297,18 +5312,47 @@ public sealed partial class Navigation : IDisposable
         endW = Nav2D(endW);
 
         blockingRect = default;
-        if (AreaBlacklist == null) return false;
 
-        if (AreaBlacklist.TryGetContainingRect(startW, out var containingRect))
+        // Fix DU (log-133 15:53:27 & 16:04:52): while an approach escape is
+        // active, validate the escape's path against the STATIC map blacklist
+        // only, exempting the dynamic StuckRects.
+        //
+        // Root cause of the self-defeating escape: when the range-stuck escape
+        // activates, AddStuckRect (~line 2821) places a StuckRect ~5y AHEAD along
+        // the approach direction, and ProjectApproachEscapeTarget (~line 3420)
+        // projects the escape target ~10y ahead along the SAME locked direction
+        // -- so the escape's own path runs straight through the rect it just
+        // placed. The composite AreaBlacklist (static map + RectBlacklist of
+        // _stuckWorldRects) then rejects the segment ("[BL] Path segment crosses
+        // blacklist; rejecting"), TryInsertDetour sends the bot ~20y sideways,
+        // and the escape makes ZERO progress (range pinned: 15.0->15.0y for 9.5s
+        // across the 10y/20y/30y escalation, or 45.0->45.0y until the 8s budget
+        // is exhausted) -- the bot only gets unstuck by chance when the party
+        // enters combat. The favorable-geometry case (35.0->25.0y, where the rect
+        // happened not to land in the path) shows forward escape works fine when
+        // it is not blocked by its own rect.
+        //
+        // The existing escape-awareness below only exempts the rect the bot
+        // STARTS INSIDE; here the bot starts ~5y OUTSIDE the freshly-placed rect,
+        // so that branch never fires. The StuckRects exist to steer FUTURE
+        // (non-escape) approach pathing away from the stuck spot -- not to wall
+        // in the current escape, which is the very mechanism meant to traverse
+        // it. They remain in _stuckWorldRects and resume gating the instant the
+        // escape ends (_approachEscapeActive=false). Real impassable areas (the
+        // static map blacklist) still block the escape.
+        IAreaBlacklist? bl = _approachEscapeActive ? _staticAreaBlacklist : AreaBlacklist;
+        if (bl == null) return false;
+
+        if (bl.TryGetContainingRect(startW, out var containingRect))
         {
             var endInsideSame = containingRect.Contains(new Vector2(endW.X, endW.Y));
             if (!endInsideSame)
             {
-                return AreaBlacklist.TryGetBlockingRectExcluding(startW, endW, containingRect, out blockingRect);
+                return bl.TryGetBlockingRectExcluding(startW, endW, containingRect, out blockingRect);
             }
         }
 
-        return AreaBlacklist.TryGetBlockingRect(startW, endW, out blockingRect);
+        return bl.TryGetBlockingRect(startW, endW, out blockingRect);
     }
 
     private bool SegmentBlockedEscapeAware(Vector3 startW, Vector3 endW)
