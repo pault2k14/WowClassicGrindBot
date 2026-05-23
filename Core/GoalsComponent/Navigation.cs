@@ -4432,7 +4432,32 @@ public sealed partial class Navigation : IDisposable
         // The check is per-path (computed once, applied to all nodes
         // of this path), so no per-node overhead.
         bool applyRearDrop = true;
-        if (forwardLenSq > 0.0001f)
+
+        // Fix DX (log-133, the stuck terrain is a narrow-oval rock): while an
+        // ApproachEscape is active, do NOT prune rear-pointing near-start nodes.
+        // The escape exists to get UNWEDGED; the pather's route off the rock
+        // legitimately steps BACK and to a side before arcing around the curved
+        // face, and those back-steps are exactly the rear-half-plane (dot<=0,
+        // within 3y) nodes AA removes. BC only spares them when the bot already
+        // faces rearward, which it does NOT during a forward-target escape, so AA
+        // is otherwise live and deletes the "few steps back" that would free the
+        // bot (133a: AA fired on the stalled 10y attempt; the AA-free 20y attempt
+        // completed). This extends BC's own rationale ("bot is legitimately
+        // reversing, keep the nodes") to "bot is escaping, keep the nodes."
+        // Scoped to _approachEscapeActive: AA's normal snap-back pruning outside
+        // escapes is unchanged. UNTESTED as of handoff - first thing to validate.
+        // CAVEAT: a genuine snap-back artifact in an escape route can now survive
+        // and cause a brief 180 spin at escape start; if observed, tighten to
+        // "preserve rear nodes only beyond the snap-back radius."
+        if (_approachEscapeActive)
+        {
+            applyRearDrop = false;
+            logger.LogInformation(
+                "[NAV] [FIX-FIRE] DX: ApproachEscape active - preserving rear-pointing " +
+                "path nodes (AA pruning disabled for this escape route) so the escape " +
+                "can step back off the obstacle before arcing around.");
+        }
+        else if (forwardLenSq > 0.0001f)
         {
             float facing = playerReader.Direction;
             float facingX = MathF.Cos(facing);
