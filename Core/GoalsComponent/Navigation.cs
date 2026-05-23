@@ -1881,7 +1881,20 @@ public sealed partial class Navigation : IDisposable
             {
                 // Try pather-based escape (10y -> 20y -> 30y forward) before falling
                 // back to the random turn+move unstuck.
-                if (!TryRouteUnstuck(token))
+                //
+                // Fix DW (log-133a/b/c, controlled 3x retest of one terrain blockage):
+                // do NOT start a Navigation-level RouteEscape while a PTG/ATG
+                // ApproachEscape already owns the recovery (_approachEscapeActive).
+                // Both are pather-based 10->20->30y escapes; running the second one
+                // here makes its SetWayPoints override the ApproachEscape's target
+                // ("SetWayPoints wasActive=True ... already active") and re-project
+                // facing-based, compounding the stuckDetector turn+move sweep and
+                // drifting the bot laterally off the approach. Evidence: 133b fired
+                // RouteEscape 2x mid-ApproachEscape and the escape failed; 133a fired
+                // none and the ApproachEscape completed. The ApproachEscape's own
+                // escalation owns recovery, so short-circuit straight to the physical
+                // stuckDetector last-resort (kept: it was present in the 133a success).
+                if (_approachEscapeActive || !TryRouteUnstuck(token))
                 {
                     stuckDetector.Update(StuckOwnerId, token);
                 }
