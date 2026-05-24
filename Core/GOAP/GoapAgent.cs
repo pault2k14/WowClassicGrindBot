@@ -1058,6 +1058,43 @@ public sealed partial class GoapAgent : IDisposable
             // Fix CX: leader (and other modes) use raw — no hysteresis.
             publishedIncombatrange = rawIncombatrange;
         }
+
+        // ── Fix EE-range (log 133aa/133ab evidence) ─────────────────────────
+        // While an ApproachEscape is active, publish incombatrange=false so
+        // ATG — the escape's designated owner — stays selectable end-to-end.
+        //
+        // Root cause (133aa 03:07:40 → 03:07:46; 133ab 03:09:47): after Fix ED
+        // unified the Navigation instance, a close-range escape (EA dist=2.0,
+        // maxR=5 → within combat range) leaves the planner with no escape
+        // owner. PTG is correctly blocked (approachEscapeActive=true) and ATG
+        // is blocked by its incombatrange=false precondition (ApproachTargetGoal
+        // line 238), so the plan falls to FollowRouteGoal. FRG's "Target
+        // acquired → stopping navigation" calls navigation.Stop() (active=false)
+        // on the now-shared instance, orphaning the escape; TryUnstuck's
+        // `_approachEscapeActive && !active` guard (Navigation.cs ~2680) then
+        // reads it as "stopped externally" and runs a destructive
+        // ResetApproachEscape that wipes the target guid → the bot gives up and
+        // approaches a DIFFERENT mob (133ab guid 1225268→1195230). 133z avoided
+        // this only because its escape pushed the bot past maxR (range 15y) so
+        // incombatrange went false naturally and ATG kept ownership the whole
+        // time. Keeping ATG eligible during the escape matches the documented
+        // "ATG owns the escape" intent and removes the Follow excursion that
+        // orphans it.
+        //
+        // Leader-safe (audited): the only readers of the incombatrange worldkey
+        // are ATG (=false, here un-blocked — intended) and the SOLO-Grind
+        // CombatGoal branch (=true, CombatGoal line 136). The PartyLeader
+        // CombatGoal branch gates on partyleadercombat, and
+        // PartyLeaderInCombat()/combat detection call WithInCombatRange()
+        // DIRECTLY (not this worldkey), so combat entry is unaffected. PTG does
+        // not read incombatrange. The mask is bounded strictly to the active-
+        // escape window and clears the instant the escape ends (whereupon the
+        // raw range value resumes governing the normal ATG→Combat handoff).
+        if (navigation.IsApproachEscapeActive)
+        {
+            publishedIncombatrange = false;
+        }
+
         WorldState[GoapKey.incombatrange] = publishedIncombatrange;
 
         // Fix CW: one-shot log per grace activation. Fires when the hysteresis

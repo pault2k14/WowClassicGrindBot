@@ -374,8 +374,21 @@ public sealed partial class BotController : IBotController, IDisposable
                     sp.GetRequiredService<ClassConfiguration>().Paths[(int)key!],
                     sp.GetRequiredService<DataConfig>()));
 
-            // each GoapGoal gets an individual instance
-            s.AddTransient<Navigation>(x => new(
+            // Single shared Navigation per session scope. ATG/PTG/CombatGoal and
+            // the GoapAgent worldstate (GoapKey.approachEscapeActive, set from
+            // navigation.IsApproachEscapeActive) must all observe ONE escape state
+            // — _approachEscapeActive, escalation yards, locked direction, mob
+            // anchor — for the ATG<->PTG escape handoff and the planner gate to
+            // work. AddTransient previously handed each consumer its own instance,
+            // fragmenting the escape episode across objects (BUG B): the goal
+            // driving the escape and the worldstate/RATF read DIFFERENT Navigation
+            // objects, so the planner never saw the active escape, PTG stayed
+            // eligible, and the escalation/anchor/locked-direction restarted on
+            // every goal switch. Scoped = one navigator per bot, which is what the
+            // escape coordination, StuckDetector ownership, and pathfinder thread
+            // all assume. Goals still rebuild their own waypoints on OnEnter, so
+            // sharing the instance does not cross-contaminate route state.
+            s.AddScoped<Navigation>(x => new(
                 x.GetRequiredService<ILogger<Navigation>>(),
                 x.GetRequiredService<CancellationTokenSource<GoapAgent>>(),
                 x.GetRequiredService<PlayerDirection>(),

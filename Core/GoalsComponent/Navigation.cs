@@ -541,6 +541,9 @@ public sealed partial class Navigation : IDisposable
     // all 3 attempts fail (10y, 20y, 30y).
     private const float ApproachEscapeStartYards = 10f;
     private const float ApproachEscapeEndYards = 30f;
+    // Fix EC: max consecutive lateral unwedge steps (alternating sides, growing reach)
+    // before giving up. Bounds thrashing when the bot is genuinely boxed in.
+    private const int ApproachEscapeMaxWedgeSteps = 6;
     // After all 3 escape levels fail, suppress TryUnstuck for this many seconds so
     // the bail-out checks in ATG/PTG get at least one Update() tick to run.
     private const double PostExhaustionCooldownSec = 5.0;
@@ -598,6 +601,16 @@ public sealed partial class Navigation : IDisposable
     private Vector3 _approachEscapeMobAnchorW;
     private Vector3 _approachEscapeMobBearing;
     private bool _approachEscapeMobAnchorValid;
+    // ── Fix EC (logs 133o/p/r) ── Deterministic lateral unwedge. When an attempt clears
+    // because the bot was STATIONARY (no-progress watchdog = wedged in place, not merely
+    // slow), the next attempt steps PERPENDICULAR to the captured mob bearing — alternating
+    // sides — to round the obstacle along its face, instead of escalating forward into it
+    // again and waiting for a lucky StuckDetector random nudge. Once a step gets the bot
+    // moving, it resumes aiming at the mob. Bounded by ApproachEscapeMaxWedgeSteps.
+    private float _approachEscapeLateralSign = 1f;
+    private int _approachEscapeWedgeSteps;
+    private bool _approachEscapeLateralActive;
+    private bool _approachEscapeLastClearStationary;
     // Tracks which integer second the TryUnstuck(active) heartbeat last fired.
     // Prevents double-fire when two consecutive calls both straddle a second boundary.
     private int _approachEscapeHeartbeatLastSec = -1;
@@ -2706,7 +2719,7 @@ public sealed partial class Navigation : IDisposable
 
             if (escapeSec > 2.0 * timeoutSec && _approachEscapeStartUtc != DateTime.MinValue)
             {
-                logger.LogWarning($"[NAV] ApproachEscape: startUtc is stale (escapeSec={escapeSec:0.1}s > 2x budget={timeoutSec:0.1}s for {_approachEscapeCurrentYards:0}y) — resetting to now. " +
+                logger.LogWarning($"[NAV] ApproachEscape: startUtc is stale (escapeSec={escapeSec:0.0}s > 2x budget={2.0 * timeoutSec:0.0}s for {_approachEscapeCurrentYards:0}y) — resetting to now. " +
                     $"[staleUtc={_approachEscapeStartUtc:HH:mm:ss.fff} yards={_approachEscapeCurrentYards:0} guid={_approachEscapeTargetGuid}]");
                 _approachEscapeStartUtc = now2;
                 _approachEscapeLastProgressPos = currentPos;
@@ -2731,6 +2744,10 @@ public sealed partial class Navigation : IDisposable
                     IsApproachEscapePhysicallyStuck = true;
                     logger.LogWarning($"[NAV] ApproachEscape: zero movement ({totalDisplacement:0.00}y) — character physically trapped in terrain.");
                 }
+
+                // Fix EC: a no-progress clear means the bot was STATIONARY this attempt
+                // (wedged), not merely slow — that is the trigger for a lateral unwedge step.
+                _approachEscapeLastClearStationary = noProgress;
 
                 _approachEscapeActive = false;
                 _approachEscapeStartUtc = DateTime.MinValue;
@@ -2796,34 +2813,69 @@ public sealed partial class Navigation : IDisposable
         // give up. The mob's world position is not available to Navigation, but 133e
         // proved the ~opposite direction rounds the rock. Bounded and per-episode, so a
         // working escape (which reaches the mob before maxing out) is never altered.
-        if (_approachEscapeCurrentYards >= ApproachEscapeEndYards)
+        // Fix EC: if the previous attempt was stationary (wedged) and we have a usable mob
+        // anchor, step PERPENDICULAR to the bearing (alternating sides, growing reach up to
+        // the max) to round the obstacle — rather than escalating forward into it again.
+        // Once a step gets the bot moving, the next clear won't be no-progress, so we drop
+        // back to aiming at the mob. Bounded by ApproachEscapeMaxWedgeSteps.
+        bool ecLateral = _approachEscapeMobAnchorValid && _approachEscapeLastClearStationary;
+        if (ecLateral)
         {
-            // Fix EA: when we have a usable mob anchor the projection already aims at the
-            // mob, so the blind 180° flip would point us AWAY from it — skip the flip and
-            // give up once the behind-levels (M, +10, +20) are spent.
-            if (!_approachEscapeMobAnchorValid && !_approachEscapeFlipTried)
+            _approachEscapeWedgeSteps++;
+            if (_approachEscapeWedgeSteps > ApproachEscapeMaxWedgeSteps)
             {
-                _approachEscapeFlipTried = true;
-                _approachEscapeDirFlip = -1f;
-                _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f; // -> +=10 below = base 10y
                 logger.LogWarning(
-                    $"[NAV] [FIX-FIRE] DY: locked direction escalated to {ApproachEscapeEndYards:0}y without reaching the " +
-                    $"target — reversing projection 180° and restarting escalation from {ApproachEscapeStartYards:0}y. " +
-                    $"[guid={_approachEscapeTargetGuid} lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW}]");
-            }
-            else
-            {
-                logger.LogWarning(_approachEscapeMobAnchorValid
-                    ? "[NAV] [FIX-FIRE] EA: mob-anchored escape exhausted all levels (M, +10, +20) without reaching the target — giving up (exhausted)."
-                    : "[NAV] [FIX-FIRE] DY: both directions escalated to max without reaching the target — giving up (exhausted).");
+                    $"[NAV] [FIX-FIRE] EC: still wedged after {ApproachEscapeMaxWedgeSteps} lateral steps (both sides, up to {ApproachEscapeEndYards:0}y) — giving up (exhausted). [guid={_approachEscapeTargetGuid}]");
                 IsApproachEscapeExhausted = true;
-                _approachEscapeMobAnchorValid = false; // Fix EA: episode genuinely ended — release anchor so the next episode re-captures.
+                _approachEscapeMobAnchorValid = false;
+                _approachEscapeLateralActive = false;
                 _approachEscapeLastAttemptUtc = now.AddSeconds(PostExhaustionCooldownSec);
                 return false;
             }
-        }
 
-        _approachEscapeCurrentYards += 10f;
+            _approachEscapeLateralSign = -_approachEscapeLateralSign; // alternate side each wedge step
+            _approachEscapeLateralActive = true;
+            if (_approachEscapeCurrentYards < ApproachEscapeEndYards) // grow reach to max, then hold
+                _approachEscapeCurrentYards += 10f;
+
+            logger.LogWarning(
+                $"[NAV] [FIX-FIRE] EC: wedged (stationary) — lateral unwedge step side={(_approachEscapeLateralSign > 0 ? "+" : "-")} " +
+                $"reach={_approachEscapeCurrentYards:0}y step={_approachEscapeWedgeSteps}/{ApproachEscapeMaxWedgeSteps} guid={_approachEscapeTargetGuid}");
+        }
+        else
+        {
+            _approachEscapeWedgeSteps = 0;
+            _approachEscapeLateralActive = false;
+
+            if (_approachEscapeCurrentYards >= ApproachEscapeEndYards)
+            {
+                // Fix EA: when we have a usable mob anchor the projection already aims at the
+                // mob, so the blind 180° flip would point us AWAY from it — skip the flip and
+                // give up once the behind-levels (M, +10, +20) are spent.
+                if (!_approachEscapeMobAnchorValid && !_approachEscapeFlipTried)
+                {
+                    _approachEscapeFlipTried = true;
+                    _approachEscapeDirFlip = -1f;
+                    _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f; // -> +=10 below = base 10y
+                    logger.LogWarning(
+                        $"[NAV] [FIX-FIRE] DY: locked direction escalated to {ApproachEscapeEndYards:0}y without reaching the " +
+                        $"target — reversing projection 180° and restarting escalation from {ApproachEscapeStartYards:0}y. " +
+                        $"[guid={_approachEscapeTargetGuid} lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW}]");
+                }
+                else
+                {
+                    logger.LogWarning(_approachEscapeMobAnchorValid
+                        ? "[NAV] [FIX-FIRE] EA: mob-anchored escape exhausted all forward levels (M, +10, +20) without reaching the target — giving up (exhausted)."
+                        : "[NAV] [FIX-FIRE] DY: both directions escalated to max without reaching the target — giving up (exhausted).");
+                    IsApproachEscapeExhausted = true;
+                    _approachEscapeMobAnchorValid = false; // Fix EA: episode genuinely ended — release anchor so the next episode re-captures.
+                    _approachEscapeLastAttemptUtc = now.AddSeconds(PostExhaustionCooldownSec);
+                    return false;
+                }
+            }
+
+            _approachEscapeCurrentYards += 10f;
+        }
 
         if (_approachEscapeTargetGuid == 0)
             _approachEscapeTargetGuid = playerReader.TargetGuid;
@@ -2855,6 +2907,13 @@ public sealed partial class Navigation : IDisposable
                         _approachEscapeMobAnchorW = eaMobW;
                         _approachEscapeMobBearing = new Vector3(eaDx / eaLen, eaDy / eaLen, 0f);
                         _approachEscapeMobAnchorValid = true;
+                        // Fix EC: fresh lateral-unwedge state for this episode (these fields
+                        // survive the goal-transition flicker like the anchor, so they are
+                        // reset here at capture — once per episode — not in ResetApproachEscape).
+                        _approachEscapeLateralSign = 1f;
+                        _approachEscapeWedgeSteps = 0;
+                        _approachEscapeLateralActive = false;
+                        _approachEscapeLastClearStationary = false;
                         logger.LogWarning(
                             $"[NAV] [FIX-FIRE] EA: captured mob anchor M={eaMobW} " +
                             $"bearing=({eaDx / eaLen:0.00},{eaDy / eaLen:0.00}) dist={eaLen:0.0}y " +
@@ -3563,6 +3622,17 @@ public sealed partial class Navigation : IDisposable
         // the DY flip negation below — irrelevant once we are aimed at the mob.
         if (_approachEscapeMobAnchorValid)
         {
+            if (_approachEscapeLateralActive)
+            {
+                // Fix EC: step PERPENDICULAR to the captured bearing (rotate 90° × side),
+                // from the bot's current (wedged) position, to round the obstacle along its
+                // face. The pather routes there; once the bot can move sideways it escapes
+                // the wedge, and the next (non-stationary) attempt resumes aiming at the mob.
+                float px = -_approachEscapeMobBearing.Y * _approachEscapeLateralSign;
+                float py = _approachEscapeMobBearing.X * _approachEscapeLateralSign;
+                return new Vector3(currentW.X + px * yards, currentW.Y + py * yards, currentW.Z);
+            }
+
             float behind = yards - ApproachEscapeStartYards; // 10->0 (at M), 20->10, 30->20
             if (behind < 0f)
                 behind = 0f;
@@ -5349,7 +5419,29 @@ public sealed partial class Navigation : IDisposable
 
     public bool IsInBlacklistArea()
     {
-        bool inside = AreaBlacklist?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true;
+        // Fix EE-blacklist (log 133af 03:46:17-24): completes the escape-aware
+        // exemption of Fix DU/DV for the GOAL-SELECTION + BAIL-OUT path. DU/DV
+        // already made path validation (IsBlacklistedPoint ~5570,
+        // TryGetBlockingRectEscapeAware ~5609) test only the STATIC map
+        // blacklist while an escape is active — because the escape deliberately
+        // traverses the dynamic StuckRect it just placed ~5y ahead. This method
+        // feeds the inblacklistarea worldkey (GoapAgent.cs:1495) and both ATG
+        // bail-outs (ApproachTargetGoal.cs:467/498), but was left on the full
+        // composite AreaBlacklist — so the SAME self-defeat recurred here:
+        // the escape's own freshly-placed rect made inblacklistarea=true ->
+        // ATG precondition (line 239) fails -> Follow stomps the now-shared
+        // (Fix ED) nav -> "stopped externally" give-up -> the bail-out then
+        // blacklists the very mob being approached (133af: Mottled Boar 1225268
+        // dropped for 1235797). 133ac/ad/ae succeeded only because their rect
+        // happened not to catch the bot inside it.
+        //
+        // Same exemption, same field as DU/DV: while _approachEscapeActive, test
+        // the STATIC map blacklist only. GENUINE impassable areas (static map)
+        // still register true (so a real blacklist still blocks ATG and triggers
+        // a legitimate bail); only the escape's own dynamic StuckRects are
+        // exempted, and they resume gating the instant the escape ends.
+        IAreaBlacklist? bl = _approachEscapeActive ? _staticAreaBlacklist : AreaBlacklist;
+        bool inside = bl?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true;
         return inside;
     }
 
