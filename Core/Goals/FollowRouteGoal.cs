@@ -411,7 +411,29 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             $"AssistIsFollowing={assistIsFollowing} AssistCantFollow={assistCantFollow} " +
             $"navActive={navigation.Active} wp={navigation.WaypointCount} route={navigation.RouteCount}");
 
-        if (navigation.HasWaypoint() || navigation.HasNext())
+        // Fix EP (run-140): if we're resuming Follow while standing INSIDE a blacklist rect,
+        // the existing waypoint cannot be trusted. It is typically a leaked ApproachEscape
+        // target (a non-route point the escape projected toward a mob in/across the rect;
+        // run-140: <-304.65,-4848.47>) that the pather cannot reach from inside the rect
+        // ("Closest spot is too far from target. 8.17>5"), leaving the leader looping a failed
+        // path forever and the assist trapped in the propagated rect. A bot must never resume
+        // patrol from inside a rect on a stale escape target, so skip the existing-waypoint
+        // branch and fall through to RefillWaypoints(true) (findClosest) below, which snaps to
+        // the nearest ROUTE waypoint -- outside the rect and reachable back the way we came --
+        // so the leader paths out and rejoins the route. Confirmed recoverable in run-140:
+        // route waypoints <-265.99,-4875> (~19y) and <-224.93,-4893> (~25y) sit beside the
+        // stuck spot and the pather already reaches <-306,-4844>, so a near route waypoint is
+        // reachable; only the leaked target was unreachable.
+        bool insideBlacklistOnResume =
+            navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true;
+        if (insideBlacklistOnResume && (navigation.HasWaypoint() || navigation.HasNext()))
+            logger.LogWarning(
+                "[FRG] [FIX-FIRE] EP: resuming Follow while inside a blacklist rect with existing " +
+                $"waypoints (wp={navigation.WaypointCount} route={navigation.RouteCount} " +
+                $"pos={playerReader.WorldPos}) -- discarding them and snapping to the closest route " +
+                "waypoint to path out of the rect.");
+
+        if ((navigation.HasWaypoint() || navigation.HasNext()) && !insideBlacklistOnResume)
         {
             if (_pausedByAssistDistance)
             {
