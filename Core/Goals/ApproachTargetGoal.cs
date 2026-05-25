@@ -256,6 +256,12 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnEnter()
     {
+        // Target-tracking diagnostic: always log the live game target guid + the
+        // escape's locked guid at goal entry, so mob-target changes are traceable
+        // across the whole run (grep TARGET-GUID). Unconditional and Info-level
+        // (the older RATF log is Debug and skipped while an escape is active).
+        logger.LogInformation($"[ATG] OnEnter TARGET-GUID={playerReader.TargetGuid} escapeGuid={navigation.ApproachEscapeTargetGuid}");
+
         initialTargetGuid = initialTargetGuid == playerReader.TargetGuid
             ? -1
             : playerReader.TargetGuid;

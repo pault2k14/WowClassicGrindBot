@@ -185,6 +185,11 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     public override void OnEnter()
     {
+        // Target-tracking diagnostic (grep TARGET-GUID): live target guid at combat
+        // entry, unconditional + Info-level (complements the existing "Target Changed
+        // To" which only logs on a change).
+        logger.LogInformation($"[Combat] OnEnter TARGET-GUID={playerReader.TargetGuid}");
+
         wait.Update();
         stuckDetector.Reset();
         if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();

@@ -550,9 +550,23 @@ public sealed partial class Navigation : IDisposable
     private const float ApproachEscapeProgressMinW = 0.75f; // min movement to keep a recorded position
     private const double ApproachEscapeTimeoutSecPerYard = 0.8; // seconds per yard — scales with escape distance
     private const double ApproachEscapeNoMovementSec = 3.0;     // escalate immediately if no movement for this long
+    private const float ApproachEscapeProgressEpsilonYards = 1.0f; // Fix EG: net closing toward the current nav target (yards) required to count as progress — above sub-yard drift (cf. Fix B note ~line 644)
     private Vector3 _approachEscapeStartPos;                    // player position when escape began, for initial displacement check
     private Vector3 _approachEscapeLastProgressPos;             // rolling position — updated when character moves >2y, for mid-escape stuck detection
     private DateTime _approachEscapeLastProgressUtc = DateTime.MinValue; // when last progress was recorded
+    // ── Fix EG: route-relative escape-progress state (see TryUnstuck active branch).
+    // _escapeBestTargetDist = closest the bot has come to its current immediate nav
+    // target since the last (re)anchor; a new closest-approach (≥ epsilon) counts as
+    // progress. _escapeProgressRouteDepth = routeToNextWaypoint.Count at the anchor
+    // (a decrease = a node was reached = progress). _escapeProgressPathStamp =
+    // _pathSetStamp at the anchor (a change = a fresh pather route → re-anchor/grace).
+    // _pathSetStamp is bumped in PathCalculatedCallback when a route is applied. All
+    // re-anchor automatically whenever _approachEscapeLastProgressUtc is reset to
+    // MinValue (attempt fire / ResetApproachEscape / ResetApproachEscapeForTarget).
+    private float _escapeBestTargetDist;
+    private int _escapeProgressRouteDepth;
+    private long _escapeProgressPathStamp;
+    private long _pathSetStamp;
     private Vector3 _approachRecordedW;
     private Vector3 _approachPrevRecordedW;
     // Anchor = the very first position recorded on each approach cycle (seed value from
@@ -2702,15 +2716,56 @@ public sealed partial class Navigation : IDisposable
                     $"guid={_approachEscapeTargetGuid}");
             }
 
-            if (_approachEscapeLastProgressPos == default)
+            // ── Fix EG (logs 133ah/aj): route-relative no-progress detection.
+            // Replaces the old "moved ≥2y in any direction" test, which a bounce
+            // satisfies (it moves ≥2y repeatedly) while never traversing — so only
+            // the slow time budget caught it. Progress is now measured against the
+            // route the bot is actually navigating: it must either close in on the
+            // node it is steering to (a new closest-approach ≥ epsilon) or pop a
+            // route node. This is U-turn-safe — a roundabout that increases
+            // range-to-mob (or to the final escape target) still closes on / pops
+            // its intermediate nodes. A fresh pather route or a pending request
+            // re-anchors / grants grace. The per-yard time budget below is unchanged
+            // and remains the ultimate backstop.
+            Vector3 navTarget = routeToNextWaypoint.Count > 0
+                ? Nav2D(routeToNextWaypoint.Peek())
+                : (wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default);
+            int routeCount = routeToNextWaypoint.Count;
+            bool egFirstTick = _approachEscapeLastProgressUtc == DateTime.MinValue;
+            bool egPathPending = waitingForPathResult;
+            bool egFreshRoute = _escapeProgressPathStamp != _pathSetStamp;
+            bool egNodePopped = routeCount < _escapeProgressRouteDepth;
+
+            if (egFirstTick || navTarget == default || egPathPending || egFreshRoute || egNodePopped)
             {
+                // progress (node reached) or grace (start / waiting for path / fresh
+                // route / no target yet) → re-anchor and reset the timer.
+                _escapeBestTargetDist = navTarget == default
+                    ? float.MaxValue
+                    : currentPos.WorldDistanceXYTo(navTarget);
+                _escapeProgressRouteDepth = routeCount;
+                _escapeProgressPathStamp = _pathSetStamp;
                 _approachEscapeLastProgressPos = currentPos;
                 _approachEscapeLastProgressUtc = now2;
             }
-            else if (currentPos.WorldDistanceXYTo(_approachEscapeLastProgressPos) >= 2.0f)
+            else
             {
-                _approachEscapeLastProgressPos = currentPos;
-                _approachEscapeLastProgressUtc = now2;
+                float curTargetDist = currentPos.WorldDistanceXYTo(navTarget);
+                if (routeCount != _escapeProgressRouteDepth)
+                {
+                    // a detour node was inserted (count grew) — the immediate target
+                    // changed; re-baseline the closeness measure to it WITHOUT
+                    // resetting the timer, so detour thrash can't mask a real wedge.
+                    _escapeProgressRouteDepth = routeCount;
+                    _escapeBestTargetDist = curTargetDist;
+                }
+                else if (curTargetDist <= _escapeBestTargetDist - ApproachEscapeProgressEpsilonYards)
+                {
+                    // new closest-approach to the node we're steering to → progress.
+                    _escapeBestTargetDist = curTargetDist;
+                    _approachEscapeLastProgressPos = currentPos;
+                    _approachEscapeLastProgressUtc = now2;
+                }
             }
 
             double sinceProgressSec = (now2 - _approachEscapeLastProgressUtc).TotalSeconds;
@@ -2723,7 +2778,7 @@ public sealed partial class Navigation : IDisposable
                     $"[staleUtc={_approachEscapeStartUtc:HH:mm:ss.fff} yards={_approachEscapeCurrentYards:0} guid={_approachEscapeTargetGuid}]");
                 _approachEscapeStartUtc = now2;
                 _approachEscapeLastProgressPos = currentPos;
-                _approachEscapeLastProgressUtc = now2;
+                _approachEscapeLastProgressUtc = DateTime.MinValue; // Fix EG: force a clean route-relative re-anchor on the next tick
                 escapeSec = 0.0;
                 sinceProgressSec = 0.0;
             }
@@ -4790,6 +4845,7 @@ public sealed partial class Navigation : IDisposable
             return;
         }
 
+        _pathSetStamp++; // Fix EG: a fresh pather route was applied — re-anchor escape progress / grant recompute grace
         logger.LogDebug(
             $"[NAV-DBG] ROUTESET reqId={requestId} routeCount={routeToNextWaypoint.Count} " +
             $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +

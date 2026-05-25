@@ -124,6 +124,10 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     public override void OnEnter()
     {
+        // Target-tracking diagnostic (grep TARGET-GUID): live target guid + escape's
+        // locked guid at goal entry, unconditional + Info-level.
+        logger.LogInformation($"[PTG] OnEnter TARGET-GUID={playerReader.TargetGuid} escapeGuid={navigation.ApproachEscapeTargetGuid}");
+
         wait.Update();
         stuckDetector.Reset();
 
