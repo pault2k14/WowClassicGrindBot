@@ -3661,6 +3661,17 @@ public sealed partial class Navigation : IDisposable
             {
                 _approachEscapeLockedRecordedW = default;
                 _approachEscapeLockedPrevRecordedW = default;
+                // Fix EN (run-138): a guid==0 first-approach with no escalation in flight
+                // (yards==0) means the previous episode was wiped (combat/follow
+                // ResetApproachEscape, which does NOT clear the mob anchor). Release any
+                // surviving mob anchor so this episode re-captures against the CURRENT
+                // target. Without this, a successful escape strands its anchor and a later
+                // escape reuses it: run-138 reused M=<85,-4719> from ~7 min earlier and
+                // projected the escape ~451y away, leaving a far waypoint that leaked into
+                // the Follow resume -> 293y single-segment walk -> 205y leader/assist
+                // separation. Gated on yards==0 so a genuine mid-escape guid-loss
+                // (BUG B, yards>0) preserves its in-flight anchor.
+                _approachEscapeMobAnchorValid = false;
             }
 
             double lastAttemptAgeMs = (DateTime.UtcNow - _approachEscapeLastAttemptUtc).TotalMilliseconds;
