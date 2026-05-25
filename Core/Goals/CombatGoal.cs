@@ -849,58 +849,67 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         if (consecutiveApproach >= 5
             && (!playerReader.IsInMeleeRange() || combatLog.DamageDoneCount() == 0))
         {
+            // Fix EJ (Q4): physical unstuck (turn+move+jump) stays gated on IsMoving --
+            // only nudge the character when it is actually stationary.
             if (!stuckDetector.IsMoving())
             {
                 logger.LogInformation("StuckDetector: We aren't moving");
                 stuckDetector.Update();
-
-                if (!_stuckApproachingActive)
-                {
-                    _stuckApproachingActive = true;
-                    _stuckApproachingSinceUtc = DateTime.UtcNow;
-                    _stuckApproachingDamageSnapshot = combatLog.DamageDoneCount();
-                    logger.LogInformation($"[CombatGoal] Geometry trap timer started. DamageDone snapshot={_stuckApproachingDamageSnapshot}.");
-                }
-                else
-                {
-                    int currentDamage = combatLog.DamageDoneCount();
-                    if (currentDamage > _stuckApproachingDamageSnapshot)
-                    {
-                        _stuckApproachingActive = false;
-                        _stuckApproachingSinceUtc = DateTime.MinValue;
-                        _stuckApproachingDamageSnapshot = 0;
-                    }
-                    else
-                    {
-                        double stuckSec = (DateTime.UtcNow - _stuckApproachingSinceUtc).TotalSeconds;
-                        if (stuckSec >= UnreachableMobTimeoutSec)
-                        {
-                            logger.LogWarning($"[CombatGoal] Geometry trap detected after {stuckSec:0.0}s — disengaging.");
-                            playerReader.IgnoreTarget(playerReader.TargetGuid);
-                            input.PressStopAttack();
-                            wait.Update();
-                            input.PressClearTarget();
-                            wait.Update();
-                            stopMoving.Stop();
-                            navigation.ClearStuckRects();
-                            navigation.TryUnstuck();
-                            _stuckApproachingActive = false;
-                            _stuckApproachingSinceUtc = DateTime.MinValue;
-                            _stuckApproachingDamageSnapshot = 0;
-                            consecutiveApproach = 0;
-                            return;
-                        }
-                    }
-                }
             }
             else
             {
                 logger.LogInformation("StuckDetector: We are moving");
-                if (_stuckApproachingActive)
+            }
+
+            // Fix EJ (Q4): the geometry-trap (unreachable-mob) timer is now driven by
+            // COMBAT PROGRESS (damage dealt), NOT physical movement. Previously this
+            // whole timer block lived inside the if(!IsMoving()) branch above and the
+            // else(IsMoving) reset it -- so a bounce against terrain (IsMoving==true but
+            // no damage and no closing) wiped the timer every tick and an unreachable
+            // mob was never disengaged (the same bounce-defeats-progress flaw Fix EG/EI
+            // fixed for the route/approach escapes). The timer now accumulates across
+            // thrashing and resets ONLY when DamageDoneCount increases (= the mob is
+            // reachable). Damage-only rather than closest-approach because CombatGoal has
+            // no precise distance-to-target metric -- only the coarse range-bracket
+            // midpoint, which can read 0 and would falsely credit progress.
+            // UnreachableMobTimeoutSec (18 s) is the backstop; the consecutiveApproach >= 5
+            // gate on the enclosing if already requires repeated failed approaches.
+            if (!_stuckApproachingActive)
+            {
+                _stuckApproachingActive = true;
+                _stuckApproachingSinceUtc = DateTime.UtcNow;
+                _stuckApproachingDamageSnapshot = combatLog.DamageDoneCount();
+                logger.LogInformation($"[CombatGoal] Geometry trap timer started. DamageDone snapshot={_stuckApproachingDamageSnapshot}.");
+            }
+            else
+            {
+                int currentDamage = combatLog.DamageDoneCount();
+                if (currentDamage > _stuckApproachingDamageSnapshot)
                 {
                     _stuckApproachingActive = false;
                     _stuckApproachingSinceUtc = DateTime.MinValue;
                     _stuckApproachingDamageSnapshot = 0;
+                }
+                else
+                {
+                    double stuckSec = (DateTime.UtcNow - _stuckApproachingSinceUtc).TotalSeconds;
+                    if (stuckSec >= UnreachableMobTimeoutSec)
+                    {
+                        logger.LogWarning($"[CombatGoal] Geometry trap detected after {stuckSec:0.0}s — disengaging.");
+                        playerReader.IgnoreTarget(playerReader.TargetGuid);
+                        input.PressStopAttack();
+                        wait.Update();
+                        input.PressClearTarget();
+                        wait.Update();
+                        stopMoving.Stop();
+                        navigation.ClearStuckRects();
+                        navigation.TryUnstuck();
+                        _stuckApproachingActive = false;
+                        _stuckApproachingSinceUtc = DateTime.MinValue;
+                        _stuckApproachingDamageSnapshot = 0;
+                        consecutiveApproach = 0;
+                        return;
+                    }
                 }
             }
         }

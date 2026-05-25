@@ -2047,11 +2047,33 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         _approachTargetAcquired = true;
                         _approachTargetLatchedUtc = DateTime.UtcNow;  // Fix AM: record for stale-latch warning
 
-                        logger.LogInformation(
-                            $"[FFG] [FIX-FIRE] AJ: focus-chain confirmed hostile target acquired " +
-                            $"(guid={playerReader.TargetGuid}) — latching one-shot. " +
-                            $"ATG (cost 8) should win the next plan over FFG (cost 19) " +
-                            $"and take over the interact-key approach.");
+                        // Fix EH (log-134: 33/33 AM stale-latch warnings cited incombatrange=
+                        // true). The AJ latch fires "at the approach anchor," which sits next to
+                        // the mob, so the assist is frequently ALREADY in combat range when it
+                        // latches. ATG.AssistFocus requires incombatrange=false, so in that case
+                        // ATG can never be the handoff -- Combat (cost 4) takes over once party-
+                        // combat fires. Frame the latch log so the in-range case is not mislabeled
+                        // an ATG handoff (diagnostic only; the latch and behavior are unchanged).
+                        bool latchedInCombatRange = playerReader.WithInCombatRange();
+                        if (latchedInCombatRange)
+                        {
+                            logger.LogInformation(
+                                $"[FFG] [FIX-FIRE] AJ: focus-chain confirmed hostile target acquired " +
+                                $"(guid={playerReader.TargetGuid}) - latching one-shot. Assist is " +
+                                $"already in combat range (incombatrange=true), so this is a " +
+                                $"COMBAT-handoff latch, NOT an ATG-handoff: ATG requires " +
+                                $"incombatrange=false and is intentionally ineligible here; Combat " +
+                                $"(cost 4) takes over when party-combat fires. AM treats the in-range " +
+                                $"wait as expected, not stale.");
+                        }
+                        else
+                        {
+                            logger.LogInformation(
+                                $"[FFG] [FIX-FIRE] AJ: focus-chain confirmed hostile target acquired " +
+                                $"(guid={playerReader.TargetGuid}) - latching one-shot. " +
+                                $"ATG (cost 8) should win the next plan over FFG (cost 19) " +
+                                $"and take over the interact-key approach.");
+                        }
 
                         // Fix AM: dump every ATG-gating value FFG can observe.
                         // This snapshots what FFG sees at the moment the world
@@ -2168,11 +2190,17 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         bool curPartyEngaging      =
                             curBitsCombat || curFocusCombat || curHasApproachStart;
 
-                        logger.LogWarning(
-                            $"[FFG] [FIX-FIRE] AM: STALE LATCH WARNING — Fix AJ latched " +
-                            $"{msSinceLatch:0}ms ago (> {StaleLatchWarnAfterMs:0}ms threshold) " +
-                            $"but FFG.Update is still running. ATG was NOT selected by the " +
-                            $"planner. Current ATG-precondition state — " +
+                        // Fix EH (log-134): only the GENUINELY stale case stays a Warning.
+                        // When curInCombatRange is true the latch is a COMBAT-handoff (ATG
+                        // ineligible by design, awaiting party-combat) -- expected behavior, not a
+                        // stale latch -- so demote it to Debug with accurate framing. This stops
+                        // the per-pull in-range noise (33/33 last session) from burying a real
+                        // handoff failure (ATG eligible but not selected), which still warns.
+                        string amBody =
+                            $"Fix AJ latched {msSinceLatch:0}ms ago " +
+                            $"(> {StaleLatchWarnAfterMs:0}ms threshold) but FFG.Update is still " +
+                            $"running. ATG was NOT selected by the planner. Current " +
+                            $"ATG-precondition state - " +
                             $"hastarget={curHasTarget}, targetisalive={curHasTarget && !curTargetDead} " +
                             $"(dead={curTargetDead}), targethostile={curTargetHostile}, " +
                             $"incombatrange={curInCombatRange}, " +
@@ -2188,7 +2216,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             $"incombatrange=false, inblacklistarea=false, evadeRecovery=false. " +
                             $"Compare element-by-element: the first precondition above whose " +
                             $"value disagrees with ATG's expected is the blocker. " +
-                            $"Next warning in {StaleLatchWarningCooldownMs:0}ms if condition persists.");
+                            $"Next note in {StaleLatchWarningCooldownMs:0}ms if condition persists.";
+
+                        if (curInCombatRange)
+                        {
+                            logger.LogDebug(
+                                $"[FFG] [FIX-FIRE] AM: in-range COMBAT-handoff hold (expected, NOT " +
+                                $"stale) - incombatrange=true makes ATG ineligible by design; Combat " +
+                                $"(cost 4) takes over on party-combat. {amBody}");
+                        }
+                        else
+                        {
+                            logger.LogWarning(
+                                $"[FFG] [FIX-FIRE] AM: STALE LATCH WARNING - {amBody}");
+                        }
                     }
                 }
             }

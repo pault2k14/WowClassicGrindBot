@@ -644,6 +644,18 @@ public sealed partial class Navigation : IDisposable
     private Vector3 _routeEscapeLastProgressPos;
     private DateTime _routeEscapeLastProgressUtc = DateTime.MinValue;
 
+    // Fix EI (Q5): closest XY distance the bot has reached to the CURRENT attempt's
+    // escape waypoint (_routeEscapeAttemptTarget) since the attempt started. The
+    // no-progress timer (RouteEscapeNoMovementSec) now resets only on a NEW
+    // closest-approach by >= ApproachEscapeProgressEpsilonYards, mirroring Fix EG
+    // for ApproachEscape. This replaces the old "moved >= 2y in ANY direction"
+    // reset, which a bounce against terrain satisfied every cycle (advance toward
+    // the waypoint, get shoved back) so noProgress never fired and only the
+    // per-yard timeout backstop caught the stall. Seeded at attempt-fire (so the
+    // timer's zero point stays at attempt-start per Fix AT) and cleared in
+    // ResetRouteEscape.
+    private float _routeEscapeBestTargetDist = float.MaxValue;
+
     // Fix BA (log-82 19:06:37:899): the escape target of the current RouteEscape
     // attempt, captured at attempt-fire so the failed direction can be
     // reconstructed in the physTrapped branch (TryRouteUnstuck). Used by
@@ -3123,13 +3135,24 @@ public sealed partial class Navigation : IDisposable
             Vector3 currentPos = Nav2D(playerReader.WorldPos);
             double escapeSec = (now2 - _routeEscapeStartUtc).TotalSeconds;
 
-            if (_routeEscapeLastProgressPos == default)
-            {
-                _routeEscapeLastProgressPos = currentPos;
+            // Fix EI (Q5): progress = a NEW closest-approach to the current attempt's
+            // escape waypoint by >= ApproachEscapeProgressEpsilonYards, NOT raw
+            // displacement in any direction. A bounce (advance toward the waypoint,
+            // get shoved back) does not improve the closest-approach, so it no longer
+            // resets the timer -- mirroring Fix EG for ApproachEscape. Measured to the
+            // immediate attempt waypoint (not the start, not a final goal), so arcing
+            // around an obstacle still counts as closing. The two guards below are
+            // defensive lazy-init (normally seeded at attempt-fire, so neither fires
+            // in normal operation and neither moves the timer's zero point).
+            float distToTarget = currentPos.WorldDistanceXYTo(Nav2D(_routeEscapeAttemptTarget));
+            if (_routeEscapeBestTargetDist == float.MaxValue)
+                _routeEscapeBestTargetDist = distToTarget;
+            if (_routeEscapeLastProgressUtc == DateTime.MinValue)
                 _routeEscapeLastProgressUtc = now2;
-            }
-            else if (currentPos.WorldDistanceXYTo(_routeEscapeLastProgressPos) >= 2.0f)
+
+            if (distToTarget <= _routeEscapeBestTargetDist - ApproachEscapeProgressEpsilonYards)
             {
+                _routeEscapeBestTargetDist = distToTarget;
                 _routeEscapeLastProgressPos = currentPos;
                 _routeEscapeLastProgressUtc = now2;
             }
@@ -3409,6 +3432,12 @@ public sealed partial class Navigation : IDisposable
         // this initialization (e.g., a state-restore on reconnect).
         _routeEscapeLastProgressPos = playerW;
         _routeEscapeLastProgressUtc = now;
+        // Fix EI (Q5): seed the closest-approach baseline to THIS attempt's waypoint
+        // here at attempt-fire (same rationale as Fix AT for the Utc above): keeps
+        // the no-progress timer's zero point at attempt-start instead of the first
+        // TryRouteUnstuck call, and makes the lazy-init guard in TryRouteUnstuck a
+        // no-op in normal operation.
+        _routeEscapeBestTargetDist = playerW.WorldDistanceXYTo(escapeW);
         return true;
     }
 
@@ -3422,6 +3451,7 @@ public sealed partial class Navigation : IDisposable
         _routeEscapeLastProgressPos = default;
         _routeEscapeLastProgressUtc = DateTime.MinValue;
         _routeEscapeAttemptTarget = default; // Fix BA: clear with the rest of escape state
+        _routeEscapeBestTargetDist = float.MaxValue; // Fix EI: clear closest-approach baseline
     }
 
     /// <summary>
