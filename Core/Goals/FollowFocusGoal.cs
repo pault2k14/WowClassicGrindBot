@@ -5385,7 +5385,20 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 // (advanceCap). The anchor is the leader's position, so leaderIdx lands the
                 // assist right next to it; the leader has stopped (it's pulling), so advancing
                 // to its index can't overrun a moving leader.
-                int dpAdvanceLimit = (_anchorPatherFallback && !_anchorFallbackUsed)
+                // Fix EM (run-137 deadlock): when the leader is paused-for-assist (Status=Waiting)
+                // it is STATIONARY -- exactly like the DP pulling case above -- so advancing to its
+                // own index (rendezvousCap) cannot overrun a moving leader, and it is REQUIRED to
+                // close the gap and release the leader's pause. Without it the assist parks at the
+                // trailing-by-one cap (leaderIdx-1); when that route segment is wider than the
+                // leader's LeaderPauseYards (25y) the parked assist is stranded outside the release
+                // radius and both bots mutually wait forever (run-137: route[20]->route[21] ~35y, the
+                // assist parked 32.9y from the leader for the rest of the session). The advanced,
+                // non-co-located target this produces also makes OnDestinationReached re-path past
+                // its sit-in-place park (that only fires on a co-located retry target), so no
+                // separate guard change is needed. Reverts to advanceCap the moment the leader
+                // resumes (Status=Patrolling), so steady-state trailing-by-one is unchanged.
+                bool leaderWaitingForAssist = leader.Status == BotStatus.Waiting;
+                int dpAdvanceLimit = ((_anchorPatherFallback && !_anchorFallbackUsed) || leaderWaitingForAssist)
                     ? rendezvousCap
                     : advanceCap;
                 while (_assistRouteIndex < dpAdvanceLimit)
