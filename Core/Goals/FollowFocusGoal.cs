@@ -1374,6 +1374,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // Lifecycle
     // -----------------------------------------------------------------------
 
+    // Fix EK (log hygiene, run-135): the large [FIX-CONFIG] config dump below was logged in
+    // full on every OnEnter (every combat handoff). Log it once per process instead.
+    private static bool _fixConfigLogged;
+
     public override void OnEnter()
     {
         while (restHandler.IsResting())
@@ -1460,7 +1464,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // walking sessions, that's a signal — either the migration
         // missed a case, or the fix is catching a class of failure
         // wider than its original evidence suggested.
-        logger.LogInformation(
+        if (!_fixConfigLogged)
+        {
+            _fixConfigLogged = true;
+            logger.LogInformation(
             $"[FFG] [FIX-CONFIG] OnEnter: ArchitectureMode=RouteWalking (Turn 4a) " +
             $"— route-walk is now the patrol default when LoadedRoute is " +
             $"populated AND the leader's published TargetWaypoint maps to a " +
@@ -1508,6 +1515,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"BP, BQ, BR, BT, BU, BV, BW, BX, BY, BZ, CA, CB, CC, CD, CE-1, CE-2, CF, CG, CH, CI, CJ, CK, CL, CM, CN, CO, CP, CQ, CR, CS, CT, CV, CW, CX, CY, CZ, DA, DC, DD, DE, DF, DG, DH, DI, DJ, DK, DM, DN, DP, DQ, DR. " +
             $"RouteWaypointCount={navigation.LoadedRoute.Length}, " +
             $"navHash={navigation.GetHashCode()}.");
+        }
 
         _stuckCheckLastUtc = DateTime.MinValue;
         _activeStuckSinceUtc = DateTime.MinValue;

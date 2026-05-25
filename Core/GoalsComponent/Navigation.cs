@@ -2608,12 +2608,10 @@ public sealed partial class Navigation : IDisposable
                     // Propagated → propagated: refresh TTL so the rect stays
                     // alive as long as the leader keeps republishing.
                     _stuckRectExpiryUtc[i] = expiryUtc;
-                    if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
-                    {
-                        logger.LogDebug(
-                            $"[NAV] StuckRect dedup: refreshed TTL on existing propagated " +
-                            $"rect [{i}] (center={center}, new expiry={expiryUtc:HH:mm:ss.fff}).");
-                    }
+                    // Fix EK (log hygiene, run-135): the per-tick "refreshed TTL" LogDebug was
+                    // 51,981 lines (76%) of the assist log -- a propagated rect's TTL is refreshed
+                    // every Update, so logging each refresh is pure noise. Refresh is silent now;
+                    // the add/promote/skip events below still log.
                 }
                 else if (isLocal && existingIsLocal)
                 {
