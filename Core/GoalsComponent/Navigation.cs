@@ -3633,14 +3633,24 @@ public sealed partial class Navigation : IDisposable
                 _approachEscapeLastProgressPos = default;
                 _approachEscapeLastProgressUtc = DateTime.MinValue;
                 double lastAttemptAgeMs = (DateTime.UtcNow - _approachEscapeLastAttemptUtc).TotalMilliseconds;
+                // Fix EL (run-136): "WIPED (BUG B)" is a genuine state loss ONLY if an escape
+                // escalated (yards>0) and then lost its locked direction. When yards==0 no escape
+                // fired this engagement, so a default locked direction is NORMAL -- not a bug. All
+                // 185 "BUG B" hits in run-136 were this yards==0 false-alarm case. The benign case
+                // is also demoted to Debug (it fired ~122x/session at Info on routine re-entries).
+                bool escapeFiredEL = _approachEscapeCurrentYards > 0;
                 string lockedDirStatus = _approachEscapeLockedRecordedW != default
                     ? $"locked direction preserved (curr={_approachEscapeLockedRecordedW})"
-                    : "locked direction WIPED (BUG B)";
-                logger.LogInformation($"[NAV] ApproachEscape: same target {targetGuid} re-entered — " +
+                    : (escapeFiredEL
+                        ? "locked direction WIPED (BUG B)"
+                        : "no locked direction (no escape fired this engagement)");
+                string reentryMsgEL = $"[NAV] ApproachEscape: same target {targetGuid} re-entered -- " +
                     $"preserving {_approachEscapeCurrentYards:0}y escalation, {lockedDirStatus}. " +
                     $"[diag: lastAttemptAge={lastAttemptAgeMs:0}ms exhausted={IsApproachEscapeExhausted} " +
                     $"lockedCurr={_approachEscapeLockedRecordedW} lockedPrev={_approachEscapeLockedPrevRecordedW} " +
-                    $"stuckRects={_stuckWorldRects.Count}]");
+                    $"stuckRects={_stuckWorldRects.Count}]";
+                if (escapeFiredEL) logger.LogInformation(reentryMsgEL);
+                else logger.LogDebug(reentryMsgEL);
             }
         }
         else if (_approachEscapeTargetGuid == 0)
@@ -3654,7 +3664,11 @@ public sealed partial class Navigation : IDisposable
             }
 
             double lastAttemptAgeMs = (DateTime.UtcNow - _approachEscapeLastAttemptUtc).TotalMilliseconds;
-            bool genuineBugB = _approachEscapeCurrentYards > 0 || _stuckWorldRects.Count > 0;
+            // Fix EL (run-136): leftover stuckRects are normal terrain memory (they outlive a
+            // single escape and carry their own TTL), NOT a state-loss bug. Only a preserved
+            // escalation across a guid-loss (yards>0) is a genuine BUG B; dropping the rects
+            // condition silences the new-mob-with-leftover-rects false alarm (37+26 hits in run-136).
+            bool genuineBugB = _approachEscapeCurrentYards > 0;
 
             string bugBescalation = _approachEscapeCurrentYards > 0
                 ? $"{_approachEscapeCurrentYards:0}y escalation preserved"
