@@ -5401,8 +5401,44 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 int dpAdvanceLimit = ((_anchorPatherFallback && !_anchorFallbackUsed) || leaderWaitingForAssist)
                     ? rendezvousCap
                     : advanceCap;
-                while (_assistRouteIndex < dpAdvanceLimit)
+                // Fix EO (run-139): the loop ceiling is rendezvousCap (= leaderIdx) rather
+                // than the trailing-by-one advanceCap. Non-blacklisted advances still stop at
+                // dpAdvanceLimit (the explicit break below), so steady-state trailing-by-one is
+                // unchanged; the higher ceiling exists ONLY so a blacklisted waypoint sitting at
+                // the cap can be skipped past it.
+                while (_assistRouteIndex < rendezvousCap)
                 {
+                    // Fix EO (run-139): a route waypoint can sit inside a static blacklist rect
+                    // loaded from the route file (route[64]=<113.28,-4709.24> inside one of
+                    // 05-08_Durotar_big v2.json's 3 rects). The assist can never arrive at it --
+                    // Navigation.SkipBlacklistedWaypoints pops it (wpCount=0), the assist idles
+                    // with no nav target, reports Stuck, and the leader pauses for it: mutual
+                    // standstill. The leader survives because its multi-waypoint refill pops the
+                    // bad waypoint and paths to the next; mirror that here by advancing PAST a
+                    // blacklisted waypoint WITHOUT the POP_DIST arrival gate, up to rendezvousCap.
+                    // Ceiling is rendezvousCap (never beyond): the leader publishes only
+                    // non-blacklisted waypoints (TopPublishableWaypointW), so leaderIdx is
+                    // guaranteed reachable and skipping up to it always suffices; advancing past
+                    // it would push the assist ahead of the tank -- exactly what trailing-by-one
+                    // prevents.
+                    bool wpBlacklisted = navigation.AreaBlacklist != null &&
+                                         navigation.AreaBlacklist.ContainsWorld(route[_assistRouteIndex]);
+                    if (wpBlacklisted)
+                    {
+                        int blIdx = _assistRouteIndex;
+                        _assistRouteIndex++;
+                        logger.LogWarning(
+                            $"[FFG] [ROUTE-WALK] [FIX-FIRE] EO: skipping blacklisted route " +
+                            $"waypoint idx={blIdx} ({route[blIdx]}) → idx={_assistRouteIndex} " +
+                            $"(advanceCap={advanceCap}, rendezvousCap={rendezvousCap}, " +
+                            $"leaderIdx={leaderIdx}).");
+                        continue;
+                    }
+
+                    // Non-blacklisted: steady-state trailing-by-one advance, gated on the cap
+                    // (dpAdvanceLimit) and physical arrival (POP_DIST).
+                    if (_assistRouteIndex >= dpAdvanceLimit)
+                        break;
                     float distToCurrent = playerReader.WorldPos.WorldDistanceXYTo(route[_assistRouteIndex]);
                     if (distToCurrent > Navigation.POP_DIST)
                         break;
@@ -5562,6 +5598,24 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             return ComputeFollowTargetWorldPos(leader);
                         }
                     }
+                }
+
+                // Fix EO (run-139) safety net: if the target is STILL blacklisted after the
+                // skip loop above (degenerate -- even route[rendezvousCap] is blacklisted, which
+                // shouldn't happen since the leader publishes only non-blacklisted waypoints;
+                // reachable only via a stale cached leaderIdx), fall back to PositionChase so the
+                // pather routes around the rect toward the leader's body instead of the assist
+                // idling on a waypoint Navigation.SkipBlacklistedWaypoints will immediately pop.
+                if (navigation.AreaBlacklist != null &&
+                    navigation.AreaBlacklist.ContainsWorld(route[_assistRouteIndex]))
+                {
+                    if (_currentNavTargetMode != NavTargetMode.PositionChase)
+                        logger.LogWarning(
+                            $"[FFG] [ROUTE-WALK] [FIX-FIRE] EO: route target idx={_assistRouteIndex} " +
+                            $"({route[_assistRouteIndex]}) still blacklisted through rendezvousCap " +
+                            $"({rendezvousCap}) -- falling back to PositionChase.");
+                    _currentNavTargetMode = NavTargetMode.PositionChase;
+                    return ComputeFollowTargetWorldPos(leader);
                 }
 
                 _currentNavTargetMode = NavTargetMode.RouteWalk;
