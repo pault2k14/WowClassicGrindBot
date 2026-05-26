@@ -64,8 +64,13 @@ public sealed partial class Blacklist<T> : IBlacklist where T : IBlacklistSource
             lastGuid = 0;
             return false;
         }
-        else if (combatLog.DamageTaken.Contains(source.UnitGuid))
+        else if (combatLog.DamageTaken.Contains(source.UnitGuid)
+                 && !playerReader.IsNoEngage(source.UnitGuid))
         {
+            // E4: a no-engage (in-rect) mob does NOT get the "actively damaging us =>
+            // fightable" carve-out. It falls through to the IsIgnored check below and
+            // is treated as blacklisted, so the finder won't re-grab it while we
+            // retreat. Ordinary blacklisted mobs still get the carve-out (self-defense).
             return false;
         }
 

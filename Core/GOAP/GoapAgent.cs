@@ -545,12 +545,19 @@ public sealed partial class GoapAgent : IDisposable
                     {
                         if (guid != 0 && _knownBlacklistedGuids.Add(guid))
                         {
-                            logger.LogInformation(
-                                $"[GoapAgent] New blacklisted mob guid={guid} from API — " +
-                                "ignoring target and dispatching EvadeBlacklistEvent.");
+                            // E4: mirror the leader's in-rect verdict so the assist's
+                            // self-defense is suppressed for the same mob (IsNoEngage),
+                            // closing the partner-recruit hole. NoEngageMobGuids is a
+                            // subset of BlacklistedMobGuids, published in the same snapshot.
+                            bool inRect = leaderState.NoEngageMobGuids is { Length: > 0 } noEngage
+                                && System.Array.IndexOf(noEngage, guid) >= 0;
 
-                            playerReader.IgnoreTarget(guid);
-                            HandleGoapEvent(new EvadeBlacklistEvent(guid));
+                            logger.LogInformation(
+                                $"[GoapAgent] New blacklisted mob guid={guid} from API " +
+                                $"(inRect={inRect}) — ignoring target and dispatching EvadeBlacklistEvent.");
+
+                            playerReader.IgnoreTarget(guid, inRect);
+                            HandleGoapEvent(new EvadeBlacklistEvent(guid, EvadeReason.Propagation, inRect));
                             assistStatusProvider.CantFollow = true;
                         }
                     }
@@ -644,7 +651,7 @@ public sealed partial class GoapAgent : IDisposable
                         $"from _knownBlacklistedGuids (no prior EvadeBlacklistEvent). " +
                         $"Dispatching event to start 25s recovery window and " +
                         $"API-broadcast to assist.");
-                    HandleGoapEvent(new EvadeBlacklistEvent(leaderTargetGuid));
+                    HandleGoapEvent(new EvadeBlacklistEvent(leaderTargetGuid, EvadeReason.Propagation));
                 }
 
                 if (leaderFocusTargetGuid != 0
@@ -657,7 +664,7 @@ public sealed partial class GoapAgent : IDisposable
                         $"focusTarget guid={leaderFocusTargetGuid} is in IsIgnored but " +
                         $"absent from _knownBlacklistedGuids. Dispatching " +
                         $"EvadeBlacklistEvent.");
-                    HandleGoapEvent(new EvadeBlacklistEvent(leaderFocusTargetGuid));
+                    HandleGoapEvent(new EvadeBlacklistEvent(leaderFocusTargetGuid, EvadeReason.Propagation));
                 }
             }
 
@@ -725,7 +732,7 @@ public sealed partial class GoapAgent : IDisposable
             if (currentlyInBlacklistMemoryZone && _knownBlacklistedGuids.Count > 0)
             {
                 foreach (int guid in _knownBlacklistedGuids)
-                    playerReader.IgnoreTarget(guid);
+                    playerReader.IgnoreTarget(guid, playerReader.IsNoEngage(guid));
             }
 
             // ── Evade recovery world state ────────────────────────────────
@@ -1256,11 +1263,18 @@ public sealed partial class GoapAgent : IDisposable
         bool overrideAlreadyLatched =
             _selfDefenseOverrideGuid != 0 &&
             _selfDefenseOverrideGuid == playerReader.TargetGuid;
+        // E4: keep the planner mirror in lockstep with CombatGoal:462 — don't flip
+        // targetIgnored=false (i.e. don't make Combat selectable for self-defense)
+        // against a mob determined to be inside a blacklist rect at blacklist time.
+        // Per-GUID verdict (PlayerReader.IsNoEngage) riding the IsIgnored TTL — NOT a
+        // per-tick position read, so it needs no facing and can't flap at the edge.
+        bool targetNoEngage = playerReader.IsNoEngage(playerReader.TargetGuid);
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
-            !evadeRecoveryActive;
+            !evadeRecoveryActive &&
+            !targetNoEngage;
         if (selfDefenseOverride)
         {
             targetIgnored = false;
@@ -1693,6 +1707,16 @@ public sealed partial class GoapAgent : IDisposable
         if (DateTime.UtcNow < _evadeRecoveryUntilUtc)
             return true;
 
+        // E4: allow the leader to patrol during no-engage-only combat — being damaged
+        // by an in-rect mob with nothing fightable to target. FollowRoute then routes
+        // away; blacklist-aware nav detours around the rect, carrying us out of range,
+        // and once clear dmgTaken lapses so the normal checks below resume. Early
+        // return (skips the loot/kill/corpse checks): survival > loot under a live
+        // no-engage attack. A fightable target makes InNoEngageOnlyCombat() false, so
+        // Combat (cost 4) still preempts patrol.
+        if (InNoEngageOnlyCombat())
+            return true;
+
         bool dmgTaken = combatLog.DamageTakenCount() > 0;
         bool dmgDone  = combatLog.DamageDoneCount() > 0;
 
@@ -1701,6 +1725,32 @@ public sealed partial class GoapAgent : IDisposable
             && !dmgTaken
             && State.LastCombatKillCount == 0
             && !State.ShouldConsumeCorpse;
+    }
+
+    /// <summary>
+    /// E4: true when the leader is being damaged by a no-engage (in-rect) mob AND has
+    /// no fightable target — the case where FollowRoute should run despite "combat" so
+    /// the leader retreats instead of stalling (Combat is blocked, the finder skips the
+    /// mob via Blacklist.Is, and FollowRoute is otherwise damage-gated). We iterate our
+    /// own <c>_knownBlacklistedGuids</c> (a HashSet&lt;int&gt;) rather than
+    /// combatLog.DamageTaken — whose element type we don't depend on — testing each via
+    /// the confirmed DamageTaken.Contains. Returns false the instant a fightable target
+    /// exists (so Combat preempts) or no no-engage mob is actually hitting us (so normal
+    /// post-kill/loot handling via the LastCombatKillCount path is preserved).
+    /// </summary>
+    private bool InNoEngageOnlyCombat()
+    {
+        // A fightable target in the slot => fight it (Combat), don't retreat.
+        if (playerReader.TargetGuid != 0 && !playerReader.IsIgnored(playerReader.TargetGuid))
+            return false;
+
+        foreach (int guid in _knownBlacklistedGuids)
+        {
+            if (playerReader.IsNoEngage(guid) && combatLog.DamageTaken.Contains(guid))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -1757,37 +1807,16 @@ public sealed partial class GoapAgent : IDisposable
             if (evade.TargetGuid != 0)
             {
                 logger.LogInformation(
-                    $"[GoapAgent] Evade blacklist event guid={evade.TargetGuid} — " +
-                    $"starting {EvadeRecoveryDurationSec}s recovery window.");
+                    $"[GoapAgent] Evade blacklist event guid={evade.TargetGuid} " +
+                    $"reason={evade.Reason} — blacklisting (no recovery window; the post-evade " +
+                    $"disengage was removed, self-defense stays available).");
 
-                _evadeRecoveryUntilUtc = DateTime.UtcNow.AddSeconds(EvadeRecoveryDurationSec);
-
-                // Press StopAttack and ClearTarget unconditionally for both modes.
-                //
-                // CombatGoal.Update has an _evadeRecoveryActive branch
-                // (CombatGoal.cs:191) that calls PressStopAttack + PressClearTarget,
-                // but that branch is UNREACHABLE in practice: CombatGoal has
-                // AddPrecondition(GoapKey.evadeRecovery, false). The moment
-                // _evadeRecoveryUntilUtc is set above and the next GoapThread
-                // iteration broadcasts GoapKey.evadeRecovery=true, the planner
-                // deselects CombatGoal and calls OnExit. OnExit does not press
-                // StopAttack (only stopMoving.Stop and PressEnableSoftInteract;
-                // see CombatGoal.cs:168). Auto-attack remains toggled on.
-                //
-                // Symptom on warriors and other auto-attack classes: leader
-                // continues swinging at the blacklisted mob until kill credit
-                // or de-aggro. Observed in log 23:
-                //   18:36:56:918  evade fires
-                //   18:36:57:010  New Plan = Follow (CombatGoal exited via planner,
-                //                  not via the _evadeRecoveryActive branch)
-                //   (no StopAttack press anywhere after evade)
-                //   18:37:17:403  Kill credit — mob died from continued attacks
-                //                  22.5 seconds later.
-                //
-                // Pressing StopAttack here ensures the toggle is released the
-                // instant the evade event is dispatched, regardless of which
-                // goal is currently active or which goal will be selected next.
-                // Idempotent: pressing while already stopped is a no-op.
+                // Press StopAttack + ClearTarget so the auto-attack toggle is released
+                // on the evaded mob. CombatGoal deselects the instant the target is
+                // cleared/ignored, and its OnExit does NOT release the toggle
+                // (CombatGoal.cs:168) — so warriors/auto-attack classes keep swinging
+                // at the blacklisted mob until kill credit (log 23) unless we release
+                // it here. Idempotent: pressing while already stopped is a no-op.
                 input.PressStopAttack();
                 input.PressClearTarget();
 
@@ -1807,7 +1836,7 @@ public sealed partial class GoapAgent : IDisposable
                 //                 in CombatGoal.Update (line 198) saw IsIgnored=false
                 //   23:01:54:894  kill credit on the supposedly-blacklisted mob
                 // Centralizing the call here makes every dispatch path symmetric.
-                playerReader.IgnoreTarget(evade.TargetGuid);
+                playerReader.IgnoreTarget(evade.TargetGuid, evade.InRect);
 
                 // Fix 15: record this guid in the session blacklist so the
                 // per-tick refresh in GoapThread keeps its IsIgnored TTL
@@ -1821,16 +1850,17 @@ public sealed partial class GoapAgent : IDisposable
 
                 if (classConfig.Mode == Mode.PartyLeader)
                 {
-                    _evadeLeaderWaiting = true;
                     stopMoving.Stop();
                     input.StopForward(true);
 
                     // Publish the blacklisted GUID via API so the assist can call
                     // playerReader.IgnoreTarget without relying on the chat message.
-                    leaderNavProvider.AddBlacklistedMobGuid(evade.TargetGuid);
+                    leaderNavProvider.AddBlacklistedMobGuid(evade.TargetGuid, evade.InRect);
 
-                    foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
-                        goal.SuppressTargetFinderBriefly((int)(EvadeRecoveryDurationSec * 1000));
+                    // No recovery window, no _evadeLeaderWaiting, no finder suppression:
+                    // the post-evade disengage is removed. The finder is gated by
+                    // IsInBlacklistArea + AnyAssistCantFollow + its own 6s blacklist
+                    // cooldown; self-defense stays available (E4-gated). See CHANGESET2_E_DESIGN.
                 }
             }
             else
@@ -1854,9 +1884,8 @@ public sealed partial class GoapAgent : IDisposable
                     input.StopForward(true);
                     // guid=0 means ghost combat — no specific mob to blacklist via API,
                     // the assist handles evade recovery via the status signal alone.
-
-                    foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
-                        goal.SuppressTargetFinderBriefly((int)(GhostCombatEscapeDurationSec * 1000));
+                    // (Finder suppression removed — the ghost window already blocks
+                    //  Combat/ATG/PTG, so engagement can't happen during it anyway.)
                 }
             }
         }

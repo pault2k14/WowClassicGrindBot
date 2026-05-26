@@ -374,9 +374,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 $"exiting combat to trigger evade-retreat behavior. " +
                 $"(Mode={classConfig.Mode})");
 
+            bool inRect = navigation.IsTargetLikelyInBlacklistRect();
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
-            playerReader.IgnoreTarget(playerReader.TargetGuid);
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
+            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
             navigation.ClearStuckRects();
             input.PressStopAttack();
             wait.Update();
@@ -459,16 +460,24 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         bool overrideAlreadyLatched =
             _combatOverrideGuid != 0 && _combatOverrideGuid == playerReader.TargetGuid;
 
+        // E4: don't let self-defense chase a mob determined to be inside a blacklist
+        // rect at blacklist time (CombatGoal closes distance via direct Approach
+        // presses, so without this the bot would walk INTO the rect after the
+        // attacker). Per-GUID verdict (PlayerReader.IsNoEngage) riding the IsIgnored
+        // TTL — no per-tick position read, no facing required. Kept in lockstep with
+        // the planner mirror at GoapAgent:1259.
+        bool targetNoEngage = playerReader.IsNoEngage(playerReader.TargetGuid);
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
-            && !assistStatusProvider.EvadeRecoveryActive)
+            && !assistStatusProvider.EvadeRecoveryActive
+            && !targetNoEngage)
         {
             logger.LogInformation(
                 $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +
                 $"is on IsIgnored but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
                 $"playerCombat=true, dmgTaken=true, evadeRecovery=false, " +
-                $"insideBlacklistArea={navigation.IsInBlacklistArea()}, latched={overrideAlreadyLatched}) — " +
+                $"insideBlacklistArea={navigation.IsInBlacklistArea()}, noEngage={targetNoEngage}, latched={overrideAlreadyLatched}) — " +
                 $"treating as fightable, falling through to engage rather than bailing.");
             currentTargetIsIgnored = false;
 
@@ -713,7 +722,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             && combatLog.EvadeMobs.Contains(playerReader.TargetGuid))
         {
             logger.LogInformation($"[CombatGoal] Target guid={playerReader.TargetGuid} is evading — broadcasting and exiting.");
-            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
+            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.RealEvade));
             playerReader.IgnoreTarget(playerReader.TargetGuid);
             navigation.ClearStuckRects();
             input.PressStopAttack();
@@ -742,7 +751,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
             stopMoving.Stop();
 
-            SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
+            SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid, EvadeReason.Propagation));
 
             // assistStatusProvider.CantFollow keeps assistshouldfollow=true so
             // FollowFocusGoal is immediately selectable during evade recovery.
@@ -796,7 +805,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                         input.PressClearTarget();
                         wait.Update();
                         stopMoving.Stop();
-                        SendGoapEvent(new EvadeBlacklistEvent(0));
+                        SendGoapEvent(new EvadeBlacklistEvent(0, EvadeReason.GhostCombat));
                         return;
                     }
                 }
@@ -1354,7 +1363,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 input.PressClearTarget();
                 wait.Update();
                 stopMoving.Stop();
-                SendGoapEvent(new EvadeBlacklistEvent(evadingGuid));
+                SendGoapEvent(new EvadeBlacklistEvent(evadingGuid, EvadeReason.RealEvade));
                 return;
             }
             else if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())

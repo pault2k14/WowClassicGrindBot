@@ -128,6 +128,21 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         // locked guid at goal entry, unconditional + Info-level.
         logger.LogInformation($"[PTG] OnEnter TARGET-GUID={playerReader.TargetGuid} escapeGuid={navigation.ApproachEscapeTargetGuid}");
 
+        // E5: approach-entry gate (re-evaluation + fresh-pull) — see ApproachTargetGoal
+        // OnEnter. We only reach here for a fightable (non-ignored) target; if it's
+        // inside a blacklist rect, blacklist it in-rect and bail rather than pulling
+        // into the rect. The IsIgnored abort at the top of Update exits next tick.
+        if (playerReader.TargetGuid != 0 && navigation.IsTargetLikelyInBlacklistRect())
+        {
+            logger.LogInformation(
+                $"[PTG] E5 approach gate: target guid={playerReader.TargetGuid} is inside a " +
+                $"blacklist rect — blacklisting (in-rect) instead of pulling.");
+            if (classConfig.Mode == Mode.PartyLeader)
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, true));
+            playerReader.IgnoreTarget(playerReader.TargetGuid, true);
+            return;
+        }
+
         wait.Update();
         stuckDetector.Reset();
 
@@ -268,7 +283,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             stopMoving.Stop();
 
             if (blacklistGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid));
+                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid, EvadeReason.Propagation));
 
             if (!bits.AutoFollow())
             {
@@ -299,9 +314,10 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
                 ? "all escape levels exhausted (10y/20y/30y failed)"
                 : targetBlacklist.Is() ? "target in blacklist" : "player inside blacklist area";
             logger.LogWarning($"[PTG] Bail-out: blacklisting target guid={playerReader.TargetGuid} — reason: {ptgBailReason}.");
+            bool inRect = navigation.IsTargetLikelyInBlacklistRect();
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
-            playerReader.IgnoreTarget(playerReader.TargetGuid);
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
+            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
             input.PressStopAttack();
             input.PressClearTarget();
             wait.Update();
@@ -398,7 +414,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             Log("Evading mob");
 
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid));
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.RealEvade));
             playerReader.IgnoreTarget(playerReader.TargetGuid);
             input.PressStopAttack();
             input.PressClearTarget();

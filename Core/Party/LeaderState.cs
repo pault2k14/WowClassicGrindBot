@@ -75,6 +75,11 @@ public sealed class LeaderState
     /// <summary>Snapshot of all mob GUIDs the leader has blacklisted this session.</summary>
     public int[] BlacklistedMobGuids { get; set; } = System.Array.Empty<int>();
 
+    /// <summary>E4: the in-rect ("no-engage") subset of <see cref="BlacklistedMobGuids"/>.
+    /// The assist mirrors these into PlayerReader.IsNoEngage so self-defense is
+    /// suppressed for mobs the leader determined to be inside a blacklist rect.</summary>
+    public int[] NoEngageMobGuids { get; set; } = System.Array.Empty<int>();
+
     // ------------------------------------------------------------------
     // Fix AV (Route A) — Stuck-rect propagation from leader to assist.
     //

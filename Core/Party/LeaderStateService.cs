@@ -299,6 +299,7 @@ public sealed class LeaderStateService
 
             // Mob blacklist — cumulative for the session.
             BlacklistedMobGuids = leaderNavProvider.BlacklistedMobGuidsSnapshot,
+            NoEngageMobGuids = leaderNavProvider.NoEngageMobGuidsSnapshot,
 
             // Fix AV (Route A): dynamic stuck-rect propagation. The
             // assist applies each entry via Navigation.AddPropagatedStuckRect

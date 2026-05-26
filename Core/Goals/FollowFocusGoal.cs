@@ -260,6 +260,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         Projection30,
         LastSafeAnchor,
         PhysicalUnstuck,
+        DirectedFallback,
         Exhausted
     }
     private CantFollowEscapePhase _escapePhase = CantFollowEscapePhase.NotStarted;
@@ -267,6 +268,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private Vector3 _escapePhaseStartPos;
     private Vector3 _escapeTargetW;
     private bool _escapeUnstuckUsed;
+    // 1b: DirectedFallback sweep step (1->10y/0deg, 2->20y/+120deg, 3->30y/-120deg, >3->Exhausted/hold).
+    private int _directedFallbackStep;
 
     // -----------------------------------------------------------------------
     // Fix BB (log-83 20:17:59:688 → 20:18:05:005) — path-rejection-cause flag
@@ -335,46 +338,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     // geometry, no clamp interaction, no instant-arrival loop.
     private const float MinRouteBasisDistance = EscapeArrivalYards + 1.0f;
 
-    /// <summary>
-    /// Fix AO (log-78 02:41:21:328 → end-of-log, leader paused at AssistReturn
-    /// destination while assist's escape projection ran east unbounded for 49+
-    /// seconds, displacing 177y from leader): position recorded at the moment
-    /// of CantFollow entry. Used by the cumulative-displacement exit in
-    /// <c>UpdateCantFollow</c> — when the assist has moved further than
-    /// <c>MaxEscapeDisplacementYards</c> from this point, the escape has
-    /// fulfilled its purpose (relocate the bot to a navigable region) and
-    /// the bot exits CantFollow to re-attempt NavigatingToLeader from the
-    /// new position. See the comment above the displacement-cap exit in
-    /// <c>UpdateCantFollow</c> for the full evidence trail.
-    /// </summary>
-    private Vector3 _cantFollowEnteredPos;
-
-    /// <summary>
-    /// Fix AO: cumulative-displacement cap from the CantFollow entry position.
-    /// When exceeded, the bot exits CantFollow back to NavigatingToLeader.
-    /// <para>
-    /// 20 y covers ~2-3 Projection10 cycles (each yielding ~6-8 y net
-    /// displacement). After that much escape, the bot is materially clear
-    /// of the original navmesh dead-zone that caused the path rejection
-    /// and a fresh navigation attempt to the leader's CURRENT position
-    /// is likely to succeed via a different geometric route.
-    /// </para>
-    /// <para>
-    /// If the new path still fails (bot is in an unusually large dead-zone),
-    /// CantFollow re-fires from the new position with <c>_cantFollowEnteredPos</c>
-    /// reset to the new spot. The escape continues from there, bounded fresh
-    /// to 20 y per cycle. This is self-limiting and prevents the
-    /// unbounded one-direction escape observed in log-78.
-    /// </para>
-    /// <para>
-    /// Smaller values risk premature exits while the bot is still partially
-    /// in the dead-zone — repeated CantFollow flapping. Larger values give
-    /// the escape more room but extend the worst-case "wrong direction"
-    /// travel. 20 y is a middle-ground per the log-78 evidence; tune via
-    /// the warning log line below if future evidence shows mis-calibration.
-    /// </para>
-    /// </summary>
-    private const float MaxEscapeDisplacementYards = 20.0f;
 
     // Fix BR (log-98 22:06:14 → 22:06:56, assist drifted idx 11→9→8→4 over successive resyncs):
     // distance threshold below which the assist abandons route-walk and heads directly to
@@ -1505,7 +1468,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             $"FollowingMaxYards={NavigatingMinYards:0.0}y, " +
             $"NavigatingExitYards={NavigatingExitYards:0.0}y, " +
             $"WaypointUpdateThresholdYards={WaypointUpdateThresholdYards:0.0}y, " +
-            $"MaxEscapeDisplacementYards={MaxEscapeDisplacementYards:0.0}y, " +
             $"ChaseWatchdogCantFollowSec={ChaseWatchdogCantFollowSec:0.0}s, " +
             $"AnchorLocalTtlMs={AnchorLocalTtlMs:0}ms, " +
             $"RouteSpanLeaderProximityYards={RouteSpanLeaderProximityYards:0.0}y. " +
@@ -3203,41 +3165,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        // Fix AO: cap cumulative displacement from CantFollow entry at
-        // MaxEscapeDisplacementYards (20y). On exceed, exit CantFollow →
-        // NavigatingToLeader and re-attempt nav from the new position.
-        // Self-limiting: if the path still fails, CantFollow re-fires with
-        // _cantFollowEnteredPos refreshed, starting the bound over.
-        //
-        // Root cause (log-78): when AssistReturn completes and the leader
-        // PAUSES at the assist's last position, Fix AB-2's "away-from-leader
-        // projection" keeps receding from the stationary leader. 23 cycles
-        // in 49s walked the assist 177y east before the 120s CantFollow
-        // timeout would have fired. The leader-arrived/segment-clear exits
-        // can't trigger because the gap is monotonically widening or
-        // AreaBlacklist is null on assist side.
-        // See HANDOFF Fix AO for full evidence.
-        if (leaderFresh && _cantFollowEnteredPos != default)
-        {
-            float displacementFromEntry =
-                playerReader.WorldPos.WorldDistanceXYTo(_cantFollowEnteredPos);
-            if (displacementFromEntry > MaxEscapeDisplacementYards)
-            {
-                float distToLeader =
-                    playerReader.WorldPos.WorldDistanceXYTo(leader!.WorldPos);
-                logger.LogWarning(
-                    $"[FFG] [FIX-FIRE] AO: cumulative escape displacement {displacementFromEntry:0.0}y " +
-                    $"exceeded cap ({MaxEscapeDisplacementYards}y) from entry at {_cantFollowEnteredPos}. " +
-                    $"Exiting CantFollow to re-attempt navigation to leader (currently {distToLeader:0.0}y " +
-                    $"at {leader.WorldPos}). If path still fails, CantFollow will re-fire from current position.");
-                assistStatusProvider.CantFollow = false;
-                ResetEscapeState();
-                ResetNavState();
-                StartNavigatingToLeader(leader);
-                return;
-            }
-        }
-
         // Existing 120 s timeout — retry navigation in case the leader moved.
         if (cantFollowSec >= CantFollowTimeoutSec)
         {
@@ -3289,6 +3216,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             case CantFollowEscapePhase.Projection20:
             case CantFollowEscapePhase.Projection30:
             case CantFollowEscapePhase.LastSafeAnchor:
+            case CantFollowEscapePhase.DirectedFallback:
                 DriveActiveEscapePhase();
                 break;
 
@@ -3317,7 +3245,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         bool isProjectionPhase =
             _escapePhase == CantFollowEscapePhase.Projection10 ||
             _escapePhase == CantFollowEscapePhase.Projection20 ||
-            _escapePhase == CantFollowEscapePhase.Projection30;
+            _escapePhase == CantFollowEscapePhase.Projection30 ||
+            _escapePhase == CantFollowEscapePhase.DirectedFallback;
 
         double budgetSec = isProjectionPhase ? EscapeProjectionPhaseSec : EscapeAnchorPhaseSec;
 
@@ -3386,6 +3315,10 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
 
             case CantFollowEscapePhase.PhysicalUnstuck:
                 StartPhysicalUnstuckPhase();
+                break;
+
+            case CantFollowEscapePhase.DirectedFallback:
+                StartDirectedFallbackPhase();
                 break;
 
             case CantFollowEscapePhase.Exhausted:
@@ -3513,6 +3446,49 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _escapeTargetW = default;
     }
 
+    // 1b: DirectedFallback - last-resort directed escape for a genuinely wedged
+    // bot (LastSafeAnchor unreachable + PhysicalUnstuck failed). BD route-basis
+    // (toward nearest pre-validated waypoint) or reversed facing, swept across
+    // 3 steps (10y/0deg, 20y/+120deg, 30y/-120deg), then hold (Exhausted). The
+    // away-from-leader basis and Fix BB are intentionally NOT restored - those
+    // were the AB-2 regression. Reached only when genuinely wedged; the
+    // safe-and-waiting (co-located) case holds without coming here.
+    private void StartDirectedFallbackPhase()
+    {
+        _directedFallbackStep++;
+        if (_directedFallbackStep > 3)
+        {
+            logger.LogWarning(
+                "[FFG] CantFollow escape: DirectedFallback sweep exhausted (3 steps) - " +
+                "holding position (Exhausted).");
+            StartEscapePhase(CantFollowEscapePhase.Exhausted);
+            return;
+        }
+
+        float yards = _directedFallbackStep == 1 ? 10f : _directedFallbackStep == 2 ? 20f : 30f;
+        float angleOffset = _directedFallbackStep == 2 ? (2f * MathF.PI / 3f)
+                          : _directedFallbackStep == 3 ? (-2f * MathF.PI / 3f)
+                          : 0f;
+
+        Vector3 target = ComputeDirectedFallbackWaypoint(yards, angleOffset);
+
+        if (navigation.AreaBlacklist != null && navigation.AreaBlacklist.ContainsWorld(target))
+        {
+            logger.LogInformation(
+                $"[FFG] CantFollow escape: DirectedFallback step {_directedFallbackStep} target {target} " +
+                "is itself inside a rect - advancing sweep.");
+            StartEscapePhase(CantFollowEscapePhase.DirectedFallback);
+            return;
+        }
+
+        _escapeTargetW = target;
+        logger.LogInformation(
+            $"[FFG] CantFollow escape: DirectedFallback step {_directedFallbackStep} " +
+            $"({yards:0}y, offset={angleOffset * 180f / MathF.PI:+0.0;-0.0;0}deg) -> navigating to {target} " +
+            $"(from {playerReader.WorldPos}).");
+        navigation.SetSingleWaypoint(target);
+    }
+
     private void EscalateEscapePhase()
     {
         switch (_escapePhase)
@@ -3527,10 +3503,19 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 StartEscapePhase(CantFollowEscapePhase.LastSafeAnchor);
                 break;
             case CantFollowEscapePhase.LastSafeAnchor:
+                // 1b: safe anchor unreachable AND PhysicalUnstuck already ran =
+                // genuinely wedged (the safe-and-waiting case holds in
+                // StartLastSafeAnchorPhase's co-located branch and never reaches
+                // here, so hold-when-safe is preserved). Try the DirectedFallback
+                // sweep before holding.
                 if (_escapeUnstuckUsed)
-                    StartEscapePhase(CantFollowEscapePhase.Exhausted);
+                    StartEscapePhase(CantFollowEscapePhase.DirectedFallback);
                 else
                     StartEscapePhase(CantFollowEscapePhase.PhysicalUnstuck);
+                break;
+            case CantFollowEscapePhase.DirectedFallback:
+                // Advance the sweep; StartDirectedFallbackPhase caps at step 3 -> Exhausted.
+                StartEscapePhase(CantFollowEscapePhase.DirectedFallback);
                 break;
             default:
                 StartEscapePhase(CantFollowEscapePhase.Exhausted);
@@ -3545,6 +3530,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         _escapePhaseStartPos = default;
         _escapeTargetW = default;
         _escapeUnstuckUsed = false;
+        _directedFallbackStep = 0;   // 1b
 
         // Fix 33: reset the position-chase projection log dedup so the
         // next projection in a fresh state cycle (after plan re-entry,
@@ -3557,15 +3543,15 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// <summary>
     /// Computes an escape waypoint <paramref name="yards"/> away from the
     /// nearest blacklist rect's center, projected through the assist's
-    /// current position.
+    /// current position. Rect-relative only.
     ///
-    /// <para>When no rect contains the assist (Fix AB-2), falls back to a
-    /// direction-aware projection AWAY from the leader's body, with
-    /// ±120° rotation per escalation level — so the Projection10/20/30
-    /// escape phases sweep a ~240° arc and have a real chance of
-    /// physically displacing the bot even in non-blacklisted zones
-    /// (e.g., Durotar corridor stucks where PPather genuinely cannot
-    /// navigate the terrain).</para>
+    /// <para>When no rect contains the assist, returns <c>default</c> so the
+    /// caller (StartProjectionPhase) falls through to LastSafeAnchor and the
+    /// hold-when-safe logic. The AB-2 away-from-leader directional fallback
+    /// was removed here (it drove the bot away from its destination for every
+    /// non-rect CantFollow cause); the directed route/sweep escape now lives
+    /// in the last-resort DirectedFallback phase
+    /// (<see cref="ComputeDirectedFallbackWaypoint"/>).</para>
     /// </summary>
     private Vector3 ComputeAwayFromRectWaypoint(float yards)
     {
@@ -3610,311 +3596,78 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        // ── Path 2: Fix AB-2 directional fallback (+ BD route-basis) ──
-        //
-        // When no blacklist rect contains the assist, provide a fallback
-        // direction so the Projection phases can still emit meaningful
-        // escape waypoints. Three-step direction priority:
-        //
-        //   1. BD (Turn 3.5c / log-88): nearest LoadedRoute waypoint, if
-        //      available and not co-located (>1.0y). Route waypoints are
-        //      pre-validated walkable terrain by construction — heads the
-        //      bot toward known-good ground regardless of current terrain
-        //      class. SUPERSEDED the original away-from-leader basis after
-        //      log-88's hilltop-stuck (away-from-leader drove bot up a
-        //      hill into unrecoverable collision).
-        //
-        //   2. AB-2: away-from-leader (reversed leader→assist vector) when
-        //      no route or co-located with nearest wp. Rationale: the
-        //      bot's arrival path is probably traversable in reverse, and
-        //      leader's AssistRequestReturn is approaching anyway.
-        //
-        //   3. Reversed player facing (-cos(facing), -sin(facing)) when
-        //      leader missing/stale or degenerate co-located.
-        //
-        // Per-phase rotation around the chosen axis (mirrors Navigation
-        // Fix W): 10y at 0°, 20y at +120°, 30y at −120°. Sweeps ~240°
-        // around the bot across 3 escalation phases.
-        //
-        // Interaction with Fix BB: BB flips direction TOWARD leader when
-        // usingLeaderDirection=true AND CantFollow was path-rejection AND
-        // leader ≤ 25y. When BD's route basis is chosen,
-        // usingLeaderDirection=false and BB is correctly skipped (route
-        // direction already points at known-good ground).
-        //
-        // Log uses the original AB-2 fix-fire string; BD logs separately
-        // when the route basis is engaged, so engagement rate is greppable.
-        // See HANDOFF Fix AB-2 + Fix BD for full evidence.
-        float fdx = 0f;
-        float fdy = 0f;
-        bool usingLeaderDirection = false;
+        // ── Not near any rect: no rect-relative escape exists. ────────
+        // Restored to pre-AB-2 behavior — return default so the caller
+        // (StartProjectionPhase) falls through to LastSafeAnchor → hold-when-safe
+        // (the run-141 / log-78 drift fix). The AB-2 "away-from-leader"
+        // directional fallback and the BB/BG-2/BH-2 band-aids hung off it are
+        // removed. BD/W return in the last-resort DirectedFallback phase
+        // (see ComputeDirectedFallbackWaypoint), behind the hold-when-safe gate.
+        return default;
+    }
+
+    // 1b: directed escape waypoint for the DirectedFallback phase. BD route-basis
+    // (toward the nearest pre-validated LoadedRoute waypoint) or, if no usable
+    // route, reversed player facing. The AB-2 away-from-leader basis and Fix BB
+    // flip are intentionally NOT restored. BG-2 overshoot clamp retained for the
+    // route basis. <paramref name="angleOffset"/> is the per-step sweep rotation.
+    private Vector3 ComputeDirectedFallbackWaypoint(float yards, float angleOffset)
+    {
+        Vector3 pos = playerReader.WorldPos;
+        float fdx = 0f, fdy = 0f;
         bool usingRouteDirection = false;
-
-        // Fix BG-2 (log-93 00:03:29 → 00:04:10, 40-second CantFollow ping-pong):
-        // Track the distance to the chosen route-basis waypoint so the
-        // projection length can be CLAMPED below to prevent overshoot when
-        // the route waypoint is closer than the projection length (10y).
-        // See the clamp site just before fallbackTarget is computed.
         float routeBasisDist = float.MaxValue;
-
-        // Hoisted so Fix BB (below, ~line 3442) can reference it. When BD's
-        // route direction is in use, usingLeaderDirection stays false and BB
-        // won't fire — the leader variable is unused in that path.
-        LeaderState? leader = leaderConnection.LastLeaderState;
 
         Vector3[] loadedRoute = navigation.LoadedRoute;
         if (loadedRoute.Length > 0)
         {
             float bestDist = float.MaxValue;
             int bestIdx = -1;
-            for (int i = 0; i < loadedRoute.Length; i++)
+            for (int k = 0; k < loadedRoute.Length; k++)
             {
-                float d = pos.WorldDistanceXYTo(loadedRoute[i]);
-                if (d < bestDist)
-                {
-                    bestDist = d;
-                    bestIdx = i;
-                }
+                float d = pos.WorldDistanceXYTo(loadedRoute[k]);
+                if (d < bestDist) { bestDist = d; bestIdx = k; }
             }
-
-            // Only use the route direction if the nearest waypoint is far
-            // enough away that the BG-2 clamp won't drop the projection
-            // target into the arrival radius. See MinRouteBasisDistance
-            // for the full rationale.
-            //
-            // History:
-            //   - Original threshold was 1.0y (purely numerical: avoid
-            //     near-zero direction vector degeneracy when bot is on
-            //     top of a route point).
-            //   - Fix BG-2 added the clamp `effectiveYards = routeBasisDist`
-            //     to stop the bot from overshooting and ping-ponging
-            //     across the basis waypoint (log-93's 29-Projection10
-            //     oscillation through a 7.8×7.1y box).
-            //   - Fix BH-2 raised this gate to `MinRouteBasisDistance`
-            //     (= EscapeArrivalYards + 1.0y = 4.5y) after the clamp
-            //     turned out to create a NEW bug: when the basis waypoint
-            //     was within EscapeArrivalYards of the bot, the clamped
-            //     target sat inside the arrival radius and the next-tick
-            //     arrival check fired before the bot could move,
-            //     restarting Projection10 every 14ms (log-94: 1630 events
-            //     in 28.8s, bot frozen at (-327.00, -4148.28), CPU loop).
-            //
-            // Below this gate, the bot is essentially at a route waypoint
-            // already — there's nothing meaningful to project "toward."
-            // The fall-through to away-from-leader basis produces a
-            // 10y projection in a different direction; if the bot is
-            // wedged, the phase budget elapses in 3s and escalates to
-            // Projection20/30. Functional escape geometry, no loop.
             if (bestIdx >= 0 && bestDist >= MinRouteBasisDistance)
             {
                 Vector3 wp = loadedRoute[bestIdx];
-                float dxw = wp.X - pos.X;
-                float dyw = wp.Y - pos.Y;
+                float dxw = wp.X - pos.X, dyw = wp.Y - pos.Y;
                 float lenSqW = dxw * dxw + dyw * dyw;
                 if (lenSqW > 0.001f)
                 {
                     float lenW = MathF.Sqrt(lenSqW);
-                    fdx = dxw / lenW;
-                    fdy = dyw / lenW;
+                    fdx = dxw / lenW; fdy = dyw / lenW;
                     usingRouteDirection = true;
-                    routeBasisDist = bestDist;   // Fix BG-2: save for the clamp below
+                    routeBasisDist = bestDist;
                     logger.LogInformation(
-                        $"[FFG] [FIX-FIRE] BD: AB-2 projection basis = toward " +
-                        $"nearest LoadedRoute waypoint idx={bestIdx} at {wp} " +
-                        $"({bestDist:0.0}y away). Route waypoints are pre-validated " +
-                        $"terrain — heading toward route guarantees the projection " +
-                        $"target sits on traversable ground, even if the bot's " +
-                        $"current position is on terrain where navmesh and " +
-                        $"character collision disagree. Original away-from-leader " +
-                        $"basis suppressed for this CantFollow cycle.");
+                        $"[FFG] [FIX-FIRE] BD: DirectedFallback basis = toward nearest LoadedRoute " +
+                        $"waypoint idx={bestIdx} at {wp} ({bestDist:0.0}y). Pre-validated terrain.");
                 }
             }
         }
 
-        // Fallback: route unavailable or co-located. Use existing logic.
         if (!usingRouteDirection)
         {
-            bool leaderFresh = leader != null &&
-                               leaderConnection.LocalAgeMs <= leaderConnection.StaleThresholdMs;
-
-            if (leaderFresh)
-            {
-                fdx = pos.X - leader!.WorldPos.X;
-                fdy = pos.Y - leader.WorldPos.Y;
-                float lenSq = fdx * fdx + fdy * fdy;
-                if (lenSq < 0.001f)
-                {
-                    float facing = playerReader.Direction;
-                    fdx = -MathF.Cos(facing);
-                    fdy = -MathF.Sin(facing);
-                    usingLeaderDirection = false;
-                }
-                else
-                {
-                    float len = MathF.Sqrt(lenSq);
-                    fdx /= len;
-                    fdy /= len;
-                    usingLeaderDirection = true;
-                }
-            }
-            else
-            {
-                float facing = playerReader.Direction;
-                fdx = -MathF.Cos(facing);
-                fdy = -MathF.Sin(facing);
-                usingLeaderDirection = false;
-            }
+            float facing = playerReader.Direction;
+            fdx = -MathF.Cos(facing);
+            fdy = -MathF.Sin(facing);
         }
-
-        // Fix BB: when CantFollow is caused by path-rejection
-        // (_lastPathFailureWasRejection=true) AND we're using the
-        // leader-direction basis AND leader ≤ proximity threshold,
-        // NEGATE the direction vector so projection points TOWARD the
-        // leader instead of away.
-        //
-        // Rationale: AB-2's away-from-leader assumes the bot is wedged in
-        // terrain near an unreachable leader. For path-rejection failures
-        // (Fix AC+AE+AI+AL refusing U-turn paths > 150° angle / 8 nodes),
-        // the bot is at a navmesh-VALID position and the rejection is a
-        // routing quirk (long detour for short straight-line distance).
-        // Backing away from leader deepens the routing problem AND
-        // produces the user-visible "turned around" symptom.
-        //
-        // Threshold tuning history:
-        //   15y (initial)
-        //   25y (Turn 3.5 / log-86):  15y missed corridor scenarios where
-        //                             assist trails further back during
-        //                             catch-up (log-86: 20.9y, BB silent,
-        //                             AB-2 walked bot 13y wrong-way, 50s
-        //                             stuck). 25y covers log-83/84/85/86
-        //                             corridor cases.
-        //   60y (Fix CD-2 / log-107): 25y missed cases where bot drifts
-        //                             AWAY during CantFollow recovery
-        //                             before BB candidate basis (away-
-        //                             from-leader) fires. Log-107
-        //                             11:54:22.393: bot at <-747.05,
-        //                             -4266.18>, leader/anchor at <-751.32,
-        //                             -4297.40> — distance 31.5y. P3's
-        //                             toward-route projection had drifted
-        //                             bot 6.7y NW (away from south leader)
-        //                             before P4 reverted to away-from-leader
-        //                             basis. By P4, leader was 6.5y past
-        //                             25y threshold, so BB stayed silent
-        //                             even with CD-1's persisted flag.
-        //                             Extending to 60y absorbs the typical
-        //                             drift accumulated across 2-3
-        //                             projections, while still gating
-        //                             genuine "leader is very far / off
-        //                             route" scenarios (where toward-leader
-        //                             may not help).
-        //
-        // The _lastPathFailureWasRejection gate (now persistent during
-        // CantFollow per CD-1) keeps BB tight — wedge-case escapes (where
-        // away-from-leader IS correct) have _lastPathFailureWasRejection
-        // =false and BB stays silent.
-        //
-        // Interaction with BD (route basis): BD sets usingLeaderDirection
-        // =false when LoadedRoute is available, so BB is correctly skipped
-        // there (route direction already points at known-good ground).
-        // See HANDOFF Fix BB for full evidence.
-        const float FixBBLeaderProximityYards = 60.0f;
-        if (usingLeaderDirection && _lastPathFailureWasRejection)
-        {
-            float distLeader = pos.WorldDistanceXYTo(leader!.WorldPos);
-            if (distLeader <= FixBBLeaderProximityYards)
-            {
-                logger.LogWarning(
-                    $"[FFG] [FIX-FIRE] BB: CantFollow caused by path-rejection " +
-                    $"(_lastPathFailureWasRejection=true) AND leader is close " +
-                    $"(dist={distLeader:0.0}y ≤ {FixBBLeaderProximityYards:0.0}y). " +
-                    $"Flipping Fix AB-2 direction TOWARD leader instead of " +
-                    $"away. Original (away) basis would have sent the bot " +
-                    $"further from any clean navmesh; toward-leader keeps the " +
-                    $"bot pointed in the direction it was already trying to go. " +
-                    $"Projection10 will fire at 0° (straight toward leader); " +
-                    $"Projection20/30 sweep ±120° over the forward half-plane. " +
-                    $"pos={pos} leader={leader!.WorldPos}.");
-                fdx = -fdx;
-                fdy = -fdy;
-            }
-        }
-
-        // ±120° rotation. yards is always 10/20/30 (the three Projection
-        // phases pass these constants explicitly). Use >25/>15 thresholds
-        // so the test is robust to future constant adjustments without
-        // breaking at the exact boundaries.
-        const float Rotate120 = 2f * MathF.PI / 3f;
-        float angleOffset = 0f;
-        if (yards > 25f)
-            angleOffset = -Rotate120;
-        else if (yards > 15f)
-            angleOffset = Rotate120;
 
         if (MathF.Abs(angleOffset) > 0.001f)
         {
-            float cos = MathF.Cos(angleOffset);
-            float sin = MathF.Sin(angleOffset);
+            float cos = MathF.Cos(angleOffset), sin = MathF.Sin(angleOffset);
             float rdx = fdx * cos - fdy * sin;
             float rdy = fdx * sin + fdy * cos;
-            fdx = rdx;
-            fdy = rdy;
+            fdx = rdx; fdy = rdy;
         }
 
-        // ── Fix BG-2 (log-93 00:03:29 → 00:04:10) ───────────────────────────
-        // When the chosen basis is "toward-route" (Fix BD) and no angle
-        // offset is applied (Projection10 phase), clamp the projection length
-        // to the route waypoint's actual distance. Without this clamp, the
-        // projection OVERSHOOTS the route waypoint and lands on the other
-        // side of it. On the next re-plan, the bot is past the route waypoint
-        // and the direction TOWARD the waypoint flips — producing a ping-pong
-        // across the route waypoint that never escapes.
-        //
-        // Log-93 evidence: 29 Projection10 events fired between 00:03:29:834
-        // and 00:04:12:534. Every projection had bestDist between 2.4y and
-        // 4.8y (route waypoint very close), and every projection was 10y
-        // long — overshooting by 5-7.5y each cycle. The bot oscillated
-        // through 5 close points within a 7.8y × 7.1y bounding box centered
-        // on route[26] = (-746.35, -4318.80) for 40 seconds, never
-        // escalating to Projection20 because each Projection10 "arrived"
-        // (displacement ≥ EscapeArrivalYards=3.5y), restarting the phase.
-        //
-        // Clamping to routeBasisDist makes the projection land AT the route
-        // waypoint. The bot arrives there, re-plans, and (because bestDist
-        // is now < 1.0y) usingRouteDirection turns off — the next phase
-        // uses leader-direction or reversed-facing basis. Different
-        // geometry, no more ping-pong.
-        //
-        // Only applies when:
-        //   - usingRouteDirection (the route was actually chosen as basis)
-        //   - angleOffset is ~0 (Projection10; the 20/30y rotated phases
-        //     don't aim at the waypoint after rotation, so clamping by
-        //     pre-rotation distance is meaningless)
-        //   - routeBasisDist < yards (only clamp when overshoot would occur)
+        // Fix BG-2: clamp to the route-waypoint distance on the unrotated step so
+        // the projection lands AT the waypoint instead of overshooting + flipping.
         float effectiveYards = yards;
-        if (usingRouteDirection &&
-            MathF.Abs(angleOffset) < 0.001f &&
-            routeBasisDist < yards)
-        {
+        if (usingRouteDirection && MathF.Abs(angleOffset) < 0.001f && routeBasisDist < yards)
             effectiveYards = routeBasisDist;
-            logger.LogInformation(
-                $"[FFG] [FIX-FIRE] BG-2: clamping projection length " +
-                $"{yards:0.0}y → {effectiveYards:0.0}y because route basis " +
-                $"({routeBasisDist:0.0}y) is closer than full projection. " +
-                $"Prevents overshoot-and-flip ping-pong around route waypoint.");
-        }
 
-        Vector3 fallbackTarget = new Vector3(
-            pos.X + fdx * effectiveYards,
-            pos.Y + fdy * effectiveYards,
-            0f);
-
-        logger.LogInformation(
-            $"[FFG] [FIX-FIRE] AB-2: no BL rect contains assist — directional fallback projection " +
-            $"{effectiveYards:0}y (offset={angleOffset * 180f / MathF.PI:+0.0;-0.0;0}°, " +
-            $"basis={(usingRouteDirection ? "toward-route" : usingLeaderDirection ? "away-from-leader" : "reversed-facing")}) → " +
-            $"{fallbackTarget} (pos={pos}).");
-
-        return fallbackTarget;
+        return new Vector3(pos.X + fdx * effectiveYards, pos.Y + fdy * effectiveYards, 0f);
     }
 
     // -----------------------------------------------------------------------
@@ -6755,9 +6508,6 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         navigation.Stop();
         assistStatusProvider.CantFollow = true;
         _cantFollowEnteredUtc = DateTime.UtcNow;
-        // Fix AO (log-78): record entry position for the cumulative-displacement
-        // exit in UpdateCantFollow. See the field comment for rationale.
-        _cantFollowEnteredPos = playerReader.WorldPos;
         assistStatusProvider.CurrentStatus = BotStatus.CantFollow;
         // Fix 32 — reset the escape state machine so it starts fresh from
         // NotStarted on the first UpdateCantFollow tick. Without this,

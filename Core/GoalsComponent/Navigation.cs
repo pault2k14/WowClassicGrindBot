@@ -5554,6 +5554,65 @@ public sealed partial class Navigation : IDisposable
         return inside;
     }
 
+    // ── Section E4/E5 ── Is the CURRENT TARGET mob likely inside a blacklist rect?
+    // The enemy world position is not exposed directly, so:
+    //   (1) primary  : TargetMapPos -> ToWorld_FlipXY -> inflated rect test.
+    //                  TargetMapPos is valid only while FACING the mob, which both
+    //                  callers guarantee (self-defense is mid-combat; the approach
+    //                  gate PressFastInteracts first). ToWorld_FlipXY lands in the
+    //                  rect frame: Fix EA computes its bearing relative to
+    //                  Nav2D(WorldPos), and Nav2D is a pure Z-flatten, so the frame
+    //                  is WorldPos XY in yards.
+    //   (2) fallback : project WorldPos along facing across the reported target
+    //                  distance bracket [MinRange..MaxRange] and rect-test the
+    //                  samples. Forward unit vector for playerReader.Direction is
+    //                  (Cos, Sin) in WorldPos XY — the convention used by the
+    //                  FIX-FIRE facing-vs-forward dot (~line 4799) and FFG's
+    //                  DirectedFallback, NOT the (unused) ToNormalRadian flip.
+    //   (3) degenerate (no map pos AND no usable range): return true — fail safe
+    //                  toward NOT engaging / NOT pulling.
+    // All tests inflate the rect by DetourMargin*0.5 (the same ~6y margin the
+    // escape/reunite logic trusts) so a mob hugging the inside edge reads "in rect".
+    public bool IsTargetLikelyInBlacklistRect()
+    {
+        if (AreaBlacklist == null)
+            return false;
+
+        float inflate = DetourMargin * 0.5f;
+
+        // (1) primary: TargetMapPos (valid while facing the mob)
+        Vector3 mMap = playerReader.TargetMapPos;
+        if (mMap != Vector3.Zero
+            && playerReader.MaxRange() != 0
+            && playerReader.MinRange() <= playerReader.MaxRange())
+        {
+            Vector3 mW = WorldMapAreaDB.ToWorld_FlipXY(mMap, playerReader.WorldMapArea);
+            return AreaBlacklist.TryGetContainingRectInflated(Nav2D(mW), inflate, out _);
+        }
+
+        // (2) fallback: facing * target-distance bracket, conservative OR over samples
+        int maxR = playerReader.MaxRange();
+        if (maxR > 0)
+        {
+            int minR = playerReader.MinRange();
+            if (minR < 0) minR = 0;
+            float cos = MathF.Cos(playerReader.Direction);
+            float sin = MathF.Sin(playerReader.Direction);
+            Vector3 w = playerReader.WorldPos;
+            for (int i = 0; i <= 2; i++)            // minR, midpoint, maxR
+            {
+                float d = minR + (maxR - minR) * (i * 0.5f);
+                Vector3 estW = new(w.X + cos * d, w.Y + sin * d, 0f);
+                if (AreaBlacklist.TryGetContainingRectInflated(Nav2D(estW), inflate, out _))
+                    return true;
+            }
+            return false;
+        }
+
+        // (3) degenerate: fail safe toward NOT engaging / NOT pulling
+        return true;
+    }
+
     /// <summary>
     /// Clears all dynamically-added stuck rects accumulated during approach attempts.
     /// Restores the effective blacklist to the static route blacklist only.

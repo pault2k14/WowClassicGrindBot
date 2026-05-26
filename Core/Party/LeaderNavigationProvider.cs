@@ -176,17 +176,37 @@ public sealed class LeaderNavigationProvider
     /// </summary>
     public int[] BlacklistedMobGuidsSnapshot => _snapshot;
 
+    // E4: the IN-RECT subset of the blacklist — mobs the leader determined to be
+    // inside a blacklist rect at blacklist time. The assist mirrors these into
+    // PlayerReader.IsNoEngage so its self-defense is suppressed for the same mobs
+    // (otherwise the assist could be recruited to chase an in-rect mob). Always a
+    // subset of _blacklistedGuids.
+    private readonly HashSet<int> _noEngageGuids = new();
+    private volatile int[] _noEngageSnapshot = System.Array.Empty<int>();
+
+    /// <summary>
+    /// Snapshot of the in-rect ("no-engage") subset, published alongside
+    /// <see cref="BlacklistedMobGuidsSnapshot"/>. Rebuilt on every change.
+    /// </summary>
+    public int[] NoEngageMobGuidsSnapshot => _noEngageSnapshot;
+
     /// <summary>
     /// Records a newly-evaded mob GUID. No-op if <paramref name="guid"/> is 0
     /// or already present. Rebuilds the snapshot atomically.
     /// </summary>
-    public void AddBlacklistedMobGuid(int guid)
+    public void AddBlacklistedMobGuid(int guid, bool inRect = false)
     {
         if (guid == 0)
             return;
 
         if (_blacklistedGuids.Add(guid))
             _snapshot = System.Linq.Enumerable.ToArray(_blacklistedGuids);
+
+        // E4: record the in-rect subset separately so the assist can mirror it
+        // into IsNoEngage. A guid only ever transitions false->true here (a mob
+        // determined in-rect stays in-rect for the session); we never demote.
+        if (inRect && _noEngageGuids.Add(guid))
+            _noEngageSnapshot = System.Linq.Enumerable.ToArray(_noEngageGuids);
     }
 
     /// <summary>
@@ -200,6 +220,9 @@ public sealed class LeaderNavigationProvider
 
         _blacklistedGuids.Clear();
         _snapshot = System.Array.Empty<int>();
+
+        _noEngageGuids.Clear();
+        _noEngageSnapshot = System.Array.Empty<int>();
     }
 
     // -----------------------------------------------------------------------

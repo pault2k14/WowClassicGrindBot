@@ -151,21 +151,38 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public UnitClass Class => (UnitClass)(reader.GetInt(46) / 100 % 100);
     public ClientVersion Version => (ClientVersion)(reader.GetInt(46) % 10);
 
-    public Dictionary<int, DateTime> BlacklistAreaMobs { get; } = new();
+    public Dictionary<int, (DateTime until, bool inRect)> BlacklistAreaMobs { get; } = new();
 
     public static int BLACKLIST_IGNORE_SECONDS = 30;
 
     public TimeSpan BlacklistIgnoreTimespan = new TimeSpan(0, 0, BLACKLIST_IGNORE_SECONDS);
 
-    public void IgnoreTarget(int id)
-    => BlacklistAreaMobs[id] = DateTime.UtcNow + BlacklistIgnoreTimespan;
+    public void IgnoreTarget(int id, bool inRect = false)
+    => BlacklistAreaMobs[id] = (DateTime.UtcNow + BlacklistIgnoreTimespan, inRect);
 
     public bool IsIgnored(int id)
     {
-        if (BlacklistAreaMobs.TryGetValue(id, out var until))
+        if (BlacklistAreaMobs.TryGetValue(id, out var e))
         {
-            if (DateTime.UtcNow < until)
+            if (DateTime.UtcNow < e.until)
                 return true;
+
+            // expired -> remove
+            BlacklistAreaMobs.Remove(id);
+        }
+        return false;
+    }
+
+    // E4: a no-engage mob is an ignored mob that was determined to be INSIDE a
+    // blacklist rect at blacklist time. Self-defense is suppressed for these (we
+    // retreat rather than chase into the rect) and the finder skips them even while
+    // they damage us. Rides the same TTL as IsIgnored (the prune below is the lift).
+    public bool IsNoEngage(int id)
+    {
+        if (BlacklistAreaMobs.TryGetValue(id, out var e))
+        {
+            if (DateTime.UtcNow < e.until)
+                return e.inRect;
 
             // expired -> remove
             BlacklistAreaMobs.Remove(id);
