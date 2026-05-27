@@ -467,19 +467,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // TTL — no per-tick position read, no facing required. Kept in lockstep with
         // the planner mirror at GoapAgent:1259.
         bool targetNoEngage = playerReader.IsNoEngage(playerReader.TargetGuid);
-        // Fix (run-144): lift the no-engage suppression for self-defense when the bot
-        // is OUTSIDE every static rect — kept in lockstep with GoapAgent:1272. The mob
-        // has come to us outside the rect, so fighting back in place is safe. The
-        // chase concern in the comment above is bounded here: this override holds only
-        // while the mob is actively meleeing us (DamageTaken + TargetTarget==Me), so if
-        // it flees back into the rect and stops hitting us, the gate fails next tick
-        // and the direct-Approach presses stop.
-        bool botOutsideBlacklistArea = !navigation.IsInBlacklistArea();
+        // Position rule (operator-directed; lockstep with GoapAgent): self-defense
+        // allowed when OUTSIDE every static rect, OR inside one but DECLARED STUCK
+        // (escape physically wedged / exhausted) — RESTORATION_LIST_AB2.md §F survival
+        // path. Inside the rect and NOT stuck → suppressed → retreat (escape-first).
+        // dmgTaken + TargetTarget==Me below already gate "actively under attack".
+        bool engageAllowed = !navigation.IsInBlacklistArea()
+                          || navigation.IsApproachEscapePhysicallyStuck
+                          || navigation.IsApproachEscapeExhausted;
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
             && !assistStatusProvider.EvadeRecoveryActive
-            && (!targetNoEngage || botOutsideBlacklistArea))
+            && engageAllowed)
         {
             logger.LogInformation(
                 $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +
@@ -629,11 +629,17 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // partner while Combat runs. When the mob dies, CombatGoal exits
         // naturally, plan returns to FFG, FFG's projection re-engages,
         // and the assist navigates back out of BL.
+        // Position rule (operator-directed; lockstep with GoapAgent Fix L + the
+        // self-defense gate): join the partner's fight only when this bot may itself
+        // engage — outside the rect, or inside but declared stuck (engageAllowed,
+        // defined above). Inside + not stuck → retreat instead of joining. Replaces the
+        // run-144 per-GUID !IsNoEngage gate.
         if (isPartyMode &&
             focusTargetIsIgnored &&
             bits.FocusTarget() &&
             bits.FocusTarget_Combat() &&
             playerReader.FocusTargetGuid != 0 &&
+            engageAllowed &&
             !assistStatusProvider.EvadeRecoveryActive)
         {
             bool thisBotTargetMatchesFocus =

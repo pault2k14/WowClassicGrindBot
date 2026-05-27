@@ -1268,26 +1268,25 @@ public sealed partial class GoapAgent : IDisposable
         // against a mob determined to be inside a blacklist rect at blacklist time.
         // Per-GUID verdict (PlayerReader.IsNoEngage) riding the IsIgnored TTL — NOT a
         // per-tick position read, so it needs no facing and can't flap at the edge.
-        bool targetNoEngage = playerReader.IsNoEngage(playerReader.TargetGuid);
-        // Fix (run-144): a no-engage mob that has LEFT the rect and is attacking us
-        // OUTSIDE it must be fought, not deferred. The no-engage suppression exists
-        // only to avoid being pulled INTO the rect; if WE are geographically outside
-        // every static rect (!botInsideBlacklistArea — our own accurate position,
-        // static-only since run-142), an adjacent attacker is also outside, so
-        // fighting back in place can't pull us in. Run-144 22:21:56-22:22:28:
-        // guid=1475799 left the rect and attacked both bots; both ran the mutual
-        // "partner in combat -> clear target only" defer and deadlocked for 32s until
-        // a manual engage made the partner genuinely fight. Allowing self-defense here
-        // lets both bots' Fix 17 fire and dissolves that standoff. Chase-into-rect
-        // stays guarded: the leader's approach runs through ATG/PTG (E5-gated), and
-        // this override drops the instant the mob stops meleeing us (re-evaluated
-        // each tick via dmgTaken + TargetTarget==Me).
+        // Position rule (operator-directed; supersedes per-GUID IsNoEngage gating):
+        // self-defense is allowed when we are OUTSIDE every static rect, OR inside one
+        // but DECLARED STUCK (escape physically wedged / exhausted) — the survival path
+        // (RESTORATION_LIST_AB2.md §F, never previously implemented). Inside the rect
+        // and NOT stuck → suppressed, so Combat stays blocked and FollowRoute/FFG
+        // retreat (escape-first). The override's own dmgTaken + TargetTarget==Me
+        // conjuncts already supply §F's "actively taking damage" discriminator, so no
+        // separate damage check is needed. The run-144 "mob left the rect and attacked"
+        // case is handled by the OUTSIDE-rect branch (!botInsideBlacklistArea), not the
+        // stuck branch.
+        bool declaredStuck = navigation.IsApproachEscapePhysicallyStuck
+                          || navigation.IsApproachEscapeExhausted;
+        bool engageAllowed = !botInsideBlacklistArea || declaredStuck;
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
-            (!targetNoEngage || !botInsideBlacklistArea);
+            engageAllowed;
         if (selfDefenseOverride)
         {
             targetIgnored = false;
@@ -1358,11 +1357,19 @@ public sealed partial class GoapAgent : IDisposable
         // log message is gated.
         bool isPartyModeForFixL = classConfig.Mode == Mode.PartyLeader
                                 || classConfig.Mode == Mode.AssistFocus;
+        // Position rule (operator-directed; lockstep with the self-defense gate and
+        // CombatGoal): a bot may JOIN the partner's fight only when it is itself
+        // allowed to engage — OUTSIDE every static rect, OR inside one but DECLARED
+        // STUCK (engageAllowed, defined above). Inside the rect and not stuck, this bot
+        // must retreat (FollowRoute/FFG), not join. This replaces the run-144 per-GUID
+        // !IsNoEngage gate: under the position rule the partner only genuinely fights
+        // when outside-or-stuck, and we only join under the same condition.
         if (isPartyModeForFixL &&
             focusTargetIgnored &&
             b.FocusTarget() &&
             b.FocusTarget_Combat() &&
             playerReader.FocusTargetGuid != 0 &&
+            engageAllowed &&
             !evadeRecoveryActive)
         {
             focusTargetIgnored = false;
