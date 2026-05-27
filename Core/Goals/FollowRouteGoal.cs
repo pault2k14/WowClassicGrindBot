@@ -181,6 +181,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // 500ms grace.
     private const double FrgSideThreadOnEnterGraceMs = 500.0;
 
+    // Fix (run-143): when the side-thread search Tab-acquires a NO-ENGAGE mob
+    // (a mob in an operator-defined route blacklist rect) while patrolling past
+    // the rect, briefly disable the finder so the patrol can advance out of the
+    // rect's aggro band instead of re-Tab-ing the same in-rect mobs every tick.
+    // Run-143 21:05:34-21:06:21: two in-rect Battleguards (1472740/1472838) drove
+    // 15 Blacklist-Target<->Follow plan flips in 47s with only 6 waypoints of
+    // progress, because each Tab re-acquisition reset patrol nav. Tunable.
+    private const int FrgNoEngageSearchSuppressMs = 3000;
+
     // Stale logging — avoid spamming every tick
     private bool _assistWasStaleLogged;
 
@@ -1539,6 +1548,30 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     targetFinder.Reset();
                     sideActivityManualReset.Reset();
                     wait.Update();
+                    continue;
+                }
+
+                // Fix (run-143): NO-ENGAGE mob re-acquired while patrolling.
+                // A no-engage mob lives in a route blacklist rect; self-defense
+                // is intentionally suppressed for it (the !IsNoEngage gate in
+                // GoapAgent/CombatGoal), so the self-defense paths below would
+                // pause nav uselessly, and the plain clear path lets the side
+                // thread immediately re-Tab it next tick — the run-143 churn.
+                // Instead: clear and disable the finder for a short window so the
+                // patrol advances past the rect rather than thrashing on the
+                // in-rect mobs. Scoped to IsNoEngage ONLY — regular IsIgnored
+                // mobs (which may warrant self-defense) keep their paths below.
+                if (bits.Target()
+                    && playerReader.IsNoEngage(playerReader.TargetGuid))
+                {
+                    Log("[FRG] No-engage mob re-acquired while patrolling — " +
+                        "clearing and suppressing side-thread search " +
+                        $"{FrgNoEngageSearchSuppressMs}ms so patrol can advance " +
+                        "past the blacklist rect (not engaging; not pausing nav).");
+                    input.PressClearTarget();
+                    wait.Update();
+                    targetFinder.Reset();
+                    SuppressTargetFinderBriefly(FrgNoEngageSearchSuppressMs);
                     continue;
                 }
 
