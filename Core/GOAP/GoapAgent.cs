@@ -1269,12 +1269,25 @@ public sealed partial class GoapAgent : IDisposable
         // Per-GUID verdict (PlayerReader.IsNoEngage) riding the IsIgnored TTL — NOT a
         // per-tick position read, so it needs no facing and can't flap at the edge.
         bool targetNoEngage = playerReader.IsNoEngage(playerReader.TargetGuid);
+        // Fix (run-144): a no-engage mob that has LEFT the rect and is attacking us
+        // OUTSIDE it must be fought, not deferred. The no-engage suppression exists
+        // only to avoid being pulled INTO the rect; if WE are geographically outside
+        // every static rect (!botInsideBlacklistArea — our own accurate position,
+        // static-only since run-142), an adjacent attacker is also outside, so
+        // fighting back in place can't pull us in. Run-144 22:21:56-22:22:28:
+        // guid=1475799 left the rect and attacked both bots; both ran the mutual
+        // "partner in combat -> clear target only" defer and deadlocked for 32s until
+        // a manual engage made the partner genuinely fight. Allowing self-defense here
+        // lets both bots' Fix 17 fire and dissolves that standoff. Chase-into-rect
+        // stays guarded: the leader's approach runs through ATG/PTG (E5-gated), and
+        // this override drops the instant the mob stops meleeing us (re-evaluated
+        // each tick via dmgTaken + TargetTarget==Me).
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
-            !targetNoEngage;
+            (!targetNoEngage || !botInsideBlacklistArea);
         if (selfDefenseOverride)
         {
             targetIgnored = false;

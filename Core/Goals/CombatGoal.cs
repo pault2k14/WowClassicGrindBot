@@ -467,11 +467,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // TTL — no per-tick position read, no facing required. Kept in lockstep with
         // the planner mirror at GoapAgent:1259.
         bool targetNoEngage = playerReader.IsNoEngage(playerReader.TargetGuid);
+        // Fix (run-144): lift the no-engage suppression for self-defense when the bot
+        // is OUTSIDE every static rect — kept in lockstep with GoapAgent:1272. The mob
+        // has come to us outside the rect, so fighting back in place is safe. The
+        // chase concern in the comment above is bounded here: this override holds only
+        // while the mob is actively meleeing us (DamageTaken + TargetTarget==Me), so if
+        // it flees back into the rect and stops hitting us, the gate fails next tick
+        // and the direct-Approach presses stop.
+        bool botOutsideBlacklistArea = !navigation.IsInBlacklistArea();
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
             && !assistStatusProvider.EvadeRecoveryActive
-            && !targetNoEngage)
+            && (!targetNoEngage || botOutsideBlacklistArea))
         {
             logger.LogInformation(
                 $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +
