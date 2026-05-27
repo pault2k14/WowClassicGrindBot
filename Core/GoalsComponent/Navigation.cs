@@ -5580,14 +5580,57 @@ public sealed partial class Navigation : IDisposable
 
         float inflate = DetourMargin * 0.5f;
 
+        // DIAG (in-rect verdict accuracy, 2026-05-26): TargetMapPos is NOT a real read of
+        // the mob — it is dead reckoning = playerWorldPos + facing * midpoint(range bracket)
+        // (see PlayerReader.TargetMapPos). It is only as accurate as the bracket is narrow
+        // and close; for distant/wide brackets the midpoint lands SHORT, dropping the
+        // estimate inside a nearby rect while the real mob is well beyond it. These lines
+        // log the geometry so the magnitude of a false positive is visible. HIT/degenerate
+        // at Information (the verdicts that actually mark a mob), miss at Debug. REMOVE once
+        // the verdict is tuned.
+        int diagMinR = playerReader.MinRange();
+        int diagMaxR = playerReader.MaxRange();
+        Vector3 diagPlayer = Nav2D(playerReader.WorldPos);
+
         // (1) primary: TargetMapPos (valid while facing the mob)
         Vector3 mMap = playerReader.TargetMapPos;
         if (mMap != Vector3.Zero
-            && playerReader.MaxRange() != 0
-            && playerReader.MinRange() <= playerReader.MaxRange())
+            && diagMaxR != 0
+            && diagMinR <= diagMaxR)
         {
             Vector3 mW = WorldMapAreaDB.ToWorld_FlipXY(mMap, playerReader.WorldMapArea);
-            return AreaBlacklist.TryGetContainingRectInflated(Nav2D(mW), inflate, out _);
+            Vector3 estNav = Nav2D(mW);
+            bool hit = AreaBlacklist.TryGetContainingRectInflated(estNav, inflate, out var diagRect);
+            if (hit)
+            {
+                float cx = (diagRect.MinX + diagRect.MaxX) * 0.5f;
+                float cy = (diagRect.MinY + diagRect.MaxY) * 0.5f;
+                float estToCtr = MathF.Sqrt((estNav.X - cx) * (estNav.X - cx) + (estNav.Y - cy) * (estNav.Y - cy));
+                // distPlayerToEst: actual yards from player to the estimated point. Should be
+                // ~= estDist (the bracket midpoint). If it is wildly larger, the world->map->world
+                // round-trip (GetMapPos / ToWorld_FlipXY) is inflating/mirroring the point.
+                float distPE = MathF.Sqrt(
+                    (estNav.X - diagPlayer.X) * (estNav.X - diagPlayer.X) +
+                    (estNav.Y - diagPlayer.Y) * (estNav.Y - diagPlayer.Y));
+                // staticHit: did the STATIC route blacklist contain the point, or only the
+                // dynamic (stuck/propagated) set? hit && !staticHit => a dynamic stuck rect
+                // (possibly stale) is the culprit, not the route blacklist.
+                bool staticHit = _staticAreaBlacklist != null
+                    && _staticAreaBlacklist.TryGetContainingRectInflated(estNav, inflate, out _);
+                logger.LogInformation(
+                    $"[NAV] InRectVerdict P1 HIT bracket=[{diagMinR},{diagMaxR}] estDist={(diagMinR + diagMaxR) / 2f:F1} " +
+                    $"distPlayerToEst={distPE:F1} staticHit={staticHit} " +
+                    $"dir={playerReader.Direction:F2} player={diagPlayer} est={estNav} " +
+                    $"rect=[{diagRect.MinX:F0},{diagRect.MinY:F0} .. {diagRect.MaxX:F0},{diagRect.MaxY:F0}] " +
+                    $"inflate={inflate:F1} estToRectCtr={estToCtr:F1}");
+            }
+            else
+            {
+                logger.LogDebug(
+                    $"[NAV] InRectVerdict P1 miss bracket=[{diagMinR},{diagMaxR}] estDist={(diagMinR + diagMaxR) / 2f:F1} " +
+                    $"dir={playerReader.Direction:F2} player={diagPlayer} est={estNav}");
+            }
+            return hit;
         }
 
         // (2) fallback: facing * target-distance bracket, conservative OR over samples
@@ -5603,13 +5646,23 @@ public sealed partial class Navigation : IDisposable
             {
                 float d = minR + (maxR - minR) * (i * 0.5f);
                 Vector3 estW = new(w.X + cos * d, w.Y + sin * d, 0f);
-                if (AreaBlacklist.TryGetContainingRectInflated(Nav2D(estW), inflate, out _))
+                if (AreaBlacklist.TryGetContainingRectInflated(Nav2D(estW), inflate, out var diagRect2))
+                {
+                    logger.LogInformation(
+                        $"[NAV] InRectVerdict P2 HIT (TargetMapPos=0) bracket=[{minR},{maxR}] sampleDist={d:F1} " +
+                        $"dir={playerReader.Direction:F2} player={diagPlayer} est={Nav2D(estW)} " +
+                        $"rect=[{diagRect2.MinX:F0},{diagRect2.MinY:F0} .. {diagRect2.MaxX:F0},{diagRect2.MaxY:F0}]");
                     return true;
+                }
             }
+            logger.LogDebug(
+                $"[NAV] InRectVerdict P2 miss (TargetMapPos=0) bracket=[{minR},{maxR}] dir={playerReader.Direction:F2} player={diagPlayer}");
             return false;
         }
 
         // (3) degenerate: fail safe toward NOT engaging / NOT pulling
+        logger.LogInformation(
+            $"[NAV] InRectVerdict P3 DEGENERATE->true (maxRange=0, no estimate) player={diagPlayer}");
         return true;
     }
 
