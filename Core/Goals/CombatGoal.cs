@@ -1331,6 +1331,74 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 int evadingGuid = playerReader.TargetGuid;
 
+                // Fix (run-147): self-defense preservation. Without this, the
+                // Fix Q "Clearing target only" path below clears an IsIgnored
+                // mob that is actively attacking us in melee — breaking the
+                // self-defense override → Combat cycle.
+                //
+                // Run-147 evidence (leader 13:49:07 → 13:50:04, ~53s of
+                // oscillation):
+                //   - 13:49:07:793 PTG E5 blacklists guid=1531507 (in-rect=true).
+                //   - 13:49:08:646 library logs "AreaBlacklistMob on attack!"
+                //     (Blacklist.cs:94, IsIgnored precedence check).
+                //   - 13:49:12:513 self-defense override fires correctly,
+                //     Combat plan engages a DIFFERENT mob the leader was
+                //     fighting alongside 1531507.
+                //   - 13:49:22:855 the other mob dies — kill credit.
+                //   - 13:49:22:855 [CombatGoal] Lost target! → Search
+                //     Possible Threats!
+                //   - 13:49:22:921 FindPossibleThreats reaches THIS branch.
+                //     NearestTarget=1531507 (still alive, still hitting in
+                //     melee). Fix Q path at line ~1390 fires (party mode +
+                //     focus_combat) → PressClearTarget → target=0 → Combat
+                //     plan precondition fails → Follow plan.
+                //   - 13:49:23:833 1531507 keeps attacking → SoftInteract
+                //     re-acquires → override re-fires at 13:49:24:388 →
+                //     Combat → but FindPossibleThreats clears again on the
+                //     next lost-target event → loop.
+                // Operator had to manually intervene after 53 s.
+                //
+                // The planner-side override (GoapAgent:1336, run-145 fix) and
+                // CombatGoal's own override (this file:487, run-146 fix) both
+                // fire correctly — but FindPossibleThreats is a THIRD decision
+                // point about IsIgnored targets that wasn't taught about
+                // self-defense.
+                //
+                // Discriminator: same shape as the line-487 override —
+                // TargetTarget=Me/Pet ensures THIS mob (not a random IsIgnored
+                // we Tab'd onto) is the actual attacker, dmgTaken+playerCombat
+                // confirm an active fight, !evadeRecoveryActive excludes the
+                // 25 s window, engageAllowed (with melee override from
+                // run-146) checks position rule reachability. EvadeMobs is
+                // excluded — a game-reported evading mob should still escape.
+                bool sdTargetIsIgnored = !combatLog.EvadeMobs.Contains(evadingGuid)
+                                      && playerReader.IsIgnored(evadingGuid);
+                if (sdTargetIsIgnored)
+                {
+                    int sdMeleeProbe = playerReader.MaxRange();
+                    bool sdTargetInMelee = sdMeleeProbe > 0 && sdMeleeProbe <= 5;
+                    bool sdEngageAllowed =
+                        navigation.IsApproachEscapePhysicallyStuck
+                        || navigation.IsApproachEscapeExhausted
+                        || (!navigation.IsInBlacklistArea()
+                            && (sdTargetInMelee || !navigation.IsTargetLikelyInBlacklistRect()));
+                    if (combatLog.DamageTakenCount() > 0
+                        && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
+                        && !assistStatusProvider.EvadeRecoveryActive
+                        && sdEngageAllowed)
+                    {
+                        logger.LogInformation(
+                            $"[CombatGoal] FindPossibleThreats: NearestTarget guid={evadingGuid} " +
+                            $"is IsIgnored BUT actively attacking us in self-defense scope " +
+                            $"(TargetTarget={playerReader.TargetTarget}, dmgTaken=true, " +
+                            $"insideBlacklistArea={navigation.IsInBlacklistArea()}, " +
+                            $"targetInMelee={sdTargetInMelee}) — preserving target so the " +
+                            $"self-defense override (this file:487) can engage on the next tick. " +
+                            $"Skipping Fix Q clear / EvadeBlacklist re-fire. (Mode={classConfig.Mode})");
+                        return;
+                    }
+                }
+
                 // Fix Q (log-61 16:37:32:478): suppress the evade re-fire when
                 // the partner (focus) is in combat. The standalone Grind-mode
                 // semantics of this block — "I stumbled onto a previously-
