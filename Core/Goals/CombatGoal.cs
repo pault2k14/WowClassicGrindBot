@@ -472,9 +472,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // (escape physically wedged / exhausted) — RESTORATION_LIST_AB2.md §F survival
         // path. Inside the rect and NOT stuck → suppressed → retreat (escape-first).
         // dmgTaken + TargetTarget==Me below already gate "actively under attack".
-        bool engageAllowed = !navigation.IsInBlacklistArea()
-                          || navigation.IsApproachEscapePhysicallyStuck
-                          || navigation.IsApproachEscapeExhausted;
+        // Section D (caster retreat) — engage decision half, lockstep with GoapAgent:
+        // outside the rect, only engage a REACHABLE attacker. A target reading as inside
+        // the rect is an unreachable in-rect caster; engaging bounces us at the edge, so
+        // suppress and let retreat take over. declaredStuck (survival) overrides.
+        bool engageAllowed =
+            navigation.IsApproachEscapePhysicallyStuck
+            || navigation.IsApproachEscapeExhausted
+            || (!navigation.IsInBlacklistArea() && !navigation.IsTargetLikelyInBlacklistRect());
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet

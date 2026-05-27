@@ -1280,7 +1280,18 @@ public sealed partial class GoapAgent : IDisposable
         // stuck branch.
         bool declaredStuck = navigation.IsApproachEscapePhysicallyStuck
                           || navigation.IsApproachEscapeExhausted;
-        bool engageAllowed = !botInsideBlacklistArea || declaredStuck;
+        // Section D (caster retreat) — engage decision half: outside the rect, only
+        // engage an attacker we can actually REACH. A target reading as inside the rect
+        // is an unreachable in-rect caster; engaging it just bounces us at the rect edge
+        // taking damage, so suppress engage and let retreat take over. This is the one
+        // thing our own position can't tell us, so it uses the target-in-rect estimate
+        // (the same signal E5 already uses). An adjacent melee that walked out reads
+        // NOT-in-rect (beside us, outside) → still fought; a mob that genuinely left the
+        // rect (run-144) reads NOT-in-rect → still fought. declaredStuck (survival)
+        // overrides: cornered inside, we fight whatever is on us.
+        bool targetInRect = navigation.IsTargetLikelyInBlacklistRect();
+        bool engageAllowed = declaredStuck
+                          || (!botInsideBlacklistArea && !targetInRect);
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&

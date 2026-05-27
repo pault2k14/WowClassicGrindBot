@@ -266,6 +266,22 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private CantFollowEscapePhase _escapePhase = CantFollowEscapePhase.NotStarted;
     private DateTime _escapePhaseStartUtc;
     private Vector3 _escapePhaseStartPos;
+
+    // ── Section D (caster retreat) ── retreat half. When the assist is OUTSIDE a
+    // rect but in combat while FFG is running (FFG only runs when Combat is NOT
+    // selected, i.e. no fightable target), it is being attacked by something it
+    // will not fight: an unreachable in-rect caster. Instead of reuniting toward
+    // the leader (which can walk it back into the caster's range), it extends away
+    // from the rect to break range. Self-bounded by CasterRetreatCapYards; releases
+    // automatically when combat ends (leashed / out of range) or a reachable target
+    // appears (Combat is then selected and FFG stops running). All tunable.
+    private bool _casterRetreatActive;
+    private Vector3 _casterRetreatStartPos;
+    private Vector3 _casterRetreatLastWaypoint;
+    private const float CasterRangeBufferYards = 35f;   // search radius for a nearby rect (≈ caster range)
+    private const float CasterRetreatCapYards  = 45f;   // max TOTAL extension before we hold
+    private const float CasterRetreatStepYards = 15f;   // how far ahead each re-path projects
+    private const float CasterRetreatRepathYards = 5f;  // re-issue the waypoint only if it drifts this far
     private Vector3 _escapeTargetW;
     private bool _escapeUnstuckUsed;
     // 1b: DirectedFallback sweep step (1->10y/0deg, 2->20y/+120deg, 3->30y/-120deg, >3->Exhausted/hold).
@@ -2205,6 +2221,14 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
+        // ── Section D (caster retreat) ── retreat half. Fires only in normal
+        // follow (never during a CantFollow escape — that path has its own
+        // away-from-rect logic and must not be preempted). Overrides the normal
+        // follow/reunite navigation with an extend-away when we're being cast on
+        // by an unreachable in-rect caster. See TryCasterRetreat.
+        if (TryCasterRetreat())
+            return;
+
         // ── State machine ──────────────────────────────────────────────────
         switch (_navState)
         {
@@ -3202,6 +3226,94 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         navigation.Update(CancellationToken.None);
 
         wait.Update();
+    }
+
+    /// <summary>
+    /// Section D (caster retreat) — retreat half. Returns true if it handled this
+    /// tick's navigation (and Update should return), false to fall through to the
+    /// normal follow state machine.
+    ///
+    /// Fires only when ALL hold:
+    ///   • not in a CantFollow escape (that path owns its own away-from-rect logic);
+    ///   • we are OUTSIDE every static rect (inside = the §F stuck/escape case);
+    ///   • we are in combat (bits.Combat) — and because FFG only runs when Combat is
+    ///     NOT selected (no fightable target), being in combat here means the attacker
+    ///     is something we won't/can't fight: an unreachable in-rect caster;
+    ///   • a rect sits within caster range (CasterRangeBufferYards) of us.
+    /// Then it extends AWAY from that rect's center instead of reuniting, capped at
+    /// CasterRetreatCapYards total displacement (on cap, hold and let the leash / the
+    /// CantFollow 120s / a damage-stop resolve it). It releases automatically the tick
+    /// combat ends or no rect is in range — control returns to the normal follow logic.
+    /// </summary>
+    private bool TryCasterRetreat()
+    {
+        if (_navState == NavState.CantFollow) return false;
+        if (_escapePhase != CantFollowEscapePhase.NotStarted) return false;
+        if (navigation.IsInBlacklistArea()) { DeactivateCasterRetreat(); return false; }
+        if (!bits.Combat())                 { DeactivateCasterRetreat(); return false; }
+
+        Vector3 pos = playerReader.WorldPos;
+        if (navigation.AreaBlacklist == null
+            || !navigation.AreaBlacklist.TryGetContainingRectInflated(
+                   pos, CasterRangeBufferYards, out var rect))
+        {
+            DeactivateCasterRetreat();
+            return false;
+        }
+
+        if (!_casterRetreatActive)
+        {
+            _casterRetreatActive = true;
+            _casterRetreatStartPos = pos;
+            _casterRetreatLastWaypoint = default;
+            logger.LogInformation(
+                "[FFG] [FIX-FIRE] Section D caster-retreat: outside a rect, in combat, and " +
+                "FFG is running (no fightable target) — being attacked by an unreachable " +
+                "in-rect caster. Extending away from the rect instead of reuniting, to break " +
+                $"its range (cap {CasterRetreatCapYards:0}y). Releases when combat ends.");
+        }
+
+        // Cap total extension so we never run indefinitely.
+        float extended = pos.WorldDistanceXYTo(_casterRetreatStartPos);
+        if (extended >= CasterRetreatCapYards)
+        {
+            navigation.Stop();
+            wait.Update();
+            return true;
+        }
+
+        // Project away from the rect center from the current position, stepping ahead
+        // by CasterRetreatStepYards (clamped to the remaining cap).
+        float cx = (rect.MinX + rect.MaxX) * 0.5f;
+        float cy = (rect.MinY + rect.MaxY) * 0.5f;
+        float dx = pos.X - cx;
+        float dy = pos.Y - cy;
+        float mag = MathF.Sqrt(dx * dx + dy * dy);
+        if (mag < 0.001f) { dx = 1f; dy = 0f; mag = 1f; }
+        float inv = 1f / mag;
+        float step = MathF.Min(CasterRetreatStepYards, CasterRetreatCapYards - extended);
+        Vector3 away = new Vector3(pos.X + dx * inv * step, pos.Y + dy * inv * step, pos.Z);
+
+        // Re-issue the waypoint only when it drifts meaningfully, so we don't spam
+        // SetSingleWaypoint every tick (which can trip the navigation loop guard).
+        if (_casterRetreatLastWaypoint == default
+            || away.WorldDistanceXYTo(_casterRetreatLastWaypoint) > CasterRetreatRepathYards)
+        {
+            navigation.SetSingleWaypoint(away);
+            _casterRetreatLastWaypoint = away;
+        }
+        wait.Update();
+        return true;
+    }
+
+    private void DeactivateCasterRetreat()
+    {
+        if (!_casterRetreatActive) return;
+        _casterRetreatActive = false;
+        _casterRetreatLastWaypoint = default;
+        logger.LogInformation(
+            "[FFG] Section D caster-retreat released (combat ended or no rect in range) — " +
+            "resuming normal follow.");
     }
 
     private void DriveCantFollowEscape()
