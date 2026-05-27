@@ -5544,12 +5544,19 @@ public sealed partial class Navigation : IDisposable
         // dropped for 1235797). 133ac/ad/ae succeeded only because their rect
         // happened not to catch the bot inside it.
         //
-        // Same exemption, same field as DU/DV: while _approachEscapeActive, test
-        // the STATIC map blacklist only. GENUINE impassable areas (static map)
-        // still register true (so a real blacklist still blocks ATG and triggers
-        // a legitimate bail); only the escape's own dynamic StuckRects are
-        // exempted, and they resume gating the instant the escape ends.
-        IAreaBlacklist? bl = _approachEscapeActive ? _staticAreaBlacklist : AreaBlacklist;
+        // Fix (run-142, 20:19:00:101): test the STATIC map blacklist ALWAYS, not
+        // just while _approachEscapeActive. The escape-only exemption assumed the
+        // dynamic StuckRect would be cleared the moment the escape ended ("resume
+        // gating the instant the escape ends"), but ClearStuckRects runs ~108ms
+        // AFTER _approachEscapeActive flips false. In that window this method
+        // reverted to the composite, saw the escape's own 4x4 stuck rect at the
+        // bot's feet, and Fix M (CombatGoal) blacklisted a perfectly fightable mob
+        // (guid=1469963, staticHit=False) — causing ~40s of acquire/clear churn.
+        // A StuckRect is a navigation-avoidance construct, NOT a "don't-fight /
+        // don't-go" route blacklist; it must never drive this semantic check.
+        // Stuck-rect avoidance stays the pather's job (path validation at ~3887/
+        // ~3963 keeps its composite-when-not-escaping behavior, unchanged).
+        IAreaBlacklist? bl = _staticAreaBlacklist;
         bool inside = bl?.ContainsWorld(Nav2D(playerReader.WorldPos)) == true;
         return inside;
     }
@@ -5575,7 +5582,14 @@ public sealed partial class Navigation : IDisposable
     // escape/reunite logic trusts) so a mob hugging the inside edge reads "in rect".
     public bool IsTargetLikelyInBlacklistRect()
     {
-        if (AreaBlacklist == null)
+        // Fix (run-142): the no-engage verdict tests the STATIC route blacklist
+        // ONLY. A mob is "no-engage" because it sits in an operator-defined route
+        // blacklist — never because of a transient dynamic StuckRect the unstuck
+        // system may have just dropped at our feet. Using the composite here marked
+        // guid=1469963 no-engage off a 4x4 stuck rect (run-142 20:19:00:101,
+        // staticHit=False) and triggered ~40s of target-switching churn.
+        IAreaBlacklist? bl = _staticAreaBlacklist;
+        if (bl == null)
             return false;
 
         float inflate = DetourMargin * 0.5f;
@@ -5600,7 +5614,7 @@ public sealed partial class Navigation : IDisposable
         {
             Vector3 mW = WorldMapAreaDB.ToWorld_FlipXY(mMap, playerReader.WorldMapArea);
             Vector3 estNav = Nav2D(mW);
-            bool hit = AreaBlacklist.TryGetContainingRectInflated(estNav, inflate, out var diagRect);
+            bool hit = bl.TryGetContainingRectInflated(estNav, inflate, out var diagRect);
             if (hit)
             {
                 float cx = (diagRect.MinX + diagRect.MaxX) * 0.5f;
@@ -5646,7 +5660,7 @@ public sealed partial class Navigation : IDisposable
             {
                 float d = minR + (maxR - minR) * (i * 0.5f);
                 Vector3 estW = new(w.X + cos * d, w.Y + sin * d, 0f);
-                if (AreaBlacklist.TryGetContainingRectInflated(Nav2D(estW), inflate, out var diagRect2))
+                if (bl.TryGetContainingRectInflated(Nav2D(estW), inflate, out var diagRect2))
                 {
                     logger.LogInformation(
                         $"[NAV] InRectVerdict P2 HIT (TargetMapPos=0) bracket=[{minR},{maxR}] sampleDist={d:F1} " +
