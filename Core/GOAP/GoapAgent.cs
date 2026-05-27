@@ -559,6 +559,42 @@ public sealed partial class GoapAgent : IDisposable
                             playerReader.IgnoreTarget(guid, inRect);
                             HandleGoapEvent(new EvadeBlacklistEvent(guid, EvadeReason.Propagation, inRect));
                             assistStatusProvider.CantFollow = true;
+
+                            // Fix (run-145 11:27:26:147 NO PLAN on assist): the
+                            // comment above at lines 536-538 claims that setting
+                            // CantFollow=true alone "keeps FFG selectable after
+                            // CombatGoal exits." That is only true when
+                            // consumecorpse=false. If a kill just happened and
+                            // the corpse-handling chain (ConsumeCorpse → Loot →
+                            // Skinning → Corpse Consumed) did NOT complete
+                            // cleanly — e.g., LootGoal failed to open the loot
+                            // window (run-145: "Loot Failed open: -3016ms" at
+                            // 11:27:24:327) — then State.ShouldConsumeCorpse is
+                            // still true when the blacklist propagation arrives.
+                            // FFG is blocked by AddPrecondition(consumecorpse,
+                            // false) at FollowFocusGoal.cs:1302; ConsumeCorpseGoal
+                            // (library, not in our source) is gated on
+                            // !assistrequestreturn in the same scenarios per the
+                            // observed "OnGoapEvent - AssistRequestReturn" log
+                            // line on the leader. With both blocked the planner
+                            // returns NO PLAN, the assist freezes, the leader
+                            // sync-pauses for it (run-145 11:27:45:051), and
+                            // both bots deadlock.
+                            //
+                            // The leader-side analog at line 426 (the
+                            // assistStateStore diff loop, when the LEADER sees
+                            // an assist transition to CantFollow via API) calls
+                            // AssistRequestReturn() — which clears exactly the
+                            // stale corpse-handling state that traps us here
+                            // (State.LastCombatKillCount, State.ShouldConsumeCorpse,
+                            // LootableCorpseCount, GatherableCorpseCount,
+                            // ConsumableCorpseCount; method body at line 2051).
+                            // The assist-side path was missing the matching
+                            // cleanup. Calling it here restores symmetry:
+                            // consumecorpse flips to false on the next tick,
+                            // FFG becomes selectable, the assist returns to
+                            // the leader instead of standing around.
+                            AssistRequestReturn();
                         }
                     }
                 }
