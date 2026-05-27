@@ -476,10 +476,19 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // outside the rect, only engage a REACHABLE attacker. A target reading as inside
         // the rect is an unreachable in-rect caster; engaging bounces us at the edge, so
         // suppress and let retreat take over. declaredStuck (survival) overrides.
+        //
+        // Run-146 caveat (matches GoapAgent caveat verbatim): IsTargetLikelyInBlacklistRect
+        // inflates the rect by 6y, which catches mobs hugging the OUTSIDE edge — exactly
+        // the "mob walked out to melee us" case. Override: a target in melee range
+        // (MaxRange in [1,5]) is reachable without entering the rect, so the rect
+        // verdict doesn't apply. At range (>5y) the rect verdict still applies.
+        int combatMeleeProbe = playerReader.MaxRange();
+        bool combatTargetInMelee = combatMeleeProbe > 0 && combatMeleeProbe <= 5;
         bool engageAllowed =
             navigation.IsApproachEscapePhysicallyStuck
             || navigation.IsApproachEscapeExhausted
-            || (!navigation.IsInBlacklistArea() && !navigation.IsTargetLikelyInBlacklistRect());
+            || (!navigation.IsInBlacklistArea()
+                && (combatTargetInMelee || !navigation.IsTargetLikelyInBlacklistRect()));
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet

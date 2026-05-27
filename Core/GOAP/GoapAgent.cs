@@ -1318,14 +1318,30 @@ public sealed partial class GoapAgent : IDisposable
                           || navigation.IsApproachEscapeExhausted;
         // Section D (caster retreat) — engage decision half: outside the rect, only
         // engage an attacker we can actually REACH. A target reading as inside the rect
-        // is an unreachable in-rect caster; engaging it just bounces us at the rect edge
-        // taking damage, so suppress engage and let retreat take over. This is the one
-        // thing our own position can't tell us, so it uses the target-in-rect estimate
-        // (the same signal E5 already uses). An adjacent melee that walked out reads
-        // NOT-in-rect (beside us, outside) → still fought; a mob that genuinely left the
-        // rect (run-144) reads NOT-in-rect → still fought. declaredStuck (survival)
-        // overrides: cornered inside, we fight whatever is on us.
-        bool targetInRect = navigation.IsTargetLikelyInBlacklistRect();
+        // is an unreachable in-rect caster; engaging it bounces us at the rect edge
+        // taking damage, so suppress engage and let retreat take over.
+        //
+        // CAVEAT (run-146 2026-05-27): IsTargetLikelyInBlacklistRect() inflates the rect
+        // by ~6y (DetourMargin/2) so mobs hugging the INSIDE edge read in-rect — correct
+        // for the E5/PTG approach gate (over-conservative is safer there). But the same
+        // inflation also catches mobs hugging the OUTSIDE edge by ≤6y — which is exactly
+        // the "mob walked OUT to melee us" case the position rule was supposed to enable
+        // self-defense for. Earlier comment here ("adjacent melee that walked out reads
+        // NOT-in-rect → still fought") was wrong. Run-146 13:16:45 assist evidence:
+        // bracket=[0,5] target 2.5y away, est=<476.74,-4264.75>, real rect MaxX=473 so
+        // est is 3.74y OUTSIDE the rect — but staticHit=True with inflate=6.0 because
+        // inflated MaxX=479. Result: engageAllowed=false, self-defense override never
+        // fired ("IsIgnored self-defense override" grep returned 0 hits across the run),
+        // assist froze for 27s at <477.0359,-4266.729> with the mob in melee hitting it.
+        //
+        // Discriminator: a target in MELEE range (MaxRange in [1,5], the addon's short-
+        // range bracket — matches the bracket=[0,5] in the run-146 log) is by definition
+        // reachable without entering the rect. At range (>5y) the rect verdict still
+        // applies — the original caster-retreat scenario Section D was built for.
+        // declaredStuck (survival) still overrides everything.
+        int meleeProbeMaxRange = playerReader.MaxRange();
+        bool targetInMelee = meleeProbeMaxRange > 0 && meleeProbeMaxRange <= 5;
+        bool targetInRect = !targetInMelee && navigation.IsTargetLikelyInBlacklistRect();
         bool engageAllowed = declaredStuck
                           || (!botInsideBlacklistArea && !targetInRect);
         bool selfDefenseOverride =
