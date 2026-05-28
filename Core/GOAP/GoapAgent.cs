@@ -381,6 +381,48 @@ public sealed partial class GoapAgent : IDisposable
 
         while (!cts.IsCancellationRequested)
         {
+            // Fix EW (run-149 11:53:07:529 leader evidence):
+            // Wrap the loop body in try/catch. GoapThread runs on a raw
+            // Thread (line ~338 `goapThread = new(GoapThread); goapThread.Start();`)
+            // with NO ambient exception handler — an unhandled exception inside
+            // the loop body silently terminates the thread, leaving the bot
+            // in a frozen state with Active still=true (no setter called),
+            // manualReset still=set, AddonReader thread still ticking, but
+            // UpdateWorldState / NextGoal / goal.Update() no longer firing.
+            //
+            // Run-149 evidence:
+            //   11:53:07:374  last NAV-SANITY (Navigation.Update tick)
+            //   11:53:07:529  last P3 DEGENERATE (UpdateWorldState's
+            //                  IsTargetLikelyInBlacklistRect call, fires
+            //                  every GoapThread iteration when target absent)
+            //   11:53:07→18:534  ~11s of GoapThread silence within valid
+            //                  log window. The only main-process logs are
+            //                  PathFinderThread iterations (separate thread,
+            //                  10s/iter due to PPatherService NRE on a
+            //                  different mob path; these NREs are caught at
+            //                  Navigation.cs:5483 and do NOT propagate).
+            // No `[GoapAgent] LogError` of an exception exists because the
+            // raw Thread swallows the crash with no diagnostics. Without
+            // visibility we cannot identify the throwing call site.
+            //
+            // The fix is intentionally minimal: catch Exception, log via
+            // ILogger so the next occurrence leaves a stack trace in the
+            // operator's log, then fall through to the existing
+            // Thread.Sleep(1) + manualReset.Wait() at the loop foot so the
+            // thread continues iterating. This is BOTH diagnostic (next
+            // crash leaves evidence) AND recovery (one bad tick does not
+            // brick the bot). Per-iteration state lives in goal fields and
+            // in WorldState which UpdateWorldState rewrites every tick;
+            // dropping one tick is safe by construction.
+            //
+            // The catch is OUTSIDE Thread.Sleep + manualReset.Wait so those
+            // tail operations always run — preserving the existing thread-
+            // coordination invariant with the Active setter (Active=false
+            // → manualReset.Reset → next Wait blocks). cts.IsCancellationRequested
+            // is checked at the next while condition, so Dispose() still
+            // terminates the thread normally.
+            try
+            {
             // ── Leader side: read assist state from API store ──────────────
             if (classConfig.Mode == Mode.PartyLeader)
             {
@@ -916,6 +958,32 @@ public sealed partial class GoapAgent : IDisposable
                 LogNewEmptyGoal(logger);
                 LogCompleteGoapState();
                 wasEmpty = true;
+            }
+            }
+            catch (Exception goapThreadEx)
+            {
+                // Fix EW (run-149) — see the wrap-open comment at the top
+                // of this while loop for the full evidence trail and design
+                // rationale. Log AT ERROR (visible at default Information
+                // threshold) with the full exception (stack trace included
+                // by ILogger.LogError) so the next silent-death repro leaves
+                // diagnostics. DO NOT re-throw; falling through keeps the
+                // thread alive for the next iteration. We deliberately do
+                // not attempt per-iteration state cleanup (e.g. forcing
+                // CurrentGoal.OnExit) because we cannot tell from a generic
+                // catch where the exception originated — UpdateWorldState,
+                // NextGoal, OnEnter, OnExit, or Update — and running OnExit
+                // on a goal whose OnEnter never completed could itself
+                // throw. The next iteration's NextGoal re-reads WorldState
+                // from scratch and re-selects a goal; if the same exception
+                // recurs every tick, the operator will see a flood of
+                // error logs with stack traces that pinpoint the bug.
+                logger.LogError(goapThreadEx,
+                    "[GoapAgent] [FIX-FIRE] EW: GoapThread loop iteration " +
+                    "exception caught — thread CONTINUES (raw-Thread silent " +
+                    "death prevented). Mode={Mode} CurrentGoal={Goal}.",
+                    classConfig.Mode,
+                    CurrentGoal?.Name ?? "(null)");
             }
 
             Thread.Sleep(1);

@@ -1498,6 +1498,106 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         logger.LogWarning($"Waiting for target to exist or lose combat. Possible threats {combatLog.DamageTakenCount()}!");
         wait.Till(CastingHandler.GCD * 2, () => bits.Target_Alive() || !bits.Combat());
+
+        // Fix EV (run-149 11:51:59-11:52:09 leader+assist evidence):
+        // PressNearestTarget at line ~1323 is async — the Tab keypress takes
+        // time to propagate through the OS + WoW client + addon before
+        // bits.Target() reflects the new GUID. The single wait.Update() at
+        // line ~1324 is a Thread.Sleep(1)-class tick that is frequently
+        // insufficient: the validation if at ~1327 reads bits.Target()==false,
+        // the if-block (and its three explicit clear paths) is SKIPPED, and
+        // the function falls through to this wait.Till. During the Till the
+        // Tab DOES propagate, bits.Target() flips to the Tab'd GUID, and
+        // either bits.Target_Alive() or !bits.Combat() satisfies the Till
+        // predicate — wait.Till returns with a NEW hostile target SET that
+        // CombatGoal never engaged.
+        //
+        // Run-149 evidence:
+        //   11:51:59:632  "Search Possible Threats!" (line ~1248)
+        //   11:51:59:632  "Checking target in front..." (line ~1322)
+        //                  → input.PressNearestTarget() → Tab pressed
+        //                    11:51:59:678 (32ms keypress)
+        //   11:51:59:678  "Waiting for target to exist or lose combat.
+        //                   Possible threats 2!" (this log)
+        //                  → "Dont pull non-hostile target!" (line ~1494)
+        //                    NEVER FIRES across the entire run (grep
+        //                    confirmed) → proves the if at ~1327 was FALSE
+        //                    (bits.Target() not yet reflecting Tab) and the
+        //                    entire validation block was skipped.
+        //   11:52:00:107  Left Combat after 5.00sec — !bits.Combat() became
+        //                  true, Till predicate satisfied, Till returned.
+        //   <Tab took effect during Till> leader's WoW client target =
+        //                  guid 1607352 (a nearby hostile mob, not the
+        //                  Combat target 1610440).
+        // CombatGoal.OnExit (~line 279) does NOT clear target. Loot's
+        // "Keyboard last target 1610440!" at 11:52:00:378 logs the intent
+        // but no G keypress is actually in the input log between 11:51:59:678
+        // and 11:52:03:286 (first G is Skinning's at 11:52:03:286). The
+        // leaked target stayed set for ~3.6s — long enough for the assist's
+        // FFG focus-chain (PressTargetFocus + PressTargetOfTarget, AH+AJ+AN)
+        // at 11:52:02:306 to read leader's WoW target = 1607352 and latch
+        // it. Assist committed to ATG/Combat on 1607352 (entered combat at
+        // 11:52:08:572 — BEFORE the leader's own next Combat at 11:52:12:368
+        // on a DIFFERENT mob 1610565). The operator observed this as "the
+        // assist pulled a mob that the leader had targeted for a moment".
+        //
+        // GATE RATIONALE (each conjunct earns its place):
+        //
+        //   !bits.Combat()
+        //     The bot is not currently being attacked. This single check
+        //     already excludes BOTH self-defense pathways: the run-147
+        //     preservation at line ~1385 requires DamageTakenCount > 0
+        //     (which implies bits.Combat()=true), and the line-~492 self-
+        //     defense override requires bits.Combat()=true explicitly.
+        //     Neither override can fire while !bits.Combat() holds, so
+        //     clearing here cannot disturb either preservation pathway —
+        //     making the previous EvadeMobs/IsIgnored gates redundant.
+        //     (Earlier draft of this fix included those gates; they
+        //     filtered nothing the !bits.Combat() gate didn't already
+        //     filter and were dropped per operator review.)
+        //
+        //   bits.Target()
+        //     Without a target there is nothing to clear; ClearTarget on
+        //     an already-empty slot is wasted input.
+        //
+        //   !bits.Target_Dead()
+        //     Scopes EV strictly to the alive-leak case. Tab via
+        //     PressNearestTarget cycles only ALIVE hostiles, so the leak
+        //     is always alive. A dead target here is from prior Combat
+        //     (a corpse), not the leak — leave it for Loot/Skinning.
+        //
+        //   !bits.Target_Combat()
+        //     If the target is currently in combat with ANYONE (assist,
+        //     other party member, NPC), leave it for the GOAP planner to
+        //     evaluate next tick. The leader is NOT being attacked (the
+        //     !bits.Combat() gate above), but the target is in an active
+        //     fight — focus-chain Combat or PartyInCombat-gated ATG may
+        //     legitimately pick it up. Clearing here would cost a tick of
+        //     re-acquisition (focus-chain would have to re-read it on the
+        //     following tick). Scopes EV strictly to the IDLE-leak case
+        //     (Tab'd a hostile that's just standing there, attacking
+        //     nobody) — exactly the run-149 1607352 scenario at 11:51:59
+        //     where 1607352 was not yet in combat with anyone.
+        if (!bits.Combat()
+            && bits.Target()
+            && !bits.Target_Dead()
+            && !bits.Target_Combat())
+        {
+            logger.LogInformation(
+                $"[CombatGoal] [FIX-FIRE] EV: FindPossibleThreats exit — " +
+                $"line-1327 validation was SKIPPED (bits.Target() was false " +
+                $"when checked, async Tab from line-1323 not yet propagated), " +
+                $"then wait.Till returned with target (guid={playerReader.TargetGuid}) " +
+                $"set by late Tab propagation. Bot is not in combat " +
+                $"(bits.Combat()=false), target is alive (Target_Dead=false), " +
+                $"target is not in combat with anyone (Target_Combat=false) — " +
+                $"this is a leaked idle-Tab target. Clearing so it does not " +
+                $"leak to subsequent plans (Loot/Skinning/Follow do not clear " +
+                $"it) or to the assist focus-chain (PressTargetFocus + " +
+                $"PressTargetOfTarget) which would latch it and pull.");
+            input.PressClearTarget();
+            wait.Update();
+        }
     }
 
     public bool CheckTargetsTargetingMe()
