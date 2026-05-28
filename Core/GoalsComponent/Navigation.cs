@@ -347,6 +347,23 @@ public sealed partial class Navigation : IDisposable
     // distinction without changing _stuckWorldRects' element type.
     private readonly List<DateTime> _stuckRectExpiryUtc = new();
 
+    // ── Fix ET (run-148: cap local rect lifetime) ──
+    //
+    // Parallel to _stuckWorldRects (same index = same rect): the UTC time the
+    // rect was first appended. Used by PruneExpiredStuckRects to enforce an
+    // absolute age cap on LOCAL rects (expiry == DateTime.MaxValue), which
+    // otherwise never expire and are only cleared by ClearStuckRects — a call
+    // that fires solely on bail/evade/geometry-trap paths, never on a normal
+    // kill. Run-148 evidence: the leader added a local rect at
+    // <-555.7984,-4844.085> at 01:18:01 and never cleared it (stuck-rect total
+    // climbed 1→5 over 19 min with zero clears), so it kept broadcasting and
+    // ultimately walled the assist off from the leader. Capping the local
+    // rect's own lifetime stops the leader's list (and therefore its
+    // pathfinder) from accumulating permanent barriers across a long session.
+    // Propagated rects keep their existing TTL semantics (the expiry field);
+    // the age cap applies only to the MaxValue entries.
+    private readonly List<DateTime> _stuckRectCreatedUtc = new();
+
     // How long a propagated stuck rect lives before PruneExpiredStuckRects
     // removes it. Sized for "both bots approaching the same mob from the
     // same direction" — the scenario where Route A propagation pays off:
@@ -376,6 +393,22 @@ public sealed partial class Navigation : IDisposable
     // assist's effective lifetime tracks the leader's actual rect
     // lifetime plus a 90 s cool-down tail.
     private const double PropagatedStuckRectTtlSec = 90.0;
+
+    // ── Fix ET (run-148) ── Absolute age cap for LOCAL stuck rects.
+    //
+    // A locally-discovered rect (TryUnstuck path) carries DateTime.MaxValue
+    // expiry and is meant to be cleared by ClearStuckRects on a plan
+    // transition. In practice ClearStuckRects fires only on failure paths, so
+    // local rects can live for the entire session and accumulate into
+    // permanent barriers (run-148: an 01:18:01 rect still blocking at
+    // 01:35:44). This cap bounds a local rect to one navigation episode's
+    // worth of relevance: long enough to help the bot escape and route past
+    // the bad spot during the episode that created it, short enough that a
+    // stale spot the bot left behind cannot strand it (or its propagated
+    // peers) on a later pass. If terrain is genuinely still bad after the cap,
+    // the bot re-sticks there and re-adds the rect. 180 s ≈ a generous upper
+    // bound on a single approach+combat+loot+rejoin cycle.
+    private const double MaxLocalStuckRectAgeSec = 180.0;
 
     // Half-size in world yards of the dynamically-added stuck rect.
     // Bottom edge is 1y ahead of the player, top edge is 5y ahead (4y deep).
@@ -702,6 +735,33 @@ public sealed partial class Navigation : IDisposable
     // Backoff to prevent request spam on repeated blacklist rejections
     private DateTime blacklistRejectCooldownUntilUtc = DateTime.MinValue;
     private DateTime noPathCooldownUntilUtc = DateTime.MinValue;
+
+    // ── Fix EU (run-148: blacklist-trap self-escape) ──
+    //
+    // When every path the pather returns is rejected for crossing a DYNAMIC
+    // stuck rect, PathCalculatedCallback sets blacklistRejectCooldown and the
+    // bot makes no progress. If this persists — and the bot is NOT inside a
+    // real STATIC no-go area, so the only thing trapping it is a dynamic rect
+    // (stale or simply walling the bot off from a target on the far side) —
+    // standing still forever is the worst outcome. Run-148: the assist was
+    // trapped behind a stale propagated rect between it and the leader; every
+    // assist→leader path crossed it, every inserted detour also crossed it,
+    // and both bots stood still for the rest of the session.
+    //
+    // Fixes ER/ES/ET stop stale rects from persisting in the first place; this
+    // is the runtime safety net for any remaining "walled off by a dynamic
+    // rect" situation. After BlacklistTrapEscapeSec of continuous rejection
+    // with no accepted path, the bot temporarily validates paths against the
+    // STATIC blacklist ONLY (the same exemption _approachEscapeActive already
+    // grants), letting the pather route THROUGH the dynamic rect to reach the
+    // target. Static map hazards are never bypassed. Time-boxed and self-
+    // resetting: any accepted path clears the trap timer.
+    private DateTime _blacklistTrapStartUtc = DateTime.MinValue;
+    private DateTime _stuckRectBypassUntilUtc = DateTime.MinValue;
+    private const double BlacklistTrapEscapeSec = 8.0;
+    private const double StuckRectBypassWindowSec = 3.0;
+    private bool StuckRectBypassActive => DateTime.UtcNow < _stuckRectBypassUntilUtc;
+
     private Vector3 lastRejectStartW;
     private Vector3 lastRejectEndW;
     private int sameRejectCount;
@@ -1383,9 +1443,6 @@ public sealed partial class Navigation : IDisposable
             logger.LogInformation($"[NAV-SANITY] Update entered navHash={GetHashCode()} tokenCancelled={token.IsCancellationRequested}");
         }
 
-        if (!active)
-            return;
-
         // Fix AV (Route A): prune propagated stuck rects whose TTL has
         // elapsed. Locally-discovered rects (TryUnstuck path) have
         // DateTime.MaxValue expiry and are never pruned here — they are
@@ -1393,7 +1450,26 @@ public sealed partial class Navigation : IDisposable
         // rect count (typically 0–3); placed at the top of Update so the
         // _areaBlacklist seen by all downstream logic this tick reflects
         // the most up-to-date rect set.
+        //
+        // ── Fix ER (run-148 deadlock) ──
+        // This call MUST run before the `if (!active) return;` guard below.
+        // Originally it sat AFTER the guard, so on any tick where the nav was
+        // inactive (paused-for-assist, idle, in combat, looting) the prune was
+        // skipped entirely. Evidence (run-148 assist log): a propagated rect
+        // received at 01:17:40 (90s TTL, expiry 01:19:10) was still blocking
+        // the assist's path to the leader at 01:35:44 — 16+ minutes past its
+        // TTL — and "PruneExpiredStuckRects: removed" appeared 0 times in the
+        // entire run. The assist could not reach the leader (every path
+        // crossed the stale rect → blacklistRejectCooldown), the leader paused
+        // for the too-far assist, and both stood still indefinitely. Pruning
+        // unconditionally each tick lets an expired propagated rect drain even
+        // while the bot is parked, which is exactly when a stale barrier must
+        // not persist. Pruning when inactive is safe: it only mutates the
+        // dynamic-rect list + _areaBlacklist; it issues no movement.
         PruneExpiredStuckRects();
+
+        if (!active)
+            return;
 
         NavDbg($"STATE enter active={active} " +
                $"wp={wayPoints.Count} route={routeToNextWaypoint.Count} " +
@@ -2636,6 +2712,7 @@ public sealed partial class Navigation : IDisposable
 
         _stuckWorldRects.Add(rect);
         _stuckRectExpiryUtc.Add(expiryUtc);
+        _stuckRectCreatedUtc.Add(DateTime.UtcNow); // Fix ET: stamp add time for the local age cap
         _areaBlacklist = new CompositeAreaBlacklist(_staticAreaBlacklist, new RectBlacklist(_stuckWorldRects));
         return true;
     }
@@ -4517,6 +4594,55 @@ public sealed partial class Navigation : IDisposable
         noPathCooldownUntilUtc = DateTime.UtcNow.AddMilliseconds(500);
     }
 
+    // ── Fix EU (run-148) ── Track sustained blacklist rejection and, once the
+    // bot has been unable to get an accepted path for BlacklistTrapEscapeSec
+    // purely because of DYNAMIC stuck rects (it is not standing in a static
+    // no-go area), open a short static-only bypass window so the next path can
+    // route through the dynamic rect to the target. Called at every point that
+    // sets blacklistRejectCooldown. The trap timer is reset by
+    // ResetBlacklistTrap() whenever a path is accepted.
+    private void RegisterBlacklistRejectMaybeBypass()
+    {
+        DateTime now = DateTime.UtcNow;
+
+        if (_blacklistTrapStartUtc == DateTime.MinValue)
+        {
+            _blacklistTrapStartUtc = now; // first reject of a new trap window
+            return;
+        }
+
+        if (StuckRectBypassActive)
+            return; // already bypassing — let the window play out
+
+        if ((now - _blacklistTrapStartUtc).TotalSeconds < BlacklistTrapEscapeSec)
+            return; // not trapped long enough yet
+
+        // Only a dynamic rect can be bypassed. If there are none, or the bot is
+        // sitting inside a STATIC no-go area, the bypass cannot help (and must
+        // not weaken the static map blacklist) — leave it alone.
+        if (_stuckWorldRects.Count == 0)
+            return;
+        if (IsInBlacklistArea())
+            return;
+
+        _stuckRectBypassUntilUtc = now.AddSeconds(StuckRectBypassWindowSec);
+        _blacklistTrapStartUtc = DateTime.MinValue;
+        logger.LogWarning(
+            $"[NAV] [FIX-FIRE] EU: blacklist-trap self-escape — every path to the " +
+            $"target has been rejected for >= {BlacklistTrapEscapeSec:0}s by dynamic " +
+            $"stuck rect(s) (count={_stuckWorldRects.Count}) while the bot sits outside " +
+            $"any static blacklist. Routing THROUGH the dynamic rect(s) (static-only " +
+            $"validation) for {StuckRectBypassWindowSec:0}s so the bot can reach its " +
+            $"target instead of standing still. Static map hazards remain blocked.");
+    }
+
+    // Fix EU: a path was accepted (the bot can move) — the blacklist trap, if
+    // any, is broken; reset the timer so a future trap is measured fresh.
+    private void ResetBlacklistTrap()
+    {
+        _blacklistTrapStartUtc = DateTime.MinValue;
+    }
+
     private void PathCalculatedCallback(long requestId, PathResult result)
     {
         long activeId = Volatile.Read(ref activePathRequestId);
@@ -4945,6 +5071,7 @@ public sealed partial class Navigation : IDisposable
 
                     if (IsBlacklistedPoint(cur)) // Fix DV: escape-aware (was AreaBlacklist.ContainsWorld)
                     {
+                        RegisterBlacklistRejectMaybeBypass(); // Fix EU
                         logger.LogWarning(
                             $"[BL] Path node inside blacklist; rejecting. " +
                             $"badPoint={cur}");
@@ -4975,6 +5102,7 @@ public sealed partial class Navigation : IDisposable
 
                     if (SegmentBlockedEscapeAware(prev, cur))
                     {
+                        RegisterBlacklistRejectMaybeBypass(); // Fix EU
                         logger.LogWarning(
                             $"[BL] Path segment crosses blacklist; rejecting. " +
                             $"seg=({prev} -> {cur}) i={i} " +
@@ -5021,6 +5149,7 @@ public sealed partial class Navigation : IDisposable
         }
 
         ClearDestinationLatch();
+        ResetBlacklistTrap(); // Fix EU: an accepted path means the bot can move — trap is broken
         SyncRouteStateToTop(false);
 
         OnPathCalculated?.Invoke();
@@ -5797,6 +5926,7 @@ public sealed partial class Navigation : IDisposable
         // elapsed. The next propagation cycle will re-apply them if the
         // peer is still publishing.
         _stuckRectExpiryUtc.Clear();
+        _stuckRectCreatedUtc.Clear(); // Fix ET: keep parallel created-time list in lockstep
         _areaBlacklist = _staticAreaBlacklist;
         logger.LogInformation($"[NAV] ClearStuckRects: {count} dynamic stuck rect(s) cleared — restoring static blacklist only.");
 
@@ -5870,10 +6000,12 @@ public sealed partial class Navigation : IDisposable
     }
 
     /// <summary>
-    /// Removes propagated stuck rects whose TTL has elapsed. Locally-
-    /// discovered rects (expiry == DateTime.MaxValue) are never pruned by
-    /// this method — they are cleared explicitly via
-    /// <see cref="ClearStuckRects"/> on plan transitions.
+    /// Removes propagated stuck rects whose TTL has elapsed, AND (Fix ET)
+    /// local rects (expiry == DateTime.MaxValue) older than
+    /// <see cref="MaxLocalStuckRectAgeSec"/>. Previously local rects were
+    /// never pruned here and relied solely on <see cref="ClearStuckRects"/>
+    /// (plan transitions) — which in practice fires only on bail/evade paths,
+    /// letting local rects accumulate for the whole session.
     ///
     /// <para>
     /// Called once per <see cref="Update"/> tick. Cheap because
@@ -5887,25 +6019,36 @@ public sealed partial class Navigation : IDisposable
             return;
 
         DateTime now = DateTime.UtcNow;
-        int removed = 0;
+        int removedPropagated = 0;
+        int removedLocalAged = 0;
         for (int i = _stuckWorldRects.Count - 1; i >= 0; i--)
         {
-            if (_stuckRectExpiryUtc[i] < now)
+            bool isLocal = _stuckRectExpiryUtc[i] == DateTime.MaxValue;
+            // Propagated rect: drop when its (refresh-tracked) TTL elapses.
+            // Local rect: drop when it exceeds the absolute age cap (Fix ET).
+            bool expired = !isLocal && _stuckRectExpiryUtc[i] < now;
+            bool localAgedOut = isLocal &&
+                (now - _stuckRectCreatedUtc[i]).TotalSeconds >= MaxLocalStuckRectAgeSec;
+
+            if (expired || localAgedOut)
             {
                 _stuckWorldRects.RemoveAt(i);
                 _stuckRectExpiryUtc.RemoveAt(i);
-                removed++;
+                _stuckRectCreatedUtc.RemoveAt(i); // Fix ET: keep parallel list in sync
+                if (localAgedOut) removedLocalAged++; else removedPropagated++;
             }
         }
 
+        int removed = removedPropagated + removedLocalAged;
         if (removed > 0)
         {
             _areaBlacklist = _stuckWorldRects.Count > 0
                 ? new CompositeAreaBlacklist(_staticAreaBlacklist, new RectBlacklist(_stuckWorldRects))
                 : _staticAreaBlacklist;
             logger.LogInformation(
-                $"[NAV] PruneExpiredStuckRects: removed {removed} expired propagated rect(s) " +
-                $"(remaining={_stuckWorldRects.Count})");
+                $"[NAV] PruneExpiredStuckRects: removed {removed} rect(s) " +
+                $"(propagated-TTL={removedPropagated}, local-aged={removedLocalAged}, " +
+                $"remaining={_stuckWorldRects.Count})");
         }
     }
 
@@ -5923,7 +6066,10 @@ public sealed partial class Navigation : IDisposable
     // the same exemption. Reverts to the composite the instant the escape ends.
     private bool IsBlacklistedPoint(Vector3 worldPoint)
     {
-        IAreaBlacklist? bl = _approachEscapeActive ? _staticAreaBlacklist : AreaBlacklist;
+        // Fix EU: StuckRectBypassActive grants the same static-only exemption
+        // as an active approach escape, so a blacklist-trapped bot can route
+        // through dynamic stuck rects toward its target.
+        IAreaBlacklist? bl = (_approachEscapeActive || StuckRectBypassActive) ? _staticAreaBlacklist : AreaBlacklist;
         return bl != null && bl.ContainsWorld(worldPoint);
     }
 
@@ -5961,7 +6107,12 @@ public sealed partial class Navigation : IDisposable
         // it. They remain in _stuckWorldRects and resume gating the instant the
         // escape ends (_approachEscapeActive=false). Real impassable areas (the
         // static map blacklist) still block the escape.
-        IAreaBlacklist? bl = _approachEscapeActive ? _staticAreaBlacklist : AreaBlacklist;
+        //
+        // Fix EU (run-148): StuckRectBypassActive grants the same static-only
+        // exemption — a bot trapped by a dynamic rect walling it off from its
+        // target may route THROUGH that rect for a short window rather than
+        // stand still indefinitely.
+        IAreaBlacklist? bl = (_approachEscapeActive || StuckRectBypassActive) ? _staticAreaBlacklist : AreaBlacklist;
         if (bl == null) return false;
 
         if (bl.TryGetContainingRect(startW, out var containingRect))

@@ -384,6 +384,17 @@ public sealed partial class GoapAgent : IDisposable
             // ── Leader side: read assist state from API store ──────────────
             if (classConfig.Mode == Mode.PartyLeader)
             {
+                // Fix ES (run-148): age out stale published stuck rects each
+                // tick. The leader broadcasts its dynamic stuck rects to the
+                // assist via leaderNavProvider; ClearStuckRects only fires on
+                // bail/evade/geometry-trap paths, so during normal grinding a
+                // local rect (DateTime.MaxValue, never auto-pruned in
+                // Navigation) would otherwise be published for the rest of the
+                // session and block the assist's path back to the leader. This
+                // self-contained age cap drops it from the broadcast after
+                // PublishedStuckRectTtlSec regardless of plan transitions.
+                leaderNavProvider.PruneExpiredStuckRects();
+
                 // Track "assist present" = Following OR NavigatingToLeader.
                 // Previously tracking only AnyAssistIsFollowing() caused AssistIsNotFollowing()
                 // to fire on every Following→NavigatingToLeader transition, which triggered

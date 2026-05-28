@@ -96,10 +96,13 @@ public sealed class LeaderState
     // The leader publishes its full current set of dynamic rects each
     // poll cycle. The assist applies them via
     // Navigation.AddPropagatedStuckRect, which dedups on overlap and
-    // refreshes a TTL on re-application. Once the leader clears its
-    // own rects (ClearStuckRects on plan transitions), the published
-    // list empties and the assist's propagated rects expire naturally
-    // via the TTL — see PropagatedStuckRectTtlSec in Navigation.cs.
+    // refreshes a TTL on re-application. The published list drains in two
+    // ways: ClearStuckRects (bail/evade/geometry-trap paths) empties it
+    // immediately, and — Fix ES (run-148) — LeaderNavigationProvider's own
+    // age cap (PublishedStuckRectTtlSec) drops individual rects during
+    // normal grinding, where ClearStuckRects never fires. Once a rect
+    // leaves the published list the assist stops refreshing it and its
+    // propagated copy expires via PropagatedStuckRectTtlSec in Navigation.cs.
     // ------------------------------------------------------------------
 
     /// <summary>

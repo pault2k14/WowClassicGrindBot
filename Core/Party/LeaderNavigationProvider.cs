@@ -238,19 +238,65 @@ public sealed class LeaderNavigationProvider
     //
     // Lifetime semantics on this side:
     //   - AddStuckRect appends if the new center is not already inside an
-    //     existing rect (dedup matches Navigation.AddStuckRect's dedup).
+    //     existing rect (dedup matches Navigation.AddStuckRect's dedup) and
+    //     stamps the add time.
     //   - ClearStuckRects empties the list (matches
     //     Navigation.ClearStuckRects). On the next poll the assist sees
     //     an empty array and lets its propagated rects expire via the
     //     TTL in Navigation (PropagatedStuckRectTtlSec).
+    //   - PruneExpiredStuckRects drops any published rect older than
+    //     PublishedStuckRectTtlSec, called once per leader GOAP tick.
     //
-    // The leader does NOT need its own TTL here — the leader's rect list
-    // is the source of truth, and the leader's plan transitions
-    // (ATG.OnExit, CombatGoal post-combat) already drive ClearStuckRects
-    // on Navigation, which we mirror.
+    // ── Fix ES (run-148 deadlock) — the publish side now HAS its own TTL ──
+    //
+    // The previous design comment claimed "The leader does NOT need its own
+    // TTL here ... the leader's plan transitions (ATG.OnExit, CombatGoal
+    // post-combat) already drive ClearStuckRects on Navigation, which we
+    // mirror." That assumption was FALSE. ClearStuckRects is invoked ONLY on
+    // failure paths — ATG bail-out (ApproachTargetGoal.cs:509/543), PTG
+    // bail (PullTargetGoal.cs:327), and CombatGoal evade/geometry-trap
+    // (CombatGoal.cs:381/755/942). It is NOT called on ATG.OnExit or on a
+    // normal kill. During ordinary grinding the leader therefore never
+    // cleared its rects, and because Navigation's LOCAL rects carry a
+    // DateTime.MaxValue expiry (never auto-pruned), the published list grew
+    // monotonically and was broadcast forever.
+    //
+    // Evidence (run-148): the leader added a local stuck rect at
+    // <-555.7984,-4844.085> at 01:18:01, never cleared it (leader stuck-rect
+    // total climbed 1→5 over 19 min across 106 ATG OnEnters with zero
+    // clears), and kept publishing it. The assist re-applied it every ~250ms
+    // poll, refreshing its 90s propagated TTL indefinitely (Navigation.cs
+    // TryAddStuckRectInternal propagated-refresh path). 17 minutes later the
+    // assist had to path through that rect to rejoin the leader; every path
+    // crossed it → blacklistRejectCooldown → assist frozen → leader paused
+    // for the too-far assist → mutual standstill.
+    //
+    // The leader's Navigation list is still the source of truth for the
+    // leader's OWN pather, but the PUBLISHED copy must not outlive the
+    // terrain's relevance just because ClearStuckRects didn't happen to
+    // fire. A self-contained age cap here bounds the propagated rect's life:
+    // once it ages out of the snapshot the assist stops refreshing it and
+    // its copy expires (<= PropagatedStuckRectTtlSec later) on the assist's
+    // own prune (which Fix ER made unconditional). A genuinely-persistent
+    // bad spot is re-shared the next time the leader sticks there and
+    // Navigation re-fires OnStuckRectAdded after its own rect has cleared.
     // -----------------------------------------------------------------------
 
+    // How long a published stuck rect is broadcast before PruneExpiredStuckRects
+    // drops it, independent of whether ClearStuckRects ever fires. Matched to
+    // the consumer-side PropagatedStuckRectTtlSec (90s) so the publish window
+    // and the assist's local TTL are symmetric and easy to reason about: a rect
+    // is broadcast for 90s after the leader adds it, and the assist's copy
+    // expires at most 90s after the broadcast stops. Worst-case propagated
+    // lifetime ≈ this + PropagatedStuckRectTtlSec ≈ 180s.
+    private const double PublishedStuckRectTtlSec = 90.0;
+
     private readonly List<StuckRectInfo> _stuckRects = new();
+
+    // Parallel to _stuckRects (same index = same rect): UTC time the rect was
+    // appended, used by PruneExpiredStuckRects for the age cap. Single-writer
+    // (GOAP thread), mirroring _stuckRects' threading model.
+    private readonly List<System.DateTime> _stuckRectAddedUtc = new();
 
     // Snapshot exposed to LeaderStateService / HTTP serialization.
     // Replaced as a whole reference (volatile) so HTTP readers always
@@ -260,7 +306,7 @@ public sealed class LeaderNavigationProvider
     /// <summary>
     /// Current set of dynamic stuck rects the leader has added via its
     /// <c>Navigation.AddStuckRect</c> path. Snapshot is rebuilt on every
-    /// change (add or clear). Consumed by <see cref="LeaderStateService"/>
+    /// change (add, clear, or prune). Consumed by <see cref="LeaderStateService"/>
     /// when assembling the <see cref="LeaderState.StuckRects"/> field.
     /// </summary>
     public StuckRectInfo[] StuckRectsSnapshot => _stuckRectsSnapshot;
@@ -293,16 +339,52 @@ public sealed class LeaderNavigationProvider
             CenterY = centerY,
             HalfSize = halfSize
         });
+        _stuckRectAddedUtc.Add(System.DateTime.UtcNow);
         _stuckRectsSnapshot = _stuckRects.ToArray();
+    }
+
+    /// <summary>
+    /// Fix ES (run-148): drops published stuck rects older than
+    /// <see cref="PublishedStuckRectTtlSec"/>. Must be called on the GOAP
+    /// thread (single-writer with AddStuckRect / ClearStuckRects). The leader
+    /// invokes this once per GOAP tick so a stale rect ages out of the
+    /// broadcast even when no plan transition ever fires ClearStuckRects.
+    /// Rebuilds the snapshot atomically only when something was removed.
+    /// </summary>
+    public void PruneExpiredStuckRects()
+    {
+        if (_stuckRects.Count == 0)
+            return;
+
+        System.DateTime now = System.DateTime.UtcNow;
+        bool removedAny = false;
+        for (int i = _stuckRects.Count - 1; i >= 0; i--)
+        {
+            if ((now - _stuckRectAddedUtc[i]).TotalSeconds >= PublishedStuckRectTtlSec)
+            {
+                _stuckRects.RemoveAt(i);
+                _stuckRectAddedUtc.RemoveAt(i);
+                removedAny = true;
+            }
+        }
+
+        if (removedAny)
+        {
+            _stuckRectsSnapshot = _stuckRects.Count > 0
+                ? _stuckRects.ToArray()
+                : System.Array.Empty<StuckRectInfo>();
+        }
     }
 
     /// <summary>
     /// Clears the published stuck-rect list. Called by the leader-side
     /// subscriber when the leader's <c>Navigation.ClearStuckRects</c> fires
-    /// (plan transitions in ATG/PTG/CombatGoal). On the next assist poll,
-    /// the assist will see an empty array and its locally-tracked
-    /// propagated rects will expire via TTL — see
-    /// <c>Navigation.PropagatedStuckRectTtlSec</c>.
+    /// (the bail/evade/geometry-trap paths in ATG/PTG/CombatGoal). On the
+    /// next assist poll, the assist will see an empty array and its
+    /// locally-tracked propagated rects will expire via TTL — see
+    /// <c>Navigation.PropagatedStuckRectTtlSec</c>. The age-based
+    /// <see cref="PruneExpiredStuckRects"/> covers the normal-grind case
+    /// where this clear never fires.
     /// </summary>
     public void ClearStuckRects()
     {
@@ -310,6 +392,7 @@ public sealed class LeaderNavigationProvider
             return;
 
         _stuckRects.Clear();
+        _stuckRectAddedUtc.Clear();
         _stuckRectsSnapshot = System.Array.Empty<StuckRectInfo>();
     }
 }
