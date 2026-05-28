@@ -5637,14 +5637,112 @@ public sealed partial class Navigation : IDisposable
                     $"dir={playerReader.Direction:F2} player={diagPlayer} est={estNav} " +
                     $"rect=[{diagRect.MinX:F0},{diagRect.MinY:F0} .. {diagRect.MaxX:F0},{diagRect.MaxY:F0}] " +
                     $"inflate={inflate:F1} estToRectCtr={estToCtr:F1}");
+                return true;
             }
-            else
+
+            // ── Fix EQ (run-147 13:49:03 → 13:49:07:793 evidence) — multi-sample P1 ──
+            //
+            // P1's single-point estimate has a false-negative failure mode at long
+            // range with a wide bracket. Run-147: at ATG OnEnter for mob 1531507
+            // (leader-time 13:49:03:002), P1 estimate landed at <482.78, -4255.51>
+            // with bracket=[45,100] (midpoint estDist=72.5y), 3.8y east of the
+            // rect's inflated east edge (rect [392,-4271..473,-4193] inflate 6.0
+            // → edge X=479). E5 gate at ATG.OnEnter:272 passed → leader entered
+            // approach. 4.8s later at PTG OnEnter (13:49:07:793), bracket had
+            // narrowed to [25,30], estimate moved west to X=478.47 — inside the
+            // rect by 0.5y — and PTG E5 at PullTargetGoal.cs:135 fired (HIT log
+            // visible at leader log line 3737). The mob WAS in-rect all along;
+            // P1 just couldn't see it at long range.
+            //
+            // During the 4.8s gap the assist's AH+AJ+AN focus-chain pickup
+            // committed to mob 1531507 (gated on leader.HasApproachStart=true,
+            // which the leader publishes at ATG.OnEnter:347/356 right after the
+            // E5 gate passes). The assist was engaged before the leader's PTG
+            // E5 caught the in-rect verdict — root cause of run-147 downstream.
+            //
+            // Two error sources combine to produce P1's miss at long range:
+            //   (a) Range: TargetMapPos uses the MIDPOINT of [minR, maxR]. With
+            //       bracket=[45,100] the true distance could be anywhere in a
+            //       55y window; midpoint can be 27.5y short/long of truth.
+            //   (b) Facing: at ATG OnEnter the leader's Direction is still its
+            //       pre-ATG patrol facing, not yet aimed at the mob. Run-147
+            //       had dir=1.57 (90°) vs actual mob bearing 1.667 (95.5°),
+            //       a 5.5° error. At 52y true range that's 5y lateral.
+            //
+            // Fix: when bracket uncertainty is high (width > 15y) OR mob is far
+            // (maxR > 30y), sample five probe points covering the uncertainty
+            // cone — three along the facing line (minR/midR/maxR, same shape as
+            // P2's fallback at line 5659) plus midR ± lateral_offset along the
+            // perpendicular to account for facing error. lateral_offset = midR
+            // * tan(5°) ≈ midR * 0.087, which gives ~6y at midR=72y and ~3y at
+            // midR=35y — matches the empirical facing-error magnitude.
+            //
+            // Conservative bias: prefer false-positive (decline a target close
+            // to a rect at long range) over false-negative (the run-147 bug).
+            // At close range (bracket narrow and near), single-point P1 is
+            // already reliable — that's the verdict PTG E5 used to catch
+            // run-147 at 13:49:07:793 — so multi-sample is skipped and behavior
+            // is unchanged.
+            //
+            // Side-effect surface: every IsTargetLikelyInBlacklistRect caller
+            // benefits identically — ATG.OnEnter E5 (the run-147 trigger),
+            // ATG.Update repeated checks (lines 499/531/797/951), PTG E5
+            // (line 135), CombatGoal (lines 377/491). All five sites already
+            // assume the verdict is reliable; this fix makes it reliable
+            // earlier in the approach, when intervention has the most value.
+            if (diagMaxR - diagMinR > 15 || diagMaxR > 30)
             {
-                logger.LogDebug(
-                    $"[NAV] InRectVerdict P1 miss bracket=[{diagMinR},{diagMaxR}] estDist={(diagMinR + diagMaxR) / 2f:F1} " +
-                    $"dir={playerReader.Direction:F2} player={diagPlayer} est={estNav}");
+                float cos = MathF.Cos(playerReader.Direction);
+                float sin = MathF.Sin(playerReader.Direction);
+                // Perpendicular to facing (90° CCW): for unit (cos,sin) → (-sin,cos)
+                float perpX = -sin;
+                float perpY = cos;
+                Vector3 w = playerReader.WorldPos;
+                float midR = (diagMinR + diagMaxR) * 0.5f;
+                // Lateral offset for ~5° facing uncertainty (tan(5°) ≈ 0.087)
+                float lat = midR * 0.087f;
+
+                // Five probes: (minR,0), (midR,0), (maxR,0), (midR,+lat), (midR,-lat).
+                // Ordering puts the central-facing samples first so a typical
+                // dead-on facing returns at probe 1 (midR) without computing the
+                // lateral samples; the lateral samples specifically catch the
+                // facing-error case (run-147).
+                for (int probeIdx = 0; probeIdx < 5; probeIdx++)
+                {
+                    float d;
+                    float latOff;
+                    switch (probeIdx)
+                    {
+                        case 0: d = diagMinR; latOff = 0f; break;
+                        case 1: d = midR; latOff = 0f; break;
+                        case 2: d = diagMaxR; latOff = 0f; break;
+                        case 3: d = midR; latOff = lat; break;
+                        default: d = midR; latOff = -lat; break;
+                    }
+                    Vector3 probeW = new(
+                        w.X + cos * d + perpX * latOff,
+                        w.Y + sin * d + perpY * latOff,
+                        0f);
+                    Vector3 probeNav = Nav2D(probeW);
+                    if (bl.TryGetContainingRectInflated(probeNav, inflate, out var probeRect))
+                    {
+                        logger.LogInformation(
+                            $"[NAV] [FIX-FIRE] EQ: P1 multi-sample HIT (single-point P1 missed). " +
+                            $"bracket=[{diagMinR},{diagMaxR}] probe={probeIdx} d={d:F1} lat={latOff:F1} " +
+                            $"dir={playerReader.Direction:F2} player={diagPlayer} probe={probeNav} " +
+                            $"primaryEst={estNav} " +
+                            $"rect=[{probeRect.MinX:F0},{probeRect.MinY:F0} .. {probeRect.MaxX:F0},{probeRect.MaxY:F0}] " +
+                            $"inflate={inflate:F1}. Single-point estimate was just outside the rect; " +
+                            $"multi-sample found the rect after accounting for range/facing uncertainty.");
+                        return true;
+                    }
+                }
             }
-            return hit;
+
+            logger.LogDebug(
+                $"[NAV] InRectVerdict P1 miss bracket=[{diagMinR},{diagMaxR}] estDist={(diagMinR + diagMaxR) / 2f:F1} " +
+                $"dir={playerReader.Direction:F2} player={diagPlayer} est={estNav}");
+            return false;
         }
 
         // (2) fallback: facing * target-distance bracket, conservative OR over samples
