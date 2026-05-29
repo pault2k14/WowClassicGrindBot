@@ -161,10 +161,10 @@
   ],
   "blacklists": [
     { // Area around campfire
-      "minX": 42.192721, // 43.2 41.7 43.5 42.3
-      "minY": 37.885350, // 38.1 37.2 40.2 40.4
-      "maxX": 43.666756,
-      "maxY": 40.190989
+      "minX": 42.751825, // Front of camp - left side as you face campfire
+      "minY": 38.760608, // x 42.751825 y 40.263277
+      "maxX": 43.307352, // Back of camp - right side as you face campfire from behind
+      "maxY": 40.263277 // x 43.307352 y 38.760608
     },
     { // Pothole
       "minX": 40.028167,
