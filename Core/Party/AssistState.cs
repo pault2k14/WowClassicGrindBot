@@ -43,6 +43,33 @@ public sealed class AssistState
     public bool InCombat { get; set; }
 
     /// <summary>
+    /// GUID of the assist's current target, or 0 if no target. Symmetric to
+    /// <see cref="LeaderState.TargetGuid"/>; used by the leader's
+    /// <c>GoapAgent.PartyMemberInCombat()</c> Fix EY disjunct as a polled
+    /// fallback when <c>bits.FocusTarget()</c> / <c>bits.FocusTarget_Combat()</c>
+    /// go stale because the assist is out of the leader's WoW client
+    /// visibility range.
+    ///
+    /// <para>Fix EY (run-152 13:31:55 standoff): symmetric counterpart to
+    /// Fix EX (PartyMemberInCombat's AssistFocus polled fallback at
+    /// GoapAgent.cs ~line 2013, which uses
+    /// <c>leaderConnection.LastLeaderState.TargetGuid</c>). When the assist
+    /// moves &gt;~80y from the leader during Section D caster-retreat (run-152
+    /// peak: 424y at &lt;253,-4648&gt;), the leader's WoW client cannot reliably
+    /// re-read the focus's target slot, so the addon's
+    /// <c>bits.FocusTarget()</c> and <c>bits.FocusTarget_Combat()</c> may
+    /// stick at stale values. Without a polled fallback, the leader-side
+    /// PartyMemberInCombat disjunct 3 (Fix AP gate, which requires both bits)
+    /// can either over-fire (stuck TRUE → permanent partyincombat=true) or
+    /// under-fire (stuck FALSE → Combat plan blocked). The polled
+    /// AssistState carries the assist's authoritative
+    /// <see cref="InCombat"/> AND TargetGuid, allowing a fresh-polled
+    /// disjunct that fires when the assist publishes "I am in combat with
+    /// target X" regardless of what the leader's bits report.</para>
+    /// </summary>
+    public int TargetGuid { get; set; }
+
+    /// <summary>
     /// Assist's current route waypoint index, or -1 if unsynced / no route loaded.
     /// Mirrors <c>FollowFocusGoal._assistRouteIndex</c>. Published so the leader
     /// has symmetric route-progress info (the leader already publishes its own

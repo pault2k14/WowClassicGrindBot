@@ -124,6 +124,15 @@ public sealed class PartyStatePublisher : IReader
             CantFollow = assistStatusProvider.CantFollow,
             HealthPercent = playerReader.HealthPercent(),
             InCombat = bits.Combat(),
+            // Fix EY (run-152 standoff): publish the assist's current target
+            // GUID symmetric to LeaderState.TargetGuid. The leader's
+            // PartyMemberInCombat uses this as a polled fallback for
+            // bits.FocusTarget / bits.FocusTarget_Combat when the assist is
+            // out of WoW client visibility range (Section D retreat
+            // displacement up to 424y in run-152 made the focus-target bits
+            // unreliable). Mirrors LeaderStateService.cs:281 (the leader-side
+            // publish that Fix EX consumes).
+            TargetGuid = playerReader.TargetGuid,
             // Fix BF: route progress published symmetrically to leader's
             // TargetWaypoint broadcast — closes the same "position-without-
             // route-context" asymmetry on the assist→leader direction.

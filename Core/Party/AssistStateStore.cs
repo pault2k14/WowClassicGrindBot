@@ -133,6 +133,43 @@ public sealed class AssistStateStore
         return false;
     }
 
+    /// <summary>
+    /// True if any non-stale assist is currently in combat (published via
+    /// <see cref="AssistState.InCombat"/>). Used by FollowRouteGoal's
+    /// party-combat auto-resume gate (Fix FA) to determine whether the
+    /// party is still in combat, independent of <c>bits.Focus_Combat()</c>
+    /// which can go stale when the assist is out of the leader's WoW client
+    /// visibility range.
+    /// </summary>
+    public bool AnyAssistInCombat()
+    {
+        foreach (AssistState s in _states.Values)
+            if (!IsStale(s) && s.InCombat)
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// True if any non-stale assist is in combat AND has a non-zero
+    /// TargetGuid. Used by GoapAgent.PartyMemberInCombat()'s PartyLeader-mode
+    /// Fix EY disjunct as a polled fallback when bits.FocusTarget /
+    /// bits.FocusTarget_Combat go stale. Symmetric to Fix EX which uses
+    /// <c>leaderConnection.LastLeaderState.InCombat &amp;&amp; TargetGuid != 0</c>
+    /// on the AssistFocus side.
+    ///
+    /// <para>The TargetGuid != 0 conjunct mitigates ghost-combat: if the
+    /// assist's bits.Combat=true with no real mob targeted, this disjunct
+    /// doesn't fire (consistent with Fix EX's TargetGuid != 0 conjunct on
+    /// the leader-side polled path).</para>
+    /// </summary>
+    public bool AnyAssistInCombatWithTarget()
+    {
+        foreach (AssistState s in _states.Values)
+            if (!IsStale(s) && s.InCombat && s.TargetGuid != 0)
+                return true;
+        return false;
+    }
+
     public AssistState? GetCantFollowState()
     {
         foreach (AssistState s in _states.Values)

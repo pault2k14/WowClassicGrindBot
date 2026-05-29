@@ -63,6 +63,35 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // API-based distance gate: leader pauses when assist is too far, stuck, or cant follow.
     private bool _pausedByAssistDistance;
 
+    // ── Fix FA (run-152 standoff) — party-combat auto-resume flag ──
+    //
+    // Set in OnGoapEvent's partyincombat=true branch when we Abort() in
+    // response to a party-combat broadcast. Cleared either by FRG.Update's
+    // auto-resume gate (when bits.Combat()=false AND, on PartyLeader, no
+    // fresh polled assist reports InCombat) or by an explicit Resume()
+    // call (e.g. via OnEnter on plan transition back to FRG).
+    //
+    // Why this flag exists: FRG.Abort pauses pathing and clears the
+    // published waypoint, but FRG remains the current goal — the planner
+    // expects Combat to be selected next, then to transition back to FRG
+    // (which would call OnEnter → Resume). Run-152's failure mode is that
+    // Combat's preconditions (partyleadercombat=true,
+    // allPartyTargetsIsIgnored=false) flake at the planner tick immediately
+    // after FRG.Abort: bits.FocusTarget flickers false right after the
+    // partyincombat broadcast, partyleadercombat collapses to false, Combat
+    // plan stays blocked, the planner re-selects FRG (no transition), no
+    // OnEnter, no Resume — and the bot sits paused forever (16:5 minutes
+    // of "Random jump" with no movement in the 13:31:55 → 13:35:59 leader
+    // log window).
+    //
+    // The auto-resume gate doesn't rely on a partyincombat=false broadcast
+    // because that broadcast may never fire if bits.Focus_Combat sticks at
+    // a stale TRUE value (assist was 424y away in run-152, far beyond the
+    // WoW client's focus-refresh range). Fix EY's polled
+    // AssistStateStore.AnyAssistInCombat is the authoritative source for
+    // "is the assist in combat" that we check directly each Update tick.
+    private bool _pausedByPartyCombat;
+
     private Vector3[] mapRoute
     {
         get => pathSettings.Path;
@@ -407,6 +436,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // of complete silence after ATG's focus-chain race re-acquired the
         // blacklisted mob just before the goal switch into FRG.
         _pausedByLocalLogic = false;
+
+        // Fix FA: a legitimate Resume() (e.g. OnEnter on plan transition back
+        // to FRG) supersedes any prior party-combat Abort — clear the flag so
+        // we don't immediately re-fire the auto-resume gate in Update.
+        _pausedByPartyCombat = false;
 
         if (_suppressTargetFinderUntilUtc != DateTime.MinValue && DateTime.UtcNow < _suppressTargetFinderUntilUtc)
             logger.LogInformation($"[FRG] Resume: target finder still suppressed for {(_suppressTargetFinderUntilUtc - DateTime.UtcNow).TotalMilliseconds:F0}ms.");
@@ -862,6 +896,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         {
                             logger.LogInformation("FollowRouteGoal: OnGoapEvent - Party entered Combat, trying to exit!");
                             Abort();
+                            // Fix FA: tag this Abort as "paused by party-combat" so the
+                            // Update auto-resume gate can fire when conditions clear,
+                            // even if no plan transition (FRG→Combat→FRG) ever happens.
+                            // See _pausedByPartyCombat field comment for the run-152
+                            // standoff motivation.
+                            _pausedByPartyCombat = true;
                         }
                         else
                         {
@@ -956,6 +996,102 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         // immediately re-enable the event, leaving Thread_LookingForTarget running after
         // the bot was stopped. Resume() is the correct and only place to re-enable the
         // side thread; Abort() is the correct place to disable it.
+
+        // ── Fix FA (run-152 13:31:55 → 13:35:59 standoff) — party-combat auto-resume ──
+        //
+        // When OnGoapEvent's partyincombat=true branch called Abort() at
+        // 13:31:55:077, the leader's pathing paused and FRG remained as the
+        // current goal. The expected recovery path was FRG → Combat → FRG
+        // via plan transition (Combat.OnExit → FRG.OnEnter → Resume), but
+        // Combat plan's precondition partyleadercombat=true failed at the
+        // planner tick that followed Abort (bits.FocusTarget flickered FALSE
+        // between the broadcast and the planner tick, collapsing
+        // PartyLeaderInCombat()'s disjunct 2). The planner re-selected FRG
+        // without a transition → no OnEnter → no Resume → bot frozen at
+        // <361,-4238> emitting only Random jump every 10s for 4 minutes
+        // until the log ended.
+        //
+        // This gate runs every Update tick while FRG is the current goal.
+        // If we're in the party-combat-paused state AND the party is no
+        // longer in combat (per the safest available data sources), resume
+        // navigation directly without waiting for a plan transition.
+        //
+        // Data sources, in safest-against-stuck order:
+        //   - bits.Combat() is always accurate for our own combat state
+        //     (own bits don't go stale). If true, we're still in combat;
+        //     don't resume.
+        //   - In PartyLeader mode: AssistStateStore.AnyAssistInCombat() is
+        //     authoritative for the assist's combat state — it reads the
+        //     polled AssistState.InCombat from the assist's
+        //     PartyStatePublisher (Fix EY data path), gated by IsStale
+        //     (3000ms). When all polled state is stale or no assist has
+        //     contacted us, AnyAssistInCombat returns false — which biases
+        //     toward resuming (the user-requested "safer against stuck"
+        //     trade-off: if we've lost contact with the assist, we'd rather
+        //     resume patrol and re-Abort on the next legitimate broadcast
+        //     than sit frozen indefinitely).
+        //   - In AssistFocus / Grind modes: skip the assist check; only the
+        //     bot's own bits.Combat() matters.
+        //
+        // bits.Focus_Combat() is DELIBERATELY NOT in the gate. That bit can
+        // stick at stale TRUE when the focus is out of WoW client visibility
+        // range (assist moved to 424y in run-152), which is the exact
+        // failure mode this fix exists to escape. Trusting the polled state
+        // (which the assist itself authoritatively publishes) over the stale
+        // bit is the whole point.
+        //
+        // No debounce: the operator's directive was "safer for ensuring we
+        // don't get stuck in that bad state." A debounce would introduce a
+        // window during which transient bit-flicker could re-trigger
+        // Abort while the auto-resume gate is still waiting, perpetuating
+        // the stuck state. If the resume fires prematurely, the next
+        // partyincombat=true broadcast (driven by UpdateWorldState's diff
+        // loop in GoapAgent) will re-Abort cleanly. Cost of a false
+        // positive resume is bounded; cost of staying stuck is not.
+        //
+        // Other pause flags (_syncPauseActive, _pausedByAssistDistance,
+        // _pausedByLocalLogic) gate this gate — if any of them are set,
+        // their own pause logic owns the resume decision and we don't want
+        // to undercut them.
+        // Mode gate (PartyLeader only): the polled check uses
+        // AssistStateStore, which is a leader-side singleton (populated by
+        // POSTs from assists). On AssistFocus, the store is empty —
+        // AnyAssistInCombat would always return false, and the gate would
+        // fire on bits.Combat()=false alone (the assist's OWN combat being
+        // over), prematurely resuming while the LEADER is still in combat
+        // (the trigger condition we Aborted for). A symmetric AssistFocus
+        // auto-resume would need leaderConnection.LastLeaderState.InCombat
+        // — that requires constructor-injecting LeaderConnectionStatus into
+        // FRG, which is a wider change deferred until a real AssistFocus-
+        // running-FRG scenario shows the symptom. For now, the existing
+        // bits-based behavior on AssistFocus (Abort fires, no auto-resume,
+        // relies on plan transition for recovery) is preserved unchanged.
+        if (_pausedByPartyCombat
+            && classConfig.Mode == Mode.PartyLeader
+            && !bits.Combat()
+            && !assistStateStore.AnyAssistInCombat()
+            && !_syncPauseActive
+            && !_pausedByAssistDistance
+            && !_pausedByLocalLogic)
+        {
+            _pausedByPartyCombat = false;
+            logger.LogInformation(
+                "[FRG] [FIX-FIRE] FA: Party-combat pause cleared (bits.Combat=false, " +
+                $"polled-assist-InCombat={assistStateStore.AnyAssistInCombat()}) " +
+                "— resuming patrol navigation directly without a plan transition.");
+            navigation.Resume();
+
+            // Abort() called leaderNavProvider.ClearTargetWaypoint() — the
+            // published waypoint is empty until we re-publish. PublishPatrolWaypoint
+            // restores it so the assist's poll on the next interval sees a
+            // fresh top waypoint and resumes its own follow logic.
+            PublishPatrolWaypoint();
+
+            // Re-enable the side target-finding thread (Abort() called
+            // sideActivityManualReset.Reset()). Same call pattern as the
+            // sync-pause complete branch above.
+            TryEnableSideTargetFinding();
+        }
 
         // ── Consume pause requests from side thread ──
         if (Interlocked.Exchange(ref _pauseNavRequested, 0) == 1)

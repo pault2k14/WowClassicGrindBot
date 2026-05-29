@@ -2012,7 +2012,54 @@ public sealed partial class GoapAgent : IDisposable
                 // without duplicating the IsIgnored check here.
                 || (classConfig.Mode == Mode.AssistFocus
                     && leaderConnection.LastLeaderState?.InCombat == true
-                    && leaderConnection.LastLeaderState?.TargetGuid != 0);
+                    && leaderConnection.LastLeaderState?.TargetGuid != 0)
+                // ── Fix EY (run-152 standoff) — symmetric to Fix EX above ──
+                //
+                // Fix EX (just above) gives the ASSIST a polled fallback for
+                // the LEADER's combat state when the assist's bits go stale.
+                // Fix EY is the mirror: gives the LEADER a polled fallback
+                // for the ASSIST's combat state when the leader's bits go
+                // stale.
+                //
+                // Run-152 evidence: at 13:31:53:378 (assist), the assist
+                // entered Section D caster-retreat in combat. By 13:32:59:832
+                // the assist was at <253,-4648>, 424y from the leader at
+                // <361,-4238> — far beyond the leader's WoW client
+                // visibility range (~40-80y for nameplate/focus refresh).
+                // The leader's bits.Focus_Combat / bits.FocusTarget /
+                // bits.FocusTarget_Combat may stick at stale values once
+                // out-of-range. Without a polled fallback, the leader-side
+                // Fix AP gate (just above this Fix EX disjunct — three
+                // conjuncts of bits.Focus_*) is at the mercy of those
+                // stale reads.
+                //
+                // Polled disjunct: AssistState.InCombat is authoritative —
+                // it's set by the assist's PartyStatePublisher from its
+                // own bits.Combat() and POSTed to the leader every
+                // AssistPostIntervalMs (~500ms). AssistStateStore.IsStale
+                // (3000ms threshold by default) ensures we only trust fresh
+                // polled state. AnyAssistInCombatWithTarget combines the
+                // fresh-non-stale check with InCombat && TargetGuid != 0.
+                //
+                // TargetGuid != 0 conjunct (symmetric to Fix EX): mitigates
+                // ghost-combat — if the assist's bits.Combat=true with no
+                // mob targeted, this disjunct doesn't fire and the
+                // leader's CombatGoal (which would try to swap via focus
+                // chain on Case 2) doesn't press buttons against nothing.
+                //
+                // Mode gate (PartyLeader only): for AssistFocus the leader
+                // doesn't run AssistStateStore (it's the assist who polls
+                // the leader, not the other way around) — calling
+                // AnyAssistInCombatWithTarget on the assist would always
+                // return false. The Mode check makes the disjunct collapse
+                // to false in AssistFocus / Grind modes.
+                //
+                // Why no IsIgnored check here (same rationale as Fix AP /
+                // Fix EX above): partymembercombat is a generic engagement
+                // signal; IsIgnored / blacklist semantics are composed
+                // downstream via GoapKey.allPartyTargetsIsIgnored.
+                || (classConfig.Mode == Mode.PartyLeader
+                    && assistStateStore.AnyAssistInCombatWithTarget());
     }
 
     public bool PartyLeaderInCombat()
