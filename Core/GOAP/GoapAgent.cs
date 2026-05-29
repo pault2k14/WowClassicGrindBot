@@ -1845,7 +1845,113 @@ public sealed partial class GoapAgent : IDisposable
                 // the planner level — even if this branch returns true.
                 // The two preconditions compose correctly without
                 // duplicating the IsIgnored check here.
-                || (bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Combat());
+                || (bits.Focus_Combat() && bits.FocusTarget() && bits.FocusTarget_Combat())
+                // ── Fix EX (run-150 evidence) ──
+                //
+                // Leader's first combat 02:13:48:836 → 02:14:14:302 (leader
+                // clock = 02:13:16:787 → 02:13:42:253 assist clock; 32.049s
+                // clock skew confirmed by aligning leader's CombatTracker
+                // Entered Combat with assist's first 'Leader status: Combat'
+                // poll). Window length ~25.5s. Operator: "the assist does
+                // not help the leader with the mob at all."
+                //
+                // Trace: throughout the entire 25.5s window the assist stayed
+                // in FollowFocusGoal PositionChase mode (FFG CJ logs firing
+                // every ~500ms with HasApproachStart=True, dist ~6.0-7.0y).
+                // GoapAgent never selected Combat / ATG / PTG. No AH/AJ/AN/AP
+                // focus-chain FIX-FIRE log fired in the entire run. The
+                // assist's LeaderStatePoller saw 'Leader status: Combat' at
+                // 02:13:16:787 (within 0.05s of the leader's CombatTracker
+                // Entered Combat at 02:13:48:836 leader clock) — so polled
+                // LastLeaderState.InCombat was reliably true the whole time.
+                //
+                // The three existing disjuncts above each evaluated false:
+                //   - playerCombat=false, dmgTaken=false (assist was not
+                //     attacked during the leader's fight; mob 1663829 was
+                //     locked on the leader the whole time)
+                //   - hasTarget=false (assist had no own target — confirmed
+                //     by the 2nd-combat Combat plan firing with
+                //     TARGET-GUID=0 at 02:13:52:184, which is the
+                //     CombatGoal Case 2 swap entry point and only fires
+                //     when the assist's bot-side target slot is empty)
+                //   - Therefore disjunct 1 (needs dmgTaken) and disjunct 2
+                //     (needs hasTarget) were both false; only disjunct 3
+                //     (Fix AP) could fire. Fix AP requires
+                //     bits.Focus_Combat() AND bits.FocusTarget() AND
+                //     bits.FocusTarget_Combat() — and at least one of these
+                //     was apparently false on the addon side for the entire
+                //     25.5s window.
+                //
+                // Result: partymembercombat=false → CombatGoal precondition
+                // (CombatGoal.cs:112) fails → CombatGoal never selected →
+                // CombatGoal's Case 2 PressTargetFocus + PressTargetOfTarget
+                // swap (CombatGoal.cs:737-745) never runs to acquire the
+                // leader's target. The assist sat in FFG for the whole
+                // first combat.
+                //
+                // Note that the 2nd-combat path PROVES the focus IS set on
+                // the assist's WoW client: at 02:13:52:332 (assist clock,
+                // during leader's 2nd combat with target 1664042) the
+                // CombatGoal Case 2 PressTargetFocus (PageUp) + 
+                // PressTargetOfTarget (F) at 02:13:52:410 successfully
+                // acquired GUID=1664042. Yet Fix AP did not fire during
+                // the 1st combat — strongly suggesting transient addon
+                // unreliability of bits.Focus_Combat / bits.FocusTarget /
+                // bits.FocusTarget_Combat during the first-combat window.
+                //
+                // Direct precedent: Fix CL at GoapAgent.cs:1701-1704
+                // already does this for the partyEngaging key (the
+                // ATG.AssistFocus precondition) for the same failure mode:
+                //
+                //     WorldState[GoapKey.partyEngaging] =
+                //         PartyInCombat() ||
+                //         (classConfig.Mode == Mode.AssistFocus &&
+                //          leaderConnection.LastLeaderState?.HasApproachStart == true);
+                //
+                // partymembercombat (the CombatGoal precondition) needs
+                // the symmetric polled-state fallback. Adding it here lets
+                // the planner select CombatGoal once the leader's polled
+                // InCombat goes true; CombatGoal's own Case 2 swap then
+                // acquires the target via PressTargetFocus +
+                // PressTargetOfTarget. No new acquisition logic needed —
+                // we only need to UNBLOCK the existing Case 2 path.
+                //
+                // Why InCombat and not Status==BotStatus.Combat: InCombat
+                // is the raw signal (= leader's bits.Combat()) published
+                // verbatim from LeaderStateService.cs:280
+                // (`InCombat = bits.Combat()`). Status is the derived enum
+                // from DetermineStatus() which maps Combat first then
+                // falls through to goal-name. While Status=Combat IS
+                // triggered by bits.Combat() at LeaderStateService.cs:319-320,
+                // InCombat is the more direct semantic match for "is the
+                // leader currently in combat with a mob" — the exact
+                // question PartyMemberInCombat answers for the partner.
+                //
+                // TargetGuid != 0 conjunct: mitigates ghost-combat (leader's
+                // bits.Combat=true with no real mob targeted) — without
+                // this, the assist's CombatGoal would fire on ghost combat,
+                // Case 2 swap would acquire nothing (focus's target is 0),
+                // and the assist would briefly press buttons against no
+                // target. With this gate, the assist only joins when the
+                // leader actually has a target to engage.
+                //
+                // Mode gate (AssistFocus only): for PartyLeader and Grind
+                // modes the leader doesn't poll itself — LastLeaderState
+                // is null — so this disjunct collapses to false (null-safe
+                // ?.InCombat returns false on null) and behavior is unchanged.
+                //
+                // Why no IsIgnored check here (same rationale as Fix AP
+                // above): partymembercombat is a generic engagement signal;
+                // IsIgnored / blacklist semantics are gated by
+                // GoapKey.allPartyTargetsIsIgnored (the CombatGoal
+                // precondition just below partymembercombat). If the
+                // leader's target is on IsIgnored, allPartyTargetsIsIgnored
+                // resolves true and CombatGoal stays blocked even when this
+                // branch returns true. The two preconditions compose
+                // without duplicating the IsIgnored check here.
+                || (classConfig.Mode == Mode.AssistFocus
+                    && leaderConnection.LastLeaderState?.InCombat == true
+                    && leaderConnection.LastLeaderState?.TargetGuid != 0);
     }
 
     public bool PartyLeaderInCombat()
