@@ -1423,6 +1423,67 @@ public sealed partial class GoapAgent : IDisposable
         bool targetInRect = !targetInMelee && navigation.IsTargetLikelyInBlacklistRect();
         bool engageAllowed = declaredStuck
                           || (!botInsideBlacklistArea && !targetInRect);
+        // ── Fix EZ (run-151 evidence) — engageAllowedForJoin ──
+        //
+        // `engageAllowed` above conflates two distinct gates:
+        //   (a) "is this bot geographically safe to engage" (botInsideBlacklistArea,
+        //       declaredStuck)
+        //   (b) "is the bot's OWN current target reachable"  (targetInRect via
+        //       playerReader.MaxRange / TargetMapPos)
+        // For SELF-DEFENSE (Fix 17/26 at line ~1432) the bot already has a target
+        // and (b) is meaningful: we only engage an IsIgnored attacker if the attacker
+        // is itself reachable. For Fix L (party-assist override at line ~1509) the
+        // bot has NOT yet acquired a target — the CombatGoal Case 2 swap will do that
+        // post-flip via PressTargetFocus + PressTargetOfTarget. With no own target,
+        // (b)'s IsTargetLikelyInBlacklistRect returns degenerate-true via the P3
+        // branch (Navigation.cs:5905, "maxRange=0, no estimate") and the conflated
+        // engageAllowed evaluates false — blocking Fix L incorrectly.
+        //
+        // Run-151 evidence: leader 03:12:18:437 NO PLAN dump (~3s after the shared
+        // kill on 1666423, while the assist was fighting 1666385 alone outside the
+        // rect):
+        //     hastarget: False              (CombatGoal cleared after kill at
+        //                                    03:12:15:294 via PressInsert)
+        //     focushastarget: True          ← bits CAN see assist has a target
+        //     focuscombat: True             ← bits CAN see assist is in combat
+        //     focusTargetIsIgnored: True    (= 1666385, blacklisted at 03:11:53:698)
+        //     inblacklistarea: False        ← leader is geographically clear
+        //     allPartyTargetsIsIgnored: True   ← BLOCKER
+        // Every P3 line in the surrounding window confirms maxRange=0 → degenerate
+        // → targetInRect=true → engageAllowed=false. Fix L's `engageAllowed` conjunct
+        // failed. Result: leader sat NO PLAN from 03:12:18:437 to 03:12:34:909
+        // (16.5s) while the assist fought 1666385 alone. Operator: "the leader did
+        // not help the assist kill the mob that was attacking it."
+        //
+        // The Position rule comment at line ~1502-1508 already states the intent:
+        // "a bot may JOIN the partner's fight only when it is itself allowed to
+        // engage — OUTSIDE every static rect, OR inside one but DECLARED STUCK".
+        // That is (a) only. engageAllowedForJoin encodes exactly this — declaredStuck
+        // OR !botInsideBlacklistArea, no target-position component.
+        //
+        // Safety considerations:
+        //   - If the leader is inside the rect and not stuck, engageAllowedForJoin
+        //     is false (same as old engageAllowed in that case) → Fix L still
+        //     blocked, retreat continues. The fix only changes behavior for the
+        //     specific case "leader is geographically OUT of the rect with no own
+        //     target".
+        //   - The per-tick re-evaluation of Fix L (the override flip happens every
+        //     tick conditions hold, not latched permanently) provides the natural
+        //     safety: if the leader chases the focus's target back INTO the rect
+        //     during combat, botInsideBlacklistArea flips true on the next tick,
+        //     engageAllowedForJoin flips false, Fix L stops flipping, the planner
+        //     reverts allPartyTargetsIsIgnored to true, Combat plan exits, retreat
+        //     resumes. The escape-first semantics are preserved.
+        //   - The focus's target reachability is decided downstream: CombatGoal's
+        //     Case 2 swap acquires the partner's target into the bot's own target
+        //     slot, and the next-tick self-defense override (line ~1432) evaluates
+        //     the regular engageAllowed (with targetInRect now meaningful, since
+        //     the bot HAS a target). If the acquired target is in the rect, the
+        //     existing self-defense gate suppresses; if not, the leader engages.
+        //   - Mode-irrelevant: behaves identically across PartyLeader / AssistFocus
+        //     / Grind. Standalone Grind doesn't reach Fix L (gated by isPartyModeForFixL
+        //     at line ~1500), so this variable is unused in Grind regardless.
+        bool engageAllowedForJoin = declaredStuck || !botInsideBlacklistArea;
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
@@ -1511,7 +1572,7 @@ public sealed partial class GoapAgent : IDisposable
             b.FocusTarget() &&
             b.FocusTarget_Combat() &&
             playerReader.FocusTargetGuid != 0 &&
-            engageAllowed &&
+            engageAllowedForJoin &&
             !evadeRecoveryActive)
         {
             focusTargetIgnored = false;

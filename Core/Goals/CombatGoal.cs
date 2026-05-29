@@ -489,6 +489,43 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             || navigation.IsApproachEscapeExhausted
             || (!navigation.IsInBlacklistArea()
                 && (combatTargetInMelee || !navigation.IsTargetLikelyInBlacklistRect()));
+        // ── Fix EZ (run-151 evidence) — engageAllowedForJoin (lockstep with
+        // GoapAgent.cs around line 1424-1480) ──
+        //
+        // `engageAllowed` above couples two gates:
+        //   (a) bot's geographic safety (IsInBlacklistArea, declaredStuck)
+        //   (b) the bot's OWN current target being reachable (combatTargetInMelee
+        //       || !IsTargetLikelyInBlacklistRect)
+        // Self-defense (Fix 17 at line ~492) genuinely needs both — the bot already
+        // holds a target. But the Fix L party-assist mirror (line ~651) runs BEFORE
+        // Case 2 has acquired a target from the focus chain: the bot may have no own
+        // target, in which case MaxRange()=0 → IsTargetLikelyInBlacklistRect()
+        // returns degenerate-true (Navigation.cs P3 branch) → engageAllowed=false →
+        // mirror doesn't fire → Case 3 (line ~715) bails with both ignored → Combat
+        // plan exits → back to NO PLAN. The leader sits while the assist fights the
+        // partner-side IsIgnored mob alone — exactly the run-151 failure.
+        //
+        // The Position rule comment at line ~646-650 already states the correct
+        // intent: "join the partner's fight only when this bot may itself engage —
+        // outside the rect, or inside but declared stuck". That is (a) only.
+        // engageAllowedForJoin encodes exactly this: no target-position component.
+        //
+        // After Fix L's mirror flips focusTargetIsIgnored=false (and currentTarget
+        // IsIgnored=false when thisBotTargetMatchesFocus), CombatGoal's Case 2 swap
+        // at line ~729 still depends on currentTargetIsIgnored=true to fire on the
+        // first tick (when this bot has no own target yet), so the FIRST tick after
+        // CombatGoal selection sees: currentTargetIsIgnored=true (no own target),
+        // focusTargetIsIgnored=false (after mirror flip), thisBotTargetMatchesFocus
+        // =false (no own target). Case 2's `currentTargetIsIgnored && isPartyMode
+        // && !focusTargetIsIgnored` evaluates true → swap fires → PressTargetFocus
+        // + PressTargetOfTarget acquires the focus's target (the partner's IsIgnored
+        // mob). On the next tick the bot now owns the target; the regular
+        // engageAllowed (with targetInRect computed against the now-acquired target's
+        // bracket) gates self-defense as designed.
+        bool engageAllowedForJoin =
+            navigation.IsApproachEscapePhysicallyStuck
+            || navigation.IsApproachEscapeExhausted
+            || !navigation.IsInBlacklistArea();
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
@@ -653,7 +690,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             bits.FocusTarget() &&
             bits.FocusTarget_Combat() &&
             playerReader.FocusTargetGuid != 0 &&
-            engageAllowed &&
+            engageAllowedForJoin &&
             !assistStatusProvider.EvadeRecoveryActive)
         {
             bool thisBotTargetMatchesFocus =
