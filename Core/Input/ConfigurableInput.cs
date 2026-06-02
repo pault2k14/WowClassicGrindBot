@@ -192,13 +192,6 @@ public sealed partial class ConfigurableInput
     public void PressLeaderReplyPosition(CancellationToken token = default)
         => PressRandom(LeaderReplyPosition, token);
 
-    /// <summary>
-    /// Leader presses N2 macro → party chat "blacklist target: {guid}".
-    /// ChatReader on the assist parses this and FollowFocusGoal ignores + clears the target.
-    /// </summary>
-    public void PressLeaderBlacklistTarget(CancellationToken token = default)
-        => PressRandom(LeaderBlacklistTarget, token);
-
     public void PressEnableSoftInteract(CancellationToken token = default) => PressRandom(EnableSoftInteract, token);
 
     public void PressDisableSoftInteract(CancellationToken token = default) => PressRandom(DisableSoftInteract, token);

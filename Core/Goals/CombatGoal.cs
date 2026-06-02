@@ -798,42 +798,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
-        {
-            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
-            chatReader.LeaderBlacklistTarget = false;
-            chatReader.LeaderBlacklistTargetId = 0;
-
-            if (blacklistGuid != 0)
-            {
-                logger.LogInformation($"[CombatGoal] Leader blacklisted guid={blacklistGuid} while in combat — ignoring and exiting.");
-                playerReader.IgnoreTarget(blacklistGuid);
-            }
-
-            input.PressStopAttack();
-            wait.Update();
-            input.PressClearTarget();
-            wait.Update();
-            stopMoving.Stop();
-
-            SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid, EvadeReason.Propagation));
-
-            // assistStatusProvider.CantFollow keeps assistshouldfollow=true so
-            // FollowFocusGoal is immediately selectable during evade recovery.
-            //
-            // Fix 28: removed the legacy input.PressAssistCantFollow() call
-            // that used to follow this assignment. See the explanatory block
-            // in the Fix 23 first-activation branch above (~ line 350) for
-            // the full rationale; in short, the chat-macro path is dead code
-            // because the leader reads from AssistStateStore (API) and not
-            // from ChatReader.AssistRequestReturn. The CantFollow=true line
-            // alone is the canonical signal — assistshouldfollow flips to
-            // true via GoapAgent line 976, and the next 500 ms publisher
-            // tick propagates the CantFollow state to the leader's store.
-            assistStatusProvider.CantFollow = true;
-            return;
-        }
-
         if (classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
         {
             bool noHostileTarget = !bits.Target_Hostile() && !bits.FocusTarget_Hostile();

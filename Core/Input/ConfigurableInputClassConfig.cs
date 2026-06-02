@@ -43,12 +43,5 @@ public sealed partial class ConfigurableInput
     /// <summary>Leader presses N9 to reply with their current map position.</summary>
     public KeyAction LeaderReplyPosition => classConfig.LeaderReplyPosition;
 
-    /// <summary>
-    /// Leader presses N2 to broadcast "blacklist target: {guid}" to party chat.
-    /// The in-game macro sends the current target's numeric GUID so the assist
-    /// can also ignore the evading mob, stop attacking, and clear target.
-    /// </summary>
-    public KeyAction LeaderBlacklistTarget => classConfig.LeaderBlacklistTarget;
-
     public KeyAction Mount => classConfig.Mount;
 }

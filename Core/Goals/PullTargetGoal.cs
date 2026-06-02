@@ -264,46 +264,6 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
-        {
-            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
-            chatReader.LeaderBlacklistTarget = false;
-            chatReader.LeaderBlacklistTargetId = 0;
-
-            if (blacklistGuid != 0)
-            {
-                logger.LogInformation($"[PullTargetGoal] Leader blacklisted guid={blacklistGuid} while pulling — ignoring and exiting.");
-                playerReader.IgnoreTarget(blacklistGuid);
-            }
-
-            input.PressStopAttack();
-            wait.Update();
-            input.PressClearTarget();
-            wait.Update();
-            stopMoving.Stop();
-
-            if (blacklistGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid, EvadeReason.Propagation));
-
-            if (!bits.AutoFollow())
-            {
-                // assistStatusProvider.CantFollow keeps assistshouldfollow=true so
-                // FollowFocusGoal stays selectable throughout evade recovery.
-                //
-                // Fix 28: removed the legacy input.PressAssistCantFollow()
-                // call. See CombatGoal.cs Fix 23 first-activation branch
-                // (~ line 350) for full rationale. The chat-macro signal is
-                // dead code on the leader side (GoapAgent reads from
-                // AssistStateStore.AnyAssistCantFollow(), not from
-                // chatReader.AssistRequestReturn). The keypress generated
-                // visible in-game chat noise and a ~1.7 s typing delay
-                // while delivering zero state that the API path doesn't
-                // already deliver in 500 ms.
-                assistStatusProvider.CantFollow = true;
-            }
-            return;
-        }
-
         if (!navigation.IsApproachEscapeActive &&
             bits.Target() && !bits.Combat() &&
             (navigation.IsApproachEscapeExhausted ||

@@ -611,7 +611,33 @@ public sealed partial class GoapAgent : IDisposable
 
                             playerReader.IgnoreTarget(guid, inRect);
                             HandleGoapEvent(new EvadeBlacklistEvent(guid, EvadeReason.Propagation, inRect));
-                            assistStatusProvider.CantFollow = true;
+
+                            // ── Category-B cleanup (post-run-154 audit) ──
+                            //
+                            // The former Fix FD `assistStatusProvider.CantFollow = true`
+                            // assignment was removed here. The flag's downstream effect —
+                            // keeping FFG selectable across propagation events — is now
+                            // carried correctly by `assistshouldfollow`'s existing
+                            // branches: branch 3 (steady state) when not in combat, and
+                            // branch 4 (`targetIgnored && focusTargetIgnored`) when the
+                            // propagation handler has cleared the assist's target and the
+                            // leader's focus target is the same propagated mob.
+                            //
+                            // For scenarios where the assist is in combat with an unrelated
+                            // mob when propagation arrives, CombatGoal continues to be
+                            // selectable via partymembercombat / focus-chain target
+                            // acquisition; FFG selectability is not the right goal anyway.
+                            //
+                            // CantFollow now fires only for its semantically correct
+                            // cases: physical navigation exhaustion (FollowFocusGoal
+                            // .cs:6621 EnterCantFollow) and the Fix 23 self-defense
+                            // beacon (CombatGoal.cs:595, intended as "leader come help").
+                            //
+                            // The AssistRequestReturn() call below remains unconditional
+                            // — that's the actual fix for the run-145 corpse-handling
+                            // deadlock, by clearing State.ShouldConsumeCorpse so FFG's
+                            // consumecorpse=false precondition holds. The former
+                            // CantFollow=true was incidental to that fix.
 
                             // Fix (run-145 11:27:26:147 NO PLAN on assist): the
                             // comment above at lines 536-538 claims that setting

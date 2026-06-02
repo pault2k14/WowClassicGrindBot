@@ -1687,6 +1687,79 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     continue;
                 }
 
+                // ── Edit 1: pre-engagement geometric in-rect filter ──
+                //
+                // Tab finder acquired a mob whose position is inside a static
+                // route blacklist rect. Per operator principle (see commit
+                // history): we never engage mobs in blacklist areas via the
+                // finder, and we should not blacklist mobs we haven't actively
+                // engaged. So: cycle Tab a few times to try other nearby
+                // hostiles, and only if all the local hostiles are in-rect do
+                // we fall back to briefly suppressing the finder so the patrol
+                // can advance past the cluster.
+                //
+                // Crucially: no IsIgnored mutation, no SendGoapEvent — the
+                // mob never enters either bot's blacklist list. If/when it
+                // walks out into open terrain and attacks us, regular Combat
+                // engages it; if we're attacking it in the rect later (e.g.,
+                // self-defense while declaredStuck), the engageAllowedForJoin
+                // gate at the combat-side decision points handles it.
+                //
+                // Distinct from the Fix(run-143) block below: that one is the
+                // backstop for mobs that did get IsNoEngage-flagged via some
+                // other path. With Edit 1 catching first-encounter via the
+                // geometric check, the IsNoEngage flag should almost never be
+                // set anymore — but the block stays as defense-in-depth.
+                if (bits.Target() && navigation.IsTargetLikelyInBlacklistRect())
+                {
+                    const int MaxRectCycleAttempts = 3;
+                    int cycleAttempts = 0;
+                    while (bits.Target()
+                        && navigation.IsTargetLikelyInBlacklistRect()
+                        && cycleAttempts < MaxRectCycleAttempts
+                        && !sideActivityCts.IsCancellationRequested)
+                    {
+                        cycleAttempts++;
+                        logger.LogInformation(
+                            $"[FRG] Tab acquired in-rect mob guid={playerReader.TargetGuid} " +
+                            $"(cycle {cycleAttempts}/{MaxRectCycleAttempts}) — pressing " +
+                            "Tab to cycle to next target.");
+
+                        while (input.TargetNearestTarget.OnCooldown()
+                            && !sideActivityCts.IsCancellationRequested)
+                            wait.Update();
+
+                        int beforeTabGuid = playerReader.TargetGuid;
+                        input.PressNearestTarget(sideActivityCts.Token);
+
+                        // Throttle: wait up to 300 ms for the addon to reflect
+                        // the target change. Matches the 200 ms throttle inside
+                        // TargetFinder.LookForTarget — Tab press → game state
+                        // update → addon read → AddonBits/PlayerReader refresh
+                        // is not guaranteed within a single wait.Update() tick.
+                        wait.Till(300, () =>
+                            playerReader.TargetGuid != beforeTabGuid
+                            || sideActivityCts.IsCancellationRequested);
+                    }
+
+                    if (bits.Target() && navigation.IsTargetLikelyInBlacklistRect())
+                    {
+                        Log($"[FRG] {MaxRectCycleAttempts} cycle attempts all " +
+                            "in-rect — clearing target and suppressing finder " +
+                            $"{FrgNoEngageSearchSuppressMs}ms so patrol can advance " +
+                            "past the cluster (not blacklisting — we never engaged).");
+                        input.PressClearTarget();
+                        wait.Update();
+                        targetFinder.Reset();
+                        SuppressTargetFinderBriefly(FrgNoEngageSearchSuppressMs);
+                        sideActivityManualReset.Reset();
+                        wait.Update();
+                        continue;
+                    }
+                    // Cycle landed on a non-rect target — fall through to the
+                    // existing actionable / IsNoEngage / etc. branches below.
+                }
+
                 // Fix (run-143): NO-ENGAGE mob re-acquired while patrolling.
                 // A no-engage mob lives in a route blacklist rect; self-defense
                 // is intentionally suppressed for it (the !IsNoEngage gate in

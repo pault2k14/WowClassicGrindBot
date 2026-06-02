@@ -272,11 +272,42 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if (playerReader.TargetGuid != 0 && navigation.IsTargetLikelyInBlacklistRect())
         {
             logger.LogInformation(
-                $"[ATG] E5 approach gate: target guid={playerReader.TargetGuid} is inside a " +
-                $"blacklist rect — blacklisting (in-rect) instead of approaching.");
-            if (classConfig.Mode == Mode.PartyLeader)
-                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, true));
-            playerReader.IgnoreTarget(playerReader.TargetGuid, true);
+                $"[ATG] E5 approach gate: target guid={playerReader.TargetGuid} is " +
+                $"inside a blacklist rect — clearing without blacklisting (we never " +
+                $"engaged this mob).");
+
+            // ── Edit 2 (replaces former E5 blacklist behavior) ──
+            //
+            // Per operator principle: only mobs we have actively engaged go onto
+            // the IsIgnored map. ATG.OnEnter is pre-engagement — we just acquired
+            // the target via Tab (or focus chain, or SoftInteract) but have not
+            // attacked. So: clear the target, don't mutate IsIgnored, don't
+            // SendGoapEvent. The bot's plan re-evaluates and either picks
+            // another mob (finder runs again) or resumes patrol.
+            //
+            // Edit 1 (FollowRouteGoal.cs side-thread filter) catches the same
+            // case at the finder layer before ATG.OnEnter ever runs. This E5
+            // gate stays as the safety net for paths that bypass the FRG
+            // finder: focus chain (assist following leader's target), SoftInteract
+            // (game auto-targets on proximity), plan-transition flicker.
+            input.PressClearTarget();
+            wait.Update();
+
+            // ── Fix FC (run-154 20:55:16:793 false StuckRect in open terrain) ──
+            //
+            // Reset approach timers BEFORE returning so the next ATG.Update
+            // tick doesn't false-stuck against a stale approachStart from a
+            // previous ATG run. Even with Edit 2's PressClearTarget(),
+            // ATG.Update can run once or twice before the planner switches
+            // goals; without resetting these timers, NonCombatApproach would
+            // see ApproachDurationMs against an approachStart from minutes
+            // ago and fire "Seems stuck! Attempting pather escape." in open
+            // terrain. The original normal-path setup at lines ~289-290 below
+            // is the only other place these get reset, and we skip past it on
+            // this early return.
+            approachStart = GetTimestamp();
+            nextStuckCheckTime = MIN_TIME_TILL_IDLE;
+
             return;
         }
 
@@ -445,49 +476,6 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (classConfig.Mode == Mode.AssistFocus && chatReader.LeaderBlacklistTarget)
-        {
-            int blacklistGuid = chatReader.LeaderBlacklistTargetId;
-            chatReader.LeaderBlacklistTarget = false;
-            chatReader.LeaderBlacklistTargetId = 0;
-
-            if (blacklistGuid != 0)
-            {
-                logger.LogInformation($"[ApproachTargetGoal] Leader blacklisted guid={blacklistGuid} while approaching — ignoring and exiting.");
-                playerReader.IgnoreTarget(blacklistGuid);
-            }
-
-            input.PressStopAttack();
-            wait.Update();
-            input.PressClearTarget();
-            wait.Update();
-            input.StopForward(false);
-
-            if (blacklistGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(blacklistGuid, EvadeReason.Propagation));
-
-            if (!bits.AutoFollow())
-            {
-                // assistStatusProvider.CantFollow keeps assistshouldfollow=true in GoapAgent
-                // so FollowFocusGoal is immediately selectable throughout evade recovery,
-                // even when dmgTaken/dmgDone flags would otherwise block it.
-                //
-                // Fix 28: removed the legacy input.PressAssistCantFollow()
-                // call that used to follow this assignment. See the
-                // explanatory block in CombatGoal.cs Fix 23 first-activation
-                // branch (~ line 350) for the full rationale. Summary: the
-                // chat-macro signal ("i tried following…") is dead code on
-                // the leader side — GoapAgent.cs line 924-926 reads
-                // exclusively from AssistStateStore.AnyAssistCantFollow()
-                // (API path), and chatReader.AssistRequestReturn is no longer
-                // read in Core/. The keypress wasted a NumPad5 binding,
-                // generated visible in-game chat noise, and introduced a
-                // ~1.7 s typing delay vs the 500 ms API publisher.
-                assistStatusProvider.CantFollow = true;
-            }
-            return;
-        }
-
         if (!navigation.IsApproachEscapeActive &&
             (navigation.IsApproachEscapeExhausted ||
              (!navigation.IsApproachEscapeEscalating && navigation.IsInBlacklistArea())))
@@ -495,11 +483,14 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             string bail1Reason = navigation.IsApproachEscapeExhausted
                 ? $"all escape levels exhausted (10y/20y/30y failed)"
                 : $"player inside blacklist area";
-            logger.LogWarning($"[ATG] Bail-out: blacklisting target guid={playerReader.TargetGuid} — reason: {bail1Reason}.");
-            bool inRect = navigation.IsTargetLikelyInBlacklistRect();
-            if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
-            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
+            // Edit 3: pre-engagement bail-out (escape-exhausted or wandered
+            // into rect mid-approach) — clear target without blacklisting.
+            // We never landed an attack on this mob; per operator principle,
+            // do not mutate IsIgnored, do not SendGoapEvent. Plan re-evaluates
+            // and the bot patrols normally; the in-rect detection in Edit 1
+            // (FRG finder geometric check) will keep the finder from re-
+            // acquiring the same mob from the rect on its next cycle.
+            logger.LogWarning($"[ATG] Bail-out: clearing target guid={playerReader.TargetGuid} — reason: {bail1Reason}.");
             input.PressStopAttack();
             input.PressClearTarget();
             wait.Update();
@@ -522,17 +513,12 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
         if(!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && !bits.Combat() && bits.Target() && (targetInBlacklist || navigation.IsInBlacklistArea()))
         {
-            logger.LogWarning($"[ATG] Bail-out: blacklisting target guid={playerReader.TargetGuid} — " +
+            logger.LogWarning($"[ATG] Bail-out: clearing target guid={playerReader.TargetGuid} — " +
                 $"reason: {(targetInBlacklist ? "target in blacklist" : "player inside blacklist area")} " +
                 $"[exhausted={navigation.IsApproachEscapeExhausted} escalating={navigation.IsApproachEscapeEscalating} yards={navigation.ApproachEscapeCurrentYards:0}].");
 
-            if (navigation.IsInBlacklistArea())
-            {
-                bool inRect = navigation.IsTargetLikelyInBlacklistRect();
-                if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                    SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
-                playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
-            }
+            // Edit 3: pre-engagement bail-out — clear target without
+            // blacklisting (we never engaged this mob).
 
             input.PressStopAttack();
             input.PressClearTarget();
@@ -792,13 +778,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 if (!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && !bits.Combat() && (targetInBlacklist || navigation.IsInBlacklistArea()))
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
-                    if (navigation.IsInBlacklistArea())
-                    {
-                        bool inRect = navigation.IsTargetLikelyInBlacklistRect();
-                        if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
-                        playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
-                    }
+                    // Edit 3: pre-engagement bail-out — clear target without
+                    // blacklisting (we never engaged). Note the !bits.Combat()
+                    // guard above: we are explicitly not engaged here.
 
                     input.PressStopAttack();
                     input.PressClearTarget();
@@ -946,13 +928,9 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
                 if (!navigation.IsApproachEscapeActive && !navigation.IsApproachEscapeEscalating && (targetBlacklist.Is() || navigation.IsInBlacklistArea()))
                 {
                     logger.LogWarning($"Losing the target due blacklist!");
-                    if (navigation.IsInBlacklistArea())
-                    {
-                        bool inRect = navigation.IsTargetLikelyInBlacklistRect();
-                        if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
-                        playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
-                    }
+                    // Edit 3: pre-engagement bail-out (target swapped mid-
+                    // approach to a blacklisted one OR bot wandered into a
+                    // rect) — clear target without blacklisting.
 
                     input.PressStopAttack();
                     input.PressClearTarget();
