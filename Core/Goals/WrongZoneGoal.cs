@@ -97,6 +97,33 @@ public sealed class WrongZoneGoal : GoapGoal
         LastActive = DateTime.UtcNow;
     }
 
+    // ── Fix CA (audit finding from run-155 follow-up) ──
+    //
+    // WrongZoneGoal.Update calls `input.StartForward(true)` unconditionally
+    // at line ~54 and conditionally at line ~72. Without this override the
+    // class inherits the empty `GoapGoal.OnExit() { }`. When CanRun() returns
+    // false (bot has left the configured wrong zone), GoapAgent fires the
+    // empty default OnExit and the Forward key stays held until something
+    // else releases it.
+    //
+    // Fix BR's defensive release in Navigation.Stop() does NOT cover this
+    // path because WrongZoneGoal doesn't use Navigation — it drives stuck
+    // detection through stuckDetector.SetTargetLocation directly. So no
+    // Stop() ever fires, and Forward leaks past the goal boundary.
+    //
+    // Result before this fix: bot exits wrong zone but keeps running in
+    // its last facing direction until the next goal's Navigation eventually
+    // calls Stop(), or until shutdown. Same bug class as run-155 forward-key
+    // runaway, just triggered by a different upstream goal.
+    //
+    // Idempotency: input.StopForward only sends the release if the key is
+    // currently down (ConfigurableInput.cs:50 IsKeyDown guard), so OnExit
+    // calls on cycles where Forward wasn't pressed are no-ops.
+    public override void OnExit()
+    {
+        input.StopForward(false);
+    }
+
     private bool HasBeenActiveRecently()
     {
         return (DateTime.UtcNow - LastActive).TotalMilliseconds < 2000;

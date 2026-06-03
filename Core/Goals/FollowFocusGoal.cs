@@ -1650,7 +1650,30 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     {
         navigation.ResetApproachEscape();
         ResetSetWaypointLoopGuardState();
-        input.StepBackwards();
+
+        // ── Fix CB (audit finding from run-155 follow-up) ──
+        //
+        // Replaces a prior `input.StepBackwards()` call (100ms backward TAP
+        // then release of Backward). StepBackwards was a leftover from the
+        // auto-follow era when WoW's /follow was used to drive the assist;
+        // backing out of melee on goal exit was the only way to reliably
+        // stop forward momentum because nothing was holding the Forward key
+        // — the WoW client was. Now that the bot drives Forward directly
+        // via Navigation.Update (line ~1859), the correct stop is to release
+        // the key.
+        //
+        // FFG's various in-Update paths usually call navigation.Stop() before
+        // a plan transition (e.g., line ~1578 "Reached follow position",
+        // line ~3440 CantFollow escape Exhausted). With Fix BR, Stop()
+        // defensively releases Forward, so those paths are covered. The
+        // gap this OnExit closes is the case where the planner pre-empts
+        // FFG mid-Update (Combat/Adhoc/ForcedFollow take priority) — then
+        // GoapAgent calls FFG.OnExit() with Navigation still active and
+        // Forward still held. No prior Stop() in that flow.
+        //
+        // Idempotency: StopForward(false) is a no-op when Forward isn't
+        // down (IsKeyDown guard inside ConfigurableInput).
+        input.StopForward(false);
         wait.Update();
 
         // ── Route-walking migration: Turn 2 ──

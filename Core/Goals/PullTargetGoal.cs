@@ -208,10 +208,26 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             npcNameTargeting.ChangeNpcType(NpcNames.None);
         }
 
-        if(bits.Target() && bits.Target_Alive() && bits.Combat())
-        {
-            input.StopForward(false);
-        }
+        // ── Fix CD (audit finding from run-155 follow-up) ──
+        //
+        // Was conditional: `if(bits.Target() && bits.Target_Alive() &&
+        // bits.Combat()) input.StopForward(false)`. That only covered the
+        // intended "pull succeeded, in combat" case. Other PTG exits left
+        // Forward held:
+        //   - Target died before pull completed (assist/leader finished
+        //     the kill while PTG was still in the wind-up).
+        //   - Target lost (out of LOS, despawned, distance).
+        //   - Plan transition (Combat goal preempts before PTG's expected
+        //     handoff path).
+        //
+        // PTG can hold Forward via ReactCastError.cs:159 (StartForward when
+        // target is outside pull range and ERR_BADATTACKFACING fires).
+        // None of those failure paths pair with a Stop().
+        //
+        // Unconditional release closes all of them. IsKeyDown guard inside
+        // ConfigurableInput.StopForward makes it a no-op when Forward isn't
+        // down, so the intended "pull succeeded" path costs nothing extra.
+        input.StopForward(false);
     }
 
     public void OnGoapEvent(GoapEventArgs e)

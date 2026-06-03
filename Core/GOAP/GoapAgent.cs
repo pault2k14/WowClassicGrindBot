@@ -64,6 +64,77 @@ public sealed partial class GoapAgent : IDisposable
 
     private bool _evadeLeaderWaiting;
 
+    // ── Fix BS (run-156 22:45:21→22:47:18 ghost-combat deadlock) ──
+    //
+    // Ghost combat detection moved from CombatGoal.Update to here. The
+    // detector previously lived inside CombatGoal at line ~800-851, gated on
+    // CombatGoal being the selected plan. CombatGoal's PartyLeader/AssistFocus
+    // preconditions require `allPartyTargetsIsIgnored=false` (line 119/127),
+    // which fails in the exact scenario this detector is meant to catch: in
+    // combat, both target slots empty/IsIgnored. Result before this fix: the
+    // detector couldn't run during the state it was designed to detect, the
+    // recovery (`EvadeBlacklistEvent(0, GhostCombat)` → `_evadeRecoveryUntilUtc`
+    // → `CanPartyLeaderFollowRoute()=true` → FRG patrols) never dispatched,
+    // and the planner sat in NO PLAN.
+    //
+    // Compounding: even when CombatGoal momentarily fired (brief focus-chain
+    // swap), its OnEnter reset (`_ghostCombatActive=false` at CombatGoal.cs
+    // line 207) wiped the timer every entry. The bot kept re-entering
+    // CombatGoal briefly → timer reset → exit → re-enter → timer never
+    // accumulated the 20 s threshold.
+    //
+    // The detector now runs every planner tick inside NextGoal() (via
+    // CheckGhostCombat below), independent of which goal is selected.
+    // State is private to GoapAgent and persists across plan transitions.
+    //
+    // Run-156 evidence (leader clock):
+    //   22:45:12:834  CombatTracker Entered Combat.
+    //   22:45:17:264  CombatGoal OnEnter (target=2083639). _ghostCombatActive
+    //                 reset to false (CombatGoal.cs:207).
+    //   22:45:21:418  Kill credit on 2083639 — "Currently fighting: 2" means
+    //                 a second mob is still tracked but unfindable to the bot.
+    //   22:45:21:418  "We were still targeting a friendly target" — 2083639
+    //                 became friendly (dead) before ClearTarget.
+    //   22:45:21:471  ClearTarget → Lost target → Search Possible Threats.
+    //                 bits.Target_Hostile=false, bits.FocusTarget_Hostile=false
+    //                 (assist had been Idle since 22:45:11:578).
+    //                 Ghost combat condition was now true. With the detector
+    //                 in CombatGoal, this would normally start the timer —
+    //                 but CombatGoal exited shortly after (allPartyTargets
+    //                 IsIgnored=true blocked re-selection).
+    //   22:45:24:535  FRG Resume attempted (CombatGoal not selectable).
+    //   22:45:24:596  NO PLAN. Worldstate dump: incombat=True, hastarget=False,
+    //                 targetIsIgnored=True, focusTargetIsIgnored=True,
+    //                 allPartyTargetsIsIgnored=True.
+    //   22:45:26:311  Combat re-selected (focus chain flicker). OnEnter again
+    //                 resets _ghostCombatActive=false. Timer cannot accumulate.
+    //   22:45:26:383  "Current target guid=0 is ignored — swapping to focus
+    //                 chain target guid=2083639" → swap fails → Lost target
+    //                 → Search Possible Threats → "Waiting for target to exist
+    //                 or lose combat. Possible threats 2!"
+    //   22:45:29:700  Same loop.
+    //   22:45:33:011  New Plan = Adhoc (Battle Shout cast). CombatGoal exits.
+    //   22:45:33:135  NO PLAN. Worldstate dump same as before.
+    //   22:45:33:231  LeaderStateService publishing TTL grace ("gap=transient
+    //                 (NO PLAN)"). After the 2 s grace expires, the assist
+    //                 sees HasApproachStart=False but no recovery fires.
+    //   22:45:33 → 22:47:18  *** 1 m 45 s of pure silence. *** Only InRectVerdict
+    //                 ticks (~67/s) — Navigation thread alive, GoapAgent
+    //                 planner ticking but every tick returns NO PLAN. Bot
+    //                 stationary at <-669.76, -1924.79>.
+    //   22:47:18:780  User-stop. GoapAgent.Active=false fires the final
+    //                 PausePathing.
+    //
+    // With this fix: the GhostCombat detector runs at every planner tick.
+    // After ~20 s of (combat && noHostileTarget && no damage increase),
+    // dispatches EvadeBlacklistEvent(0, GhostCombat) → HandleGoapEvent's
+    // existing handler at line ~2273 sets `_evadeRecoveryUntilUtc` →
+    // CanPartyLeaderFollowRoute() returns true → FRG runs → patrol continues.
+    private const double GhostCombatTimeoutSec = 20.0;
+    private bool _ghostCombatActive;
+    private DateTime _ghostCombatSinceUtc = DateTime.MinValue;
+    private int _ghostCombatDamageSnapshot;
+
     // ── Fix CW (log-120 evidence: 14:42:52→53, 14:43:09, 14:44:56-14:45:17) ──
     //
     // incombatrange (WorldState key, = playerReader.WithInCombatRange()) is read
@@ -1121,11 +1192,120 @@ public sealed partial class GoapAgent : IDisposable
     private GoapGoal? NextGoal()
     {
         UpdateWorldState();
+        CheckGhostCombat();
 
         if (Plan.Count == 0)
             Plan = GoapPlanner.Plan(AvailableGoals, WorldState, GoapPlanner.EmptyGoalState);
 
         return Plan.Count > 0 ? Plan.Pop() : null;
+    }
+
+    // ── Fix BS (run-156 22:45 ghost-combat deadlock) ──
+    //
+    // Runs every planner tick from NextGoal() above. Mirrors the algorithm
+    // that used to live in CombatGoal.cs:800-851 with one critical difference:
+    // it doesn't depend on CombatGoal being the selected plan, so it works
+    // in the deadlock case where allPartyTargetsIsIgnored=true blocks
+    // CombatGoal selection.
+    //
+    // Algorithm (unchanged from the prior CombatGoal version):
+    //   1. Scope: only PartyLeader / AssistFocus modes (mirrors the
+    //      `classConfig.Mode == ... || ...` gate at the prior CombatGoal.cs
+    //      line 800).
+    //   2. Trigger condition: bits.Combat()=true AND no hostile target in
+    //      either slot. The "no hostile" check matches the prior code: the
+    //      bot's own target is non-hostile AND the focus's target is
+    //      non-hostile. Either being non-hostile alone isn't enough — only
+    //      when *both* slots are unfightable does the bot have nothing to
+    //      engage.
+    //   3. Damage snapshot: capture combined damage count at timer start.
+    //      If counts later increase, reset — that means combat is active
+    //      (mobs hitting us or pet damaging), not ghost.
+    //   4. Threshold: GhostCombatTimeoutSec (20 s, same as before).
+    //   5. On expiry: dispatch EvadeBlacklistEvent(0, GhostCombat). The
+    //      existing HandleGoapEvent handler (this file, ~line 2273) sets
+    //      _evadeRecoveryUntilUtc → CanPartyLeaderFollowRoute() returns
+    //      true → FRG selectable → patrol resumes.
+    //   6. Reset condition (besides expiry): hostile target re-acquired in
+    //      either slot.
+    //
+    // The OnEnter reset that used to live in CombatGoal (line 207) is NOT
+    // mirrored here — that reset was specific to the CombatGoal-scoped
+    // detector (a fresh combat scenario warranted a fresh timer). With the
+    // detector at GoapAgent scope, the timer correctly persists across plan
+    // transitions; CombatGoal exits and re-enters no longer wipe progress.
+    private void CheckGhostCombat()
+    {
+        if (classConfig.Mode != Mode.PartyLeader
+            && classConfig.Mode != Mode.AssistFocus)
+            return;
+
+        if (!bits.Combat())
+        {
+            if (_ghostCombatActive)
+            {
+                logger.LogInformation("[GoapAgent] Ghost combat timer reset — combat ended.");
+                _ghostCombatActive = false;
+                _ghostCombatSinceUtc = DateTime.MinValue;
+                _ghostCombatDamageSnapshot = 0;
+            }
+            return;
+        }
+
+        bool noHostileTarget = !bits.Target_Hostile() && !bits.FocusTarget_Hostile();
+        int currentCombinedDamage = combatLog.DamageDoneCount() + combatLog.DamageTakenCount();
+
+        if (noHostileTarget)
+        {
+            if (!_ghostCombatActive)
+            {
+                _ghostCombatActive = true;
+                _ghostCombatSinceUtc = DateTime.UtcNow;
+                _ghostCombatDamageSnapshot = currentCombinedDamage;
+                logger.LogInformation(
+                    $"[GoapAgent] Ghost combat timer started. DamageSnapshot={_ghostCombatDamageSnapshot}.");
+            }
+            else if (currentCombinedDamage > _ghostCombatDamageSnapshot)
+            {
+                logger.LogInformation(
+                    $"[GoapAgent] Ghost combat timer reset — damage increased " +
+                    $"({_ghostCombatDamageSnapshot} -> {currentCombinedDamage}).");
+                _ghostCombatActive = false;
+                _ghostCombatSinceUtc = DateTime.MinValue;
+                _ghostCombatDamageSnapshot = 0;
+            }
+            else
+            {
+                double ghostSec = (DateTime.UtcNow - _ghostCombatSinceUtc).TotalSeconds;
+                logger.LogDebug(
+                    $"[GoapAgent] Ghost combat: {ghostSec:0.0}s / {GhostCombatTimeoutSec}s.");
+                if (ghostSec >= GhostCombatTimeoutSec)
+                {
+                    logger.LogWarning(
+                        $"[GoapAgent] Ghost combat detected — escaping via route.");
+                    _ghostCombatActive = false;
+                    _ghostCombatSinceUtc = DateTime.MinValue;
+                    _ghostCombatDamageSnapshot = 0;
+                    // Call HandleGoapEvent directly — only HandleGoapEvent branches
+                    // on EvadeBlacklistEvent (no IGoapEventListener.OnGoapEvent does),
+                    // so this is observationally identical to the SendGoapEvent path
+                    // CombatGoal used. See the comment block at RaiseDebugEvent
+                    // (~line 2058) for the full rationale.
+                    HandleGoapEvent(new EvadeBlacklistEvent(0, EvadeReason.GhostCombat));
+                }
+            }
+        }
+        else
+        {
+            if (_ghostCombatActive)
+            {
+                logger.LogInformation(
+                    "[GoapAgent] Ghost combat timer reset — hostile target acquired.");
+                _ghostCombatActive = false;
+                _ghostCombatSinceUtc = DateTime.MinValue;
+                _ghostCombatDamageSnapshot = 0;
+            }
+        }
     }
 
     private void UpdateWorldState()

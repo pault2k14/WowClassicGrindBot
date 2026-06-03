@@ -42,10 +42,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private int consecutiveNoAction;
     private bool debug;
 
-    private const double GhostCombatTimeoutSec = 20.0;
-    private DateTime _ghostCombatSinceUtc = DateTime.MinValue;
-    private bool _ghostCombatActive;
-    private int _ghostCombatDamageSnapshot;
+    // Ghost combat detection moved to GoapAgent.CheckGhostCombat — fields
+    // removed. See Fix BS in GoapAgent.cs (~line 65) for full rationale.
 
     private const double UnreachableMobTimeoutSec = 18.0;
     private DateTime _stuckApproachingSinceUtc = DateTime.MinValue;
@@ -204,9 +202,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         _stuckApproachingActive = false;
         _stuckApproachingSinceUtc = DateTime.MinValue;
         _stuckApproachingDamageSnapshot = 0;
-        _ghostCombatActive = false;
-        _ghostCombatSinceUtc = DateTime.MinValue;
-        _ghostCombatDamageSnapshot = 0;
+        // Ghost combat fields and reset moved to GoapAgent (Fix BS).
 
         // ── Fix AR (log-79b 14:21:20:475 → 14:21:23:312) ──
         //
@@ -278,6 +274,32 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
     public override void OnExit()
     {
+        // ── Fix CC (audit finding from run-155 follow-up) ──
+        //
+        // Unconditional Forward release. The prior code only released via
+        // `stopMoving.Stop()` when `DamageTakenCount() > 0 && !bits.Target()`
+        // (line 277-278 below) — narrow case. Other exits (clean kill with
+        // no incoming damage; plan transition while still holding target)
+        // left Forward in its previous state.
+        //
+        // CombatGoal can have Forward held via:
+        //   - ATG → Combat handoff (ATG.OnExit:392 releases, so this leg
+        //     is normally clean — but if the transition happens via NO PLAN
+        //     intermediate state, ordering is no longer guaranteed).
+        //   - ReactCastError.cs:159 StartForward(true) on ERR_BADATTACKFACING
+        //     when target is outside pull range. This path does NOT pair
+        //     with a Stop().
+        //   - Navigation.Update at line ~1859 if Combat triggers an internal
+        //     navigate (rare).
+        //
+        // With Fix BR, navigation.Stop() releases Forward defensively, so
+        // any Combat path that called Stop() is covered. The gap this
+        // OnExit closes is the kill-no-damage case combined with a
+        // ReactCastError-pressed Forward.
+        //
+        // Idempotency: IsKeyDown guard inside ConfigurableInput.StopForward.
+        input.StopForward(false);
+
         if (combatLog.DamageTakenCount() > 0 && !bits.Target())
             stopMoving.Stop();
 
@@ -798,58 +820,17 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (classConfig.Mode == Mode.PartyLeader || classConfig.Mode == Mode.AssistFocus)
-        {
-            bool noHostileTarget = !bits.Target_Hostile() && !bits.FocusTarget_Hostile();
-            int currentCombinedDamage = combatLog.DamageDoneCount() + combatLog.DamageTakenCount();
-
-            if (noHostileTarget)
-            {
-                if (!_ghostCombatActive)
-                {
-                    _ghostCombatActive = true;
-                    _ghostCombatSinceUtc = DateTime.UtcNow;
-                    _ghostCombatDamageSnapshot = currentCombinedDamage;
-                    logger.LogInformation($"[CombatGoal] Ghost combat timer started. DamageSnapshot={_ghostCombatDamageSnapshot}.");
-                }
-                else if (currentCombinedDamage > _ghostCombatDamageSnapshot)
-                {
-                    logger.LogInformation($"[CombatGoal] Ghost combat timer reset — damage increased ({_ghostCombatDamageSnapshot} -> {currentCombinedDamage}).");
-                    _ghostCombatActive = false;
-                    _ghostCombatSinceUtc = DateTime.MinValue;
-                    _ghostCombatDamageSnapshot = 0;
-                }
-                else
-                {
-                    double ghostSec = (DateTime.UtcNow - _ghostCombatSinceUtc).TotalSeconds;
-                    logger.LogDebug($"[CombatGoal] Ghost combat: {ghostSec:0.0}s / {GhostCombatTimeoutSec}s.");
-                    if (ghostSec >= GhostCombatTimeoutSec)
-                    {
-                        logger.LogWarning($"[CombatGoal] Ghost combat detected — escaping via route.");
-                        _ghostCombatActive = false;
-                        _ghostCombatSinceUtc = DateTime.MinValue;
-                        _ghostCombatDamageSnapshot = 0;
-                        input.PressStopAttack();
-                        wait.Update();
-                        input.PressClearTarget();
-                        wait.Update();
-                        stopMoving.Stop();
-                        SendGoapEvent(new EvadeBlacklistEvent(0, EvadeReason.GhostCombat));
-                        return;
-                    }
-                }
-            }
-            else
-            {
-                if (_ghostCombatActive)
-                {
-                    logger.LogInformation("[CombatGoal] Ghost combat timer reset — hostile target acquired.");
-                    _ghostCombatActive = false;
-                    _ghostCombatSinceUtc = DateTime.MinValue;
-                    _ghostCombatDamageSnapshot = 0;
-                }
-            }
-        }
+        // Ghost combat detection used to live here; it moved to
+        // GoapAgent.CheckGhostCombat (called every planner tick from
+        // NextGoal). The CombatGoal-scoped detector couldn't run during
+        // the deadlock it was designed to catch: when both target slots
+        // are IsIgnored/absent, CombatGoal's `allPartyTargetsIsIgnored=
+        // false` precondition (line 119/127) blocks selection, so this
+        // block was unreachable in the ghost state. The GoapAgent-scoped
+        // detector runs regardless of selected plan, dispatching the
+        // same EvadeBlacklistEvent(0, GhostCombat). See Fix BS in
+        // GoapAgent.cs (the comment block near _ghostCombatActive
+        // declaration) for the full run-156 evidence and rationale.
 
         // Gate producedcorpse: don't flag kills for looting when assist can't follow.
         // PartyLeader reads the API store; AssistFocus reads its own CantFollow flag.
