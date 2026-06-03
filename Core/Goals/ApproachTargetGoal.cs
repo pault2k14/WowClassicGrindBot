@@ -476,6 +476,63 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
+        // ── Fix CF Q2a (run-157 01:53:51:573 → 01:53:56:418 assist runs into rect) ──
+        //
+        // Mid-approach re-check of IsTargetLikelyInBlacklistRect. The OnEnter
+        // E5 check at line 272 fires only once — at goal entry — and uses
+        // whatever bot facing + range happens to hold at that exact instant.
+        // That single-point estimate has a known false-negative mode at long
+        // range with wide brackets (see Navigation.cs:5847-5894 Fix EQ rationale).
+        //
+        // Run-147 added the multi-sample fallback inside Navigation's
+        // IsTargetLikelyInBlacklistRect; run-157 surfaces the next failure
+        // mode: even when multi-sample fires, ATG only listens at OnEnter.
+        // 167 ms after ATG.OnEnter the multi-sample HIT detected the rect for
+        // mob 2092377 (estimated probe=<24.21, -1614.06> inside the static
+        // rect [-116,-1672 .. 21,-1545] inflate 6.0). ATG had no listener,
+        // kept approaching, the assist ran into the rect, the mob attacked,
+        // and Fix 17 self-defense kicked in — the leader followed via Fix L,
+        // the Blacklist library blocked the leader's attacks, and the
+        // leader-stuck-while-assist-fights symptom emerged.
+        //
+        // This re-check fires every Update tick. Once the bot has had time to
+        // rotate toward the target (typically within 100-200 ms of OnEnter),
+        // multi-sample becomes reliable and any false negative from OnEnter
+        // is corrected here. Semantics match OnEnter E5: clear without
+        // blacklisting (we haven't engaged the mob — only approached). The
+        // operator principle "only mobs we have actively engaged go onto the
+        // IsIgnored map" is preserved.
+        //
+        // Gated on:
+        //   - playerReader.TargetGuid != 0 (we have a target to evaluate)
+        //   - !navigation.IsApproachEscapeActive (don't interfere with an
+        //     active escape flow; escape state machine has its own exit)
+        //
+        // Placement: after the IsIgnored guard above (so IsIgnored already
+        // got its abort path) and before the player-position bail-outs at
+        // 479+ / 514+ (those handle different conditions — player in rect
+        // vs target in rect — and don't subsume this).
+        if (playerReader.TargetGuid != 0 &&
+            !navigation.IsApproachEscapeActive &&
+            navigation.IsTargetLikelyInBlacklistRect())
+        {
+            logger.LogInformation(
+                $"[ATG] Mid-approach rect re-check: target guid={playerReader.TargetGuid} " +
+                $"detected inside a blacklist rect — clearing without blacklisting " +
+                $"(we never engaged this mob).");
+            input.StopForward(false);
+            input.PressStopAttack();
+            wait.Update();
+            input.PressClearTarget();
+            wait.Update();
+            stopMoving.StopForward();
+            navigation.Stop();
+            navigation.ResetApproachEscape();
+            wait.Update(playerReader.DoubleNetworkLatency);
+            wait.Update();
+            return;
+        }
+
         if (!navigation.IsApproachEscapeActive &&
             (navigation.IsApproachEscapeExhausted ||
              (!navigation.IsApproachEscapeEscalating && navigation.IsInBlacklistArea())))

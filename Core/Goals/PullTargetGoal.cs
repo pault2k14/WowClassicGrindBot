@@ -316,7 +316,47 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (PullDurationMs > MAX_PULL_DURATION &&
+        // ── Fix CF Q1 (run-157 01:54:18:524 redundant StuckRect) ──
+        //
+        // Gate the "Pull taking too long" path on bits.Target(). A pull
+        // cannot be "taking too long" if there is no target — the bot
+        // isn't pulling anything. Without this gate, the path fires
+        // spuriously in scenarios where:
+        //
+        //   1. OnEnter's E5 early-return (line 137-143) bypasses the
+        //      `pullStart = GetTimestamp()` at line 198, so `pullStart`
+        //      keeps a stale value (from a previous PTG cycle or 0-init).
+        //   2. The Evade event's handler in GoapAgent (line 2402-2403)
+        //      then PressStopAttack + PressClearTarget, dropping the
+        //      target slot.
+        //   3. PTG.Update's next tick fires:
+        //      - currentTargetIsIgnored guard (line 269): doesn't fire
+        //        because bits.Target() is already false.
+        //      - Bail-out (line 283): requires bits.Target() → skipped.
+        //      - Assist-block (line 311): assist is following → skipped.
+        //      - "Pull taking too long" (this block): stale pullStart
+        //        makes PullDurationMs > MAX_PULL_DURATION true →
+        //        TryUnstuck() drops a redundant dynamic StuckRect on
+        //        top of the static blacklist that already covers the
+        //        same area.
+        //
+        // Run-157 evidence (leader clock):
+        //   01:54:18:260  PTG.OnEnter E5 fires for 2092382 (in static
+        //                 rect), returns at line 143 without setting
+        //                 pullStart.
+        //   01:54:18:306  GoapAgent Evade handler: PressStopAttack.
+        //   01:54:18:384  GoapAgent Evade handler: PressClearTarget.
+        //   01:54:18:524  PTG.Update tick: "Pull taking too long" fires
+        //                 → TryUnstuck → "StuckRect added: center=
+        //                 <23.734722, -1563.7275>" — redundant: the
+        //                 static rect [-116,-1672..21,-1545] inflated
+        //                 already contains this position.
+        //
+        // The other in-Update checks at 283-307 and 311-317 properly
+        // require bits.Target() or bits.Combat(); this block was the
+        // outlier. The fix aligns behavior across all paths.
+        if (bits.Target() &&
+            PullDurationMs > MAX_PULL_DURATION &&
             !navigation.IsApproachEscapeActive &&
             !navigation.IsApproachEscapeEscalating)
         {

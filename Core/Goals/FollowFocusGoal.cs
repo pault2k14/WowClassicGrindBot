@@ -2037,6 +2037,52 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     input.PressTargetOfTarget();
                     wait.Update();
 
+                    // ── Fix CF Q2b (run-157 01:53:51:540 in-rect target latched) ──
+                    //
+                    // Pre-latch in-rect check. The focus-chain pickup
+                    // (PressTargetFocus + PressTargetOfTarget) latches onto
+                    // any hostile target the leader briefly has — including
+                    // mobs inside static blacklist rects.
+                    //
+                    // In run-157, the leader Tab-scanned for threats after a
+                    // post-kill state (01:53:50:160 Kill credit → 01:53:53:469
+                    // new target). During the scan window the leader briefly
+                    // had mob 2092377 in its target slot — a Savannah Prowler
+                    // inside the static rect [-116,-1672 .. 21,-1545]. The
+                    // assist's focus-chain pickup at 01:53:51:540 caught that
+                    // transient and latched, despite the mob being unreachable
+                    // by design. ATG then ran the assist into the rect, the
+                    // mob aggroed, and the leader-stuck-while-assist-fights
+                    // chain followed (Fix L → Blacklist library block →
+                    // BlacklistTargetGoal vs CombatGoal oscillation).
+                    //
+                    // Defense in depth: this check refuses the latch at the
+                    // earliest layer. The Q2a mid-approach re-check in ATG
+                    // catches any path that bypasses this (Tab, SoftInteract,
+                    // any future focus-chain variant). Both layers together
+                    // close the in-rect engagement surface.
+                    //
+                    // Behavior: if hostile + alive + in-rect, log the
+                    // refusal, ClearTarget so the slot doesn't influence the
+                    // planner, and fall through to the else branch's retry
+                    // path. The next focus-chain attempt happens after
+                    // ApproachTargetAcquireRetryMs; if the leader's target
+                    // has moved on by then (likely — Tab scan is transient),
+                    // the next attempt latches a non-in-rect mob normally.
+                    bool focusChainTargetInRect = bits.Target() && bits.Target_Hostile()
+                        && !bits.Target_Dead()
+                        && navigation.IsTargetLikelyInBlacklistRect();
+                    if (focusChainTargetInRect)
+                    {
+                        logger.LogInformation(
+                            $"[FFG] [FIX-FIRE] Q2b: focus-chain rejected — target " +
+                            $"guid={playerReader.TargetGuid} is inside a blacklist rect. " +
+                            $"Clearing target without latching (we never engaged this mob); " +
+                            $"next focus-chain attempt after {ApproachTargetAcquireRetryMs:0}ms.");
+                        input.PressClearTarget();
+                        wait.Update();
+                    }
+
                     // Fix AJ: verify the chain produced a HOSTILE target before
                     // latching. See the comment block above for the full
                     // race-condition analysis and evidence trail from log-75.
@@ -2051,7 +2097,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     // assist holds in approach state instead of following/idling.
                     // The dead check is already computed below for the AM
                     // diagnostic (diagTargetDead); gate the latch on it too.
-                    if (bits.Target() && bits.Target_Hostile() && !bits.Target_Dead())
+                    //
+                    // Fix CF Q2b: the focusChainTargetInRect branch above
+                    // already handled the in-rect-target case by clearing the
+                    // target. If that ran, bits.Target() is now false, so this
+                    // condition naturally evaluates false and we skip both the
+                    // success latch and the misleading retry warning in the
+                    // outer else. The Q2b branch is treated as a "successful
+                    // refusal" — neither latching nor warning is appropriate.
+                    if (!focusChainTargetInRect &&
+                        bits.Target() && bits.Target_Hostile() && !bits.Target_Dead())
                     {
                         _approachTargetAcquired = true;
                         _approachTargetLatchedUtc = DateTime.UtcNow;  // Fix AM: record for stale-latch warning
@@ -2112,7 +2167,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             $"If ATG is not selected on the next planner tick, the failing precondition " +
                             $"is the one above whose value is wrong-side of its expectation.");
                     }
-                    else
+                    else if (!focusChainTargetInRect)
                     {
                         logger.LogWarning(
                             $"[FFG] [FIX-FIRE] AJ: focus-chain attempt did not produce a hostile " +
@@ -2123,6 +2178,8 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                             $"yet when PressTargetOfTarget fired — retry should converge " +
                             $"because the assist's target is now stable for the next chain.");
                     }
+                    // (Fix CF Q2b refusal case: no warning. The Q2b log above
+                    // already explained the outcome.)
                 }
             }
 
