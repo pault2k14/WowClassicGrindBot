@@ -2170,6 +2170,79 @@ public sealed partial class Navigation : IDisposable
         ResetNoProgressWatchdog();
         ResetChaseProgressWatchdog();
         UpdateTotalRoute();
+
+        // ── Fix BR (run-155 17:36:02 → 17:37:10 forward-key runaway) ──
+        //
+        // Defensive forward-key release — matches PausePathing() at line
+        // ~2107 (Fix BG). Stop() previously left input.ForwardKey in its
+        // last state. Because Update's `if (!active) return;` at line ~1386
+        // short-circuits as soon as active=false, no subsequent Update tick
+        // can release the key on its own. Any caller that called Stop()
+        // without pairing it with StopMovement() / input.StopForward(true)
+        // would leave the WoW client holding the forward key down — the
+        // character keeps running in its last facing direction until
+        // physical terrain stops it or something else releases the key.
+        //
+        // Fix BG already closed this exact hole for PausePathing()
+        // (Navigation.cs line ~2049-2058 comment block). The same hole
+        // existed in Stop(): Stop() and PausePathing() both clear active
+        // for the same reason, but only PausePathing was making the
+        // defensive release.
+        //
+        // Run-155 evidence (assist clock; assist clock ~21s behind leader):
+        //   17:35:55:079  FFG NavState: NavigatingToLeader → CantFollow
+        //                 (assist segment to leader entirely blacklisted —
+        //                  see also Fix 2 todo: leader's AssistReturn
+        //                  destination-reached deadlock against a moving
+        //                  assist).
+        //   17:35:55:093  CantFollow escape phase Projection10 starts.
+        //                 Navigation.Update calls input.StartForward(true)
+        //                 at line ~1859. Forward key down.
+        //   17:35:55:109  Pather computes path. BC fix-fire: bot facing
+        //                 0.03rad (east) but path forward is roughly NW.
+        //                 LeftArrow turns begin.
+        //   17:35:55:110→17:35:56:472  LeftArrow held 1326ms cumulative.
+        //                 Bot rotates ~180° to face west.
+        //   17:35:57:118  Arrived at Projection10. Subsequent phases
+        //                 (LastSafeAnchor co-located, PhysicalUnstuck,
+        //                  Projection20 → LastSafeAnchor) continue
+        //                 navigation; forward key remains down across.
+        //   17:36:02:024  FFG CantFollow escape Exhausted → calls
+        //                 navigation.Stop() at FollowFocusGoal.cs:3440.
+        //                 Before this fix, Stop() did NOT release Forward.
+        //                 The Update tick immediately after Stop() sees
+        //                 active=false and early-returns at line ~1386,
+        //                 so the StopForward site at line ~1853 is never
+        //                 reached.
+        //   17:36:02:485 → 17:37:10:554  Bot moves from <-459.72, -1970.15>
+        //                 to <-841.80, -1944.90> — 388 yards traveled at a
+        //                 direction of 176.3° (essentially due west) at
+        //                 ~7 y/s (running speed). Bot's input log shows
+        //                 ZERO key presses for the entire 68-second window
+        //                 (last input was Spacebar 17:35:58:321 from the
+        //                 PhysicalUnstuck phase).
+        //   17:37:11:097  End of assist log — operator manually stopped
+        //                 the bot. Final position 388y west of leader.
+        //
+        // The runaway is entirely explained by: forward key still pressed,
+        // active=false suppresses any Update-tick release, character runs
+        // in its last facing direction until something external stops it.
+        //
+        // Local workarounds existed (e.g. FollowFocusGoal.cs:7519-7521
+        // pairs navigation.Stop() with input.StopForward(true), and the
+        // comment at FollowFocusGoal.cs:7485 explicitly notes "navigation
+        // .Stop() does not release the forward key"). But many other
+        // Stop() callers lack the workaround — this defensive release in
+        // Stop() itself closes the bug class systemically.
+        //
+        // Idempotency: input.StopForward only calls SetKeyState if the
+        // key is currently down (ConfigurableInput.cs:48-52). Stop()
+        // callers that already released the key (or never pressed it)
+        // pay no cost. Stop() callers that immediately re-press via
+        // SetWaypoints + Acquire pattern get a brief release-and-repress
+        // within one frame, which the WoW client treats as continuous
+        // hold visually.
+        input.StopForward(true);
     }
 
     public void StopMovement()
