@@ -1165,6 +1165,91 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     private const float CFRouteDetourMargin = 3.0f;
 
 
+    // ── Fix FG (run-159 20:52:45:427 evidence) — Loop-aware route validation ──
+    //
+    // Both Fix CB and Fix CF previously gated on `botToLeader < 30y`. When
+    // the leader crossed this boundary AND the route was in a U-turn / loop
+    // configuration, both protections failed simultaneously: Initial sync
+    // committed to a backward route waypoint with no recovery mechanism
+    // until the leader's position changed enough to bring it back within 30y.
+    //
+    // Run-159 worked example at 20:52:45:427:
+    //   Bot at <-422.5, -1986.0>, perceived leader-distance had just crossed
+    //   from 29.7y → ~31y (Fix CB last fired at 20:52:44:904 with "Leader
+    //   29.7y away", then stopped). Initial sync ran without CB skip. Picked
+    //   route[85]=<-437.81, -1999.62> via Euclidean-nearest (BM-3 advance
+    //   84→85), even though route[85] was 47.5y from the leader's perceived
+    //   position and leaderIdx=100 (so route[85] was 15 indices BEHIND the
+    //   leader on the route — a clear U-turn). Fix CF couldn't fire to
+    //   switch to PositionChase — same 30y gate failed. The assist committed
+    //   to route[85] and walked SW/south, peaking at 75y from leader. Fix
+    //   CF only recovered 42 seconds later when the bot wandered back
+    //   within 30y at 20:53:27:488.
+    //
+    // The first attempt (run-159 → FG v1) extended the 30y proximity gate
+    // to 60y for CB, CF, and DH, and added a 10y "severe-detour" margin
+    // for the new medium tier. That fixed run-159 but introduced two new
+    // arbitrary thresholds (60y, 10y) and was equally vulnerable to a
+    // boundary-just-past-60y replay. The proximity gate itself was the
+    // wrong shape of fix — it conflated leader-closeness (a heuristic
+    // about chase feasibility) with loop-detection (a topology property).
+    //
+    // FG v2 — current design:
+    //
+    // FG-1 (CB): REMOVE the proximity gate entirely. CB's direction-based
+    //   checks (CBBackwardCosThreshold=-0.3, CBImprovementMargin=+0.3,
+    //   CBMaxScanDistanceYards=35y) are the actual safety: the scan only
+    //   considers candidates that are within 35y of the bot AND meaningfully
+    //   better-aligned with leader-direction than the picked syncIdx.
+    //   Walking 35y to a forward-aligned waypoint is essentially always
+    //   better than walking some shorter distance to a backward-aligned
+    //   one. The 30y proximity gate added no real protection — it just
+    //   narrowed the range where CB could help, and that narrowing is
+    //   exactly what produced the run-159 boundary failure.
+    //
+    // FG-2 (CF — loop-aware sibling): add a check that fires INDEPENDENT
+    //   of bot-to-leader distance, using two topology-based conditions:
+    //     1) leaderIdx - _assistRouteIndex > FGLoopBehindIndexDelta (=5)
+    //          — picked index is significantly behind the leader's
+    //          published target index; a route loop is the only way to
+    //          have a low geometrically-nearest index when the leader is
+    //          much further along the route
+    //     2) route[_assistRouteIndex] is geometrically further from
+    //          leader than direct chase by CFRouteDetourMargin (3y, reused)
+    //          — confirms the loop is also a geometric detour, not just
+    //          an index gap from a previous catchup
+    //   Both conditions together are essentially impossible to satisfy
+    //   outside a genuine loop-backward situation. In normal patrol the
+    //   assist trails the leader by 1-3 indices (condition 1 false). In
+    //   long-distance catchup the geometric-nearest waypoint projects to
+    //   the bot's position on the route, so wpToLeader ≤ botToLeader
+    //   (condition 2 false). In obstacle-detour routes the assist and
+    //   leader are typically within 1-2 indices of each other (condition
+    //   1 false). Only a route U-turn where the bot is on the wrong arc
+    //   satisfies both — which is exactly the run-159 case.
+    //
+    //   The existing close-range CF tier (botToLeader < 30y, detour > 3y)
+    //   is KEPT UNCHANGED — it handles the fine-grained body-chase override
+    //   when leader is close and the route is slightly off-axis. The
+    //   loop-aware check is a sibling that fires in cases the close-range
+    //   tier misses (long-distance loops, boundary cases like run-159).
+    //
+    // FG-3 (DH): REMOVE the proximity gate entirely, same rationale as
+    //   FG-1. DH is the route-span equivalent of CB and shares the same
+    //   direction-based safety bounds.
+    //
+    // Why FGLoopBehindIndexDelta = 5?
+    //   Steady-state RouteWalk has the assist trailing leader by 1 index
+    //   (rendezvous semantics, Fix BJ). Brief excursions during combat
+    //   handoff can push the delta to 2-4 indices temporarily. Delta > 5
+    //   indicates an unambiguous "much further behind than steady-state"
+    //   condition. Run-159's delta of 15 is comfortably above this.
+    //   Lower values (e.g. 3) would risk firing on normal handoff
+    //   transients; higher values (e.g. 10) would miss boundary cases
+    //   where the loop is shorter.
+    private const int FGLoopBehindIndexDelta = 5;
+
+
     // ── Fix CC (log-106 11:14:16 evidence) — Geometric cache extension ──
     //
     // The leader's route index cache is updated only when leader publishes
@@ -5150,7 +5235,19 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         Vector3 leaderPosCB = leader.WorldPos;
                         float botToLeaderXY = botPosCB.WorldDistanceXYTo(leaderPosCB);
 
-                        if (botToLeaderXY < CBLeaderProximityYards && botToLeaderXY > 0.001f)
+                        // Fix FG-1 (run-159 evidence): proximity gate REMOVED.
+                        // The original gate `botToLeaderXY < 30y` was based on
+                        // the assumption that route loops only manifest at
+                        // close range — invalidated by run-159 where the
+                        // boundary-just-past-30y case produced a 42-second
+                        // detour. CB's direction-based safety (pickedCos < -0.3
+                        // backward gate, +0.3 improvement margin, 35y scan
+                        // distance) does the actual protective work; the
+                        // proximity gate added no real safety. The `> 0.001f`
+                        // check is kept to avoid division-by-zero when the
+                        // bot and leader are co-located. See the FG block
+                        // (~line 1167) for full rationale.
+                        if (botToLeaderXY > 0.001f)
                         {
                             Vector3 picked = route[syncIdx];
                             float pickedDx = picked.X - botPosCB.X;
@@ -5512,36 +5609,60 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 // _assistRouteIndex still points at route[N] far behind
                 // the bot's actual position after body-chase moved it
                 // forward.
-                if (_pendingAnchor == default)
+                if (_pendingAnchor == default
+                    && _assistRouteIndex >= 0
+                    && _assistRouteIndex < route.Length)
                 {
                     float botToLeaderDistCF = playerReader.WorldPos.WorldDistanceXYTo(leader.WorldPos);
-                    if (botToLeaderDistCF < CFBodyChaseProximityYards
-                        && _assistRouteIndex >= 0
-                        && _assistRouteIndex < route.Length)
+                    Vector3 nextWp = route[_assistRouteIndex];
+                    float nextWpToLeader = nextWp.WorldDistanceXYTo(leader.WorldPos);
+                    float detourAmount = nextWpToLeader - botToLeaderDistCF;
+
+                    // CF (close-range, original): body-chase override when
+                    // leader is close and route is even slightly detouring.
+                    // Unchanged from pre-FG behavior.
+                    bool closeFire = botToLeaderDistCF < CFBodyChaseProximityYards
+                                   && detourAmount > CFRouteDetourMargin;
+
+                    // Fix FG-2 (run-159 evidence): loop-aware sibling check.
+                    // Fires INDEPENDENT of bot-to-leader distance when the
+                    // chosen route index is significantly behind the leader's
+                    // published index (route-loop topology indicator) AND
+                    // the chosen waypoint is geometrically further from the
+                    // leader than direct chase. See the FG block (~line 1167)
+                    // for full rationale. Both conditions together are
+                    // essentially impossible to satisfy outside a genuine
+                    // route-loop-backward situation.
+                    int loopDelta = leaderIdx - _assistRouteIndex;
+                    bool loopFire = loopDelta > FGLoopBehindIndexDelta
+                                  && detourAmount > CFRouteDetourMargin;
+
+                    if (closeFire || loopFire)
                     {
-                        Vector3 nextWp = route[_assistRouteIndex];
-                        float nextWpToLeader = nextWp.WorldDistanceXYTo(leader.WorldPos);
-                        if (nextWpToLeader > botToLeaderDistCF + CFRouteDetourMargin)
+                        if (_currentNavTargetMode != NavTargetMode.PositionChase)
                         {
-                            if (_currentNavTargetMode != NavTargetMode.PositionChase)
-                            {
-                                logger.LogInformation(
-                                    $"[FFG] [FIX-FIRE] CF: Body-chase override — " +
-                                    $"leader {botToLeaderDistCF:0.0}y away " +
-                                    $"(< CFBodyChaseProximityYards={CFBodyChaseProximityYards:0.0}y), " +
-                                    $"next route wp[{_assistRouteIndex}]={nextWp} is " +
-                                    $"{nextWpToLeader:0.0}y from leader " +
-                                    $"(+{nextWpToLeader - botToLeaderDistCF:0.0}y further than direct " +
-                                    $"chase). Route is detouring through a loop or U-turn; " +
-                                    $"switching RouteWalk → PositionChase to chase leader directly. " +
-                                    $"Resetting _assistRouteIndex={_assistRouteIndex} → -1 so the " +
-                                    $"next RouteWalk-eligible tick re-syncs from the bot's new " +
-                                    $"position.");
-                            }
-                            _assistRouteIndex = -1;
-                            _currentNavTargetMode = NavTargetMode.PositionChase;
-                            return ComputeFollowTargetWorldPos(leader);
+                            string tierLabel;
+                            if (closeFire && loopFire) tierLabel = "close+loop (FG-2)";
+                            else if (loopFire)        tierLabel = "loop-aware (FG-2)";
+                            else                       tierLabel = "close";
+                            logger.LogInformation(
+                                $"[FFG] [FIX-FIRE] CF: Body-chase override [{tierLabel}] — " +
+                                $"leader {botToLeaderDistCF:0.0}y away, " +
+                                $"_assistRouteIndex={_assistRouteIndex} vs leaderIdx={leaderIdx} " +
+                                $"(loopDelta={loopDelta}, threshold={FGLoopBehindIndexDelta}), " +
+                                $"next route wp[{_assistRouteIndex}]={nextWp} is " +
+                                $"{nextWpToLeader:0.0}y from leader " +
+                                $"(+{detourAmount:0.0}y further than direct chase, " +
+                                $"margin={CFRouteDetourMargin:0.0}y). " +
+                                $"Route is detouring through a loop or U-turn; " +
+                                $"switching RouteWalk → PositionChase to chase leader directly. " +
+                                $"Resetting _assistRouteIndex={_assistRouteIndex} → -1 so the " +
+                                $"next RouteWalk-eligible tick re-syncs from the bot's new " +
+                                $"position.");
                         }
+                        _assistRouteIndex = -1;
+                        _currentNavTargetMode = NavTargetMode.PositionChase;
+                        return ComputeFollowTargetWorldPos(leader);
                     }
                 }
 
@@ -6300,18 +6421,25 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // backward span is pushed anyway.
         //
         // Apply CB's skip here against `target` (what the span must lead
-        // toward): if the bot is within CBLeaderProximityYards of the target
-        // and route[resumeIndex] heads away (cos < CBBackwardCosThreshold),
+        // toward): if route[resumeIndex] heads away (cos < CBBackwardCosThreshold),
         // scan forward [resumeIndex+1..leaderIdx] for the best-aligned index
         // (CBMaxScanDistanceYards / CBImprovementMargin gates, identical to
         // CB). If the skip reaches leaderIdx, the resumeIndex>=leaderIdx check
         // below falls through to SetSingleWaypoint (forward body-chase) — no
         // backward span. In healthy patrol route[resumeIndex] heads TOWARD the
         // target (cos > 0), so DH is inert.
+        //
+        // Fix FG-3 (run-159 evidence): proximity gate REMOVED. Same rationale
+        // as FG-1 (CB): direction-based safety (pickedCosDH < -0.3, +0.3
+        // improvement margin, 35y scan distance) does the actual protective
+        // work. The 30y proximity gate added no real safety — it just
+        // narrowed the range where DH could help. The `> 0.001f` check is
+        // kept to avoid division-by-zero. See the FG block (~line 1167)
+        // for full rationale.
         if (resumeIndex < leaderIdx)
         {
             float botToTargetDH = playerPos.WorldDistanceXYTo(target);
-            if (botToTargetDH < CBLeaderProximityYards && botToTargetDH > 0.001f)
+            if (botToTargetDH > 0.001f)
             {
                 Vector3 pickedDH = route[resumeIndex];
                 float pdx = pickedDH.X - playerPos.X;
