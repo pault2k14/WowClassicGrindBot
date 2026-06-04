@@ -3546,14 +3546,64 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // (>= EscapeMinProgressYards) during this phase, restart from
         // Projection10 at the new position rather than escalating —
         // we're moving, just didn't reach the precise target.
+        //
+        // ── Fix FI (run-160 audit follow-up) ──
+        //
+        // The `isProjectionPhase` gate that previously qualified this
+        // early-exit was a design weakness in the same family as the
+        // run-160 bug Fix FH addresses. Both bugs apply PhysicalUnstuck
+        // (jump + reverse, designed for physical terrain wedging) to a
+        // bot whose movement evidence contradicts the wedging hypothesis.
+        //
+        // Old behavior for LastSafeAnchor phase:
+        //   - Bot navigates toward anchor. Phase budget is EscapeAnchorPhaseSec
+        //     = 8.0 s. EscapeArrivalYards = 3.5 y.
+        //   - Bot moves e.g. 7.9 y over 8 s toward a 9 y-distant anchor.
+        //     Doesn't quite arrive within 3.5 y by the deadline.
+        //   - `isProjectionPhase` is false for LastSafeAnchor, so the
+        //     "made progress" early-exit at line 3551 is skipped.
+        //   - EscalateEscapePhase() runs → LastSafeAnchor case (line ~3855)
+        //     → PhysicalUnstuck (since _escapeUnstuckUsed=false).
+        //   - Bot was moving fine (7.9 y/8 s ≈ 1 y/s, normal walking) but
+        //     still gets jump + reverse + jump + reverse applied. Drifts
+        //     the bot in an arbitrary direction, off the productive
+        //     trajectory toward the anchor.
+        //
+        // After Fix FH the co-located fast path is removed from the
+        // LastSafeAnchor entry side, so this timeout-escalation path is
+        // now the only one that can reach PhysicalUnstuck via LastSafeAnchor.
+        // It will see more traffic than it did before; the asymmetric gate
+        // becomes a more material issue.
+        //
+        // New behavior: drop the `isProjectionPhase` qualifier. The principle
+        // is symmetric — if displacement >= EscapeMinProgressYards (1.5 y)
+        // over the phase, the bot demonstrably moved, therefore it is not
+        // physically wedged, and PhysicalUnstuck would be inappropriate
+        // regardless of which phase produced the displacement. Restart from
+        // Projection10 at the new position; the anchor tracker may have
+        // updated the anchor to the bot's new position during the phase
+        // (SetLastSafeAnchor fires on nav-success events, see Navigation.cs
+        // lines 1120, 1142, 1703, 1801, 1895, 1910, 2022, 2157), in which
+        // case Fix FH's co-located branch will catch it on the retry and
+        // transition to Exhausted cleanly.
+        //
+        // The "genuinely wedged" path (displacement < 1.5 y over 8 s, i.e.
+        // bot tried to move and could barely budge) still escalates to
+        // PhysicalUnstuck, which is the correct site of use for that
+        // primitive — same gating principle as Navigation.cs:3509
+        // RouteEscape (totalDisplacement < 0.5 y) and Navigation.cs:5556
+        // Fix H (bot stationary at same startW with pather repeatedly
+        // hitting same in-rect badPoint).
         if (phaseSec >= budgetSec)
         {
-            if (displacement >= EscapeMinProgressYards && isProjectionPhase)
+            if (displacement >= EscapeMinProgressYards)
             {
                 logger.LogInformation(
-                    $"[FFG] CantFollow escape: {_escapePhase} budget elapsed " +
-                    $"({phaseSec:0.0}s) but made {displacement:0.0}y progress — " +
-                    $"re-planning from new position.");
+                    $"[FFG] [FIX-FIRE] FI: CantFollow escape: {_escapePhase} budget elapsed " +
+                    $"({phaseSec:0.0}s) but made {displacement:0.0}y progress " +
+                    $"(>= {EscapeMinProgressYards}y) — bot is moving, not wedged. " +
+                    "Re-planning from new position via Projection10 instead of " +
+                    "escalating to PhysicalUnstuck.");
                 StartEscapePhase(CantFollowEscapePhase.Projection10);
                 return;
             }
@@ -3679,24 +3729,96 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         //
         // Fix: if the anchor is within EscapeArrivalYards of the assist's
         // current position, skip the navigate-to-anchor step (which would
-        // arrive instantly and trigger the cycle). Try PhysicalUnstuck if
-        // we haven't already, otherwise go to Exhausted to hold position
-        // until the leader-arrived (6 y) or 120 s timeout exit fires.
+        // arrive instantly and trigger the cycle). Hold position (Exhausted)
+        // and wait for the leader-arrived (6 y) or 120 s timeout exit.
+        //
+        // ── Fix FH (run-160 02:34:13:141 evidence) ──
+        //
+        // Previously this branch ran PhysicalUnstuck on the first co-located
+        // anchor encounter, then went Exhausted on the second. PhysicalUnstuck
+        // is now SKIPPED entirely when the anchor is co-located.
+        //
+        // Evidence trace (run-160):
+        //   02:34:13:141  SetWaypoint loop guard fires after 10 stationary
+        //                 sets in 150 ms. ComputeFollowTargetWorldPos's BL
+        //                 projection landed on the inflated rect boundary
+        //                 of Koklar Huts 1 (a static route blacklist) ~2.2 y
+        //                 from the bot — every set was POP'd within
+        //                 POP_DIST=3.6 y. Bot frozen at <-12.513, -1539.218>.
+        //   02:34:13:156  EnterCantFollow. CantFollow escape starts:
+        //                 Projection10 falls through (not inside any rect),
+        //                 LastSafeAnchor <-12.513, -1539.218> is co-located
+        //                 with bot (0.0 y ≤ 3.5 y) — old code triggered
+        //                 PhysicalUnstuck.
+        //   02:34:13:156  PhysicalUnstuck (jump + reverse + jump + reverse)
+        //                 — drifted the bot 6 y WEST to <-18.520, -1538.833>.
+        //   02:34:17:755  LastSafeAnchor (2nd pass): navigate back to
+        //                 <-12.513> (6.0 y east). Bot moves 2.6 y east.
+        //   02:34:18:169  Bot at ~<-15.92, -1539.0>. New LastSafeAnchor
+        //                 <-16.425> is co-located again, PhysicalUnstuck
+        //                 already used → Exhausted. Net drift: 3.4 y west
+        //                 of the recoverable hold position.
+        //   LC=02:34:47   Leader detected assist CantFollow, broadcast
+        //                 AssistRequestReturn to <-12.513, -1539.218>
+        //                 (assist's original CantFollow position).
+        //   LC=02:34:52   Leader path-walked 33 y, stopped at <-9.473,
+        //                 -1540.231> — 3.04 y short of target (within
+        //                 leader's POP_DIST=3.55 y, so leader's nav popped
+        //                 the waypoint).
+        //   Final         Leader at <-9.473, -1540.231>, assist at
+        //                 <-15.729, -1539.016>. Distance =
+        //                 √(6.256² + 1.215²) = 6.37 y.
+        //                 LeaderArrivedYards=6 y exit threshold: 6.37 > 6.
+        //                 CantFollow never exits. Both bots stationary.
+        //
+        // Math budget: the 6 y → 7 y window between LeaderArrivedYards and
+        // FollowingMaxYards (3.4 y net) was designed to absorb the leader's
+        // POP_DIST overshoot (up to 3.55 y) ONLY. It cannot also absorb
+        // assist-side drift. PhysicalUnstuck contributed 3.4 y of drift,
+        // pushing the total past the 6 y threshold.
+        //
+        // Why skip PhysicalUnstuck: SetLastSafeAnchor is called at every
+        // nav-success site in Navigation.cs (lines 1120, 1142, 1703, 1801,
+        // 1895, 1910, 2022, 2157). An anchor co-located with the bot's
+        // current position therefore means the bot was navigating
+        // SUCCESSFULLY right up to now — this is the NAV-stuck signature
+        // (SetWaypoint thrash), not the physical-stuck signature.
+        // PhysicalUnstuck (jump + reverse) is designed to free a bot
+        // physically wedged in terrain; here it only drifts the bot off a
+        // recoverable hold position into a position the leader's
+        // AssistReturn cannot reach within POP_DIST.
+        //
+        // Holding in place preserves the implicit protocol: the assist
+        // publishes its CantFollow position, the leader navigates to that
+        // exact position, the leader stops within POP_DIST of it, and the
+        // 6 y exit fires with ~3 y of margin. Skipping PhysicalUnstuck
+        // restores that protocol's invariant (assist doesn't move between
+        // publish and leader-arrival) in the case where the original
+        // CantFollow trigger was NAV-thrash, not physical wedging.
+        //
+        // Note on safety: this does NOT remove PhysicalUnstuck from the
+        // codebase. The escalation path at line ~3791 (LastSafeAnchor
+        // phase TIMED OUT, anchor was NOT co-located, bot tried to
+        // navigate and failed) still reaches PhysicalUnstuck. Navigation
+        // RouteEscape (Navigation.cs:3509) and Fix H BL-detour escalation
+        // (Navigation.cs:5556) still use it. Those sites are gated on
+        // direct movement evidence (RouteEscape: displacement < 0.5 y;
+        // Fix H: bot stationary at the same startW with the pather
+        // repeatedly producing badPoints in the same rect). Only this
+        // single co-located branch is changed.
         Vector3 currentPos = playerReader.WorldPos;
         float anchorDist = currentPos.WorldDistanceXYTo(anchor);
         if (anchorDist <= EscapeArrivalYards)
         {
             logger.LogInformation(
-                $"[FFG] CantFollow escape: LastSafeAnchor {anchor} is co-located with " +
-                $"current position ({anchorDist:0.0}y ≤ {EscapeArrivalYards:0.0}y) — " +
-                "no movement would result. " +
-                (_escapeUnstuckUsed
-                    ? "PhysicalUnstuck already used, holding position (Exhausted)."
-                    : "Trying PhysicalUnstuck."));
-            if (_escapeUnstuckUsed)
-                StartEscapePhase(CantFollowEscapePhase.Exhausted);
-            else
-                StartEscapePhase(CantFollowEscapePhase.PhysicalUnstuck);
+                $"[FFG] [FIX-FIRE] FH: CantFollow escape: LastSafeAnchor {anchor} is " +
+                $"co-located with current position ({anchorDist:0.0}y ≤ " +
+                $"{EscapeArrivalYards:0.0}y) — bot was navigating successfully up to " +
+                "now (anchor updates on nav-success), so this is NAV-stuck not " +
+                "physical-stuck. Skipping PhysicalUnstuck (would drift the bot off the " +
+                "recoverable hold position the leader's AssistReturn targets); holding " +
+                "position (Exhausted) until leader-arrived (6 y) or 120 s timeout fires.");
+            StartEscapePhase(CantFollowEscapePhase.Exhausted);
             return;
         }
 
