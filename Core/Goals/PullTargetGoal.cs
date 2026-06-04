@@ -538,6 +538,26 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
         if (!stuckDetector.IsMoving())
         {
+            // ── Fix FF Q1-A (audit followup to Fix CF Q1) ──
+            // "Not moving" only diagnoses a stuck approach when there's
+            // actually a target to be approaching. Without bits.Target()
+            // this fires after any path that clears the target mid-Update
+            // (E5, target death, GoapAgent ClearTarget, etc.) while
+            // pullStart timers are stale from the previous attempt —
+            // navigation.TryUnstuck() then runs ApproachEscape against
+            // either a stale anchor direction or the player's own position,
+            // accumulating redundant stuck rects with no real obstacle.
+            //
+            // Pre-Fix-FE this was catastrophic (SetSingleWaypoint clobbered
+            // the patrol stack on an unreachable projection → run-158-class
+            // deadlock). Post-Fix-FE the patrol stack is preserved and the
+            // escape exhausts in ~24-30 s, but the redundant rects persist
+            // across episodes and degrade future pathfinding. Same
+            // bits.Target() gate as Fix CF Q1 added to the "Pull taking
+            // too long" check at line 366 — symmetric defense.
+            if (!bits.Target())
+                return;
+
             logger.LogInformation(
                 $"[PTG] Not moving — calling TryUnstuck(). " +
                 $"escalating={navigation.IsApproachEscapeEscalating} exhausted={navigation.IsApproachEscapeExhausted} " +

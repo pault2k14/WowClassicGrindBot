@@ -610,6 +610,20 @@ public sealed partial class Navigation : IDisposable
     // caused the locked pair to be "too noisy" for MinLockDisplacementY=3.0y).
     private Vector3 _approachEscapeAnchorW;
     private bool _approachEscapeActive;
+    // ── Fix FE (run-158 16:33:01:083, leader stuck 3m+ on unreachable projection) ──
+    // ApproachEscape now stores its destination in a dedicated field rather than
+    // calling SetSingleWaypoint() which would clobber the patrol waypoint stack.
+    // Path requests, reach-detection (TryConsumeReachedWaypoint, REFILL's
+    // pop-if-reached block), and the route-consistency check (RouteTargetsWaypointTop)
+    // prefer this projection over wayPoints.Peek() while _approachEscapeActive.
+    // The patrol stack is preserved throughout the escape; on success a normal
+    // OnDestinationReached → FRG.RefillWaypoints rebuilds the route from the
+    // bot's new position (same outcome as the old flow), and on
+    // failure/exhaustion the patrol stack simply resumes — no implicit
+    // rebuild-via-pop-to-zero dance. Always Nav2D-flattened (Z=0) to match
+    // wayPoints' storage convention; default value (all zeros) means "no
+    // projection set" (paired with _approachEscapeActive=false).
+    private Vector3 _approachEscapeProjectionW;
     private float _approachEscapeCurrentYards;
     private DateTime _approachEscapeLastAttemptUtc = DateTime.MinValue;
     private DateTime _approachEscapeStartUtc = DateTime.MinValue;
@@ -1065,13 +1079,63 @@ public sealed partial class Navigation : IDisposable
 
     private bool TryConsumeReachedWaypoint(in Vector3 playerPos)
     {
+        // ── Fix FE: ApproachEscape branch ──
+        // When ApproachEscape is driving the destination, the "reached"
+        // check that matters is against _approachEscapeProjectionW, NOT
+        // wayPoints.Peek() (which is the un-consumed patrol top, preserved
+        // through the entire escape). We do NOT pop patrol waypoints while
+        // escape is active — the patrol stack must stay intact so it can
+        // resume cleanly when escape ends.
+        //
+        // Reaching the projection:
+        //   * Clear escape state via ResetApproachEscape (sets
+        //     _approachEscapeActive=false, clears _approachEscapeProjectionW).
+        //   * Clear routeToNextWaypoint (the pather route was computed for
+        //     the projection; next tick needs a fresh route to the patrol
+        //     wpTop).
+        //   * Call CompleteDestinationReached which fires OnDestinationReached
+        //     → FRG.RefillWaypoints(false). This picks the closest mapRoute
+        //     waypoint to the bot's new position and re-pushes the slice —
+        //     identical to the success-path behavior the OLD code achieved
+        //     by clobbering the stack and letting RefillWaypoints rebuild
+        //     it from scratch after the bot reached the (now empty) stack.
+        //
+        // Return true to signal that a "consumption" occurred — Update's
+        // post-call branches treat this the same as a normal patrol-wp pop
+        // (re-checks `active` for pause-during-handler, etc.).
+        if (_approachEscapeActive && _approachEscapeProjectionW != default)
+        {
+            float wpReach = ReachedDistance(OutDoorMinDistance) + 0.35f;
+            if (playerPos.WorldDistanceXYTo(_approachEscapeProjectionW) > wpReach)
+                return false;
+
+            Vector3 projection = _approachEscapeProjectionW;
+            logger.LogWarning(
+                $"[NAV] ApproachEscape: projection reached projection={projection} " +
+                $"player={Nav2D(playerPos)} — clearing escape, patrol stack " +
+                $"intact (wp={wayPoints.Count}). Firing OnDestinationReached " +
+                $"to trigger FRG.RefillWaypoints (closest patrol waypoint to " +
+                $"new position).");
+
+            SetLastSafeAnchor(playerPos);
+            ResetApproachEscape();
+            routeToNextWaypoint.Clear();
+
+            // Mirrors the empty-stack branch's behavior in the normal
+            // patrol path below: CompleteDestinationReached fires
+            // OnDestinationReached, the event FRG subscribes to via
+            // Navigation_OnDestinationReached → RefillWaypoints(false).
+            CompleteDestinationReached();
+            return true;
+        }
+
         if (wayPoints.Count == 0)
             return false;
 
         Vector3 wpTop = Nav2D(wayPoints.Peek());
-        float wpReach = ReachedDistance(OutDoorMinDistance) + 0.35f;
+        float wpReachPatrol = ReachedDistance(OutDoorMinDistance) + 0.35f;
 
-        if (playerPos.WorldDistanceXYTo(wpTop) > wpReach)
+        if (playerPos.WorldDistanceXYTo(wpTop) > wpReachPatrol)
             return false;
 
         Vector3 completed = Nav2D(wayPoints.Pop());
@@ -1282,6 +1346,14 @@ public sealed partial class Navigation : IDisposable
                 $"pos={completionPos} displaced={displaced:0.0}y over {_approachEscapeCurrentYards:0}y attempt. " +
                 $"[diag: lastAttemptUtc={_approachEscapeLastAttemptUtc:HH:mm:ss.fff} yards={_approachEscapeCurrentYards:0} guid={_approachEscapeTargetGuid}]");
             _approachEscapeActive = false;
+            // ── Fix FE ── Pair the active=false with a projection clear so
+            // the field and the gate flag stay in lockstep. The escape-reach
+            // paths in TryConsumeReachedWaypoint and REFILL already do this
+            // via ResetApproachEscape before calling CompleteDestinationReached,
+            // but this defensive clear covers the safety-net case where
+            // CompleteDestinationReached is invoked from a non-escape path
+            // while _approachEscapeActive happens to still be true.
+            _approachEscapeProjectionW = default;
         }
 
         ResetStuckParameters();
@@ -1297,6 +1369,21 @@ public sealed partial class Navigation : IDisposable
     private bool IsAtFinalWaypoint(in Vector3 playerPos, out Vector3 finalWp)
     {
         finalWp = default;
+
+        // ── Fix FE ── During ApproachEscape, the active destination is the
+        // projection (stored in _approachEscapeProjectionW), not wayPoints.Peek().
+        // The "final waypoint" semantics — pop the single remaining wp and
+        // fire CompleteDestinationReached — don't apply: the wayPoints stack
+        // is the preserved patrol route, not the escape target. Returning
+        // false here prevents an incidental "player happens to be near the
+        // last patrol waypoint while escape is active" from clobbering both
+        // the patrol stack (pop wayPoints) AND the escape state
+        // (CompleteDestinationReached → StopAndResetAtDestination clears
+        // _approachEscapeActive). The escape-reach paths in
+        // TryConsumeReachedWaypoint and the REFILL pop-if-reached block
+        // handle the projection-reached case explicitly.
+        if (_approachEscapeActive && _approachEscapeProjectionW != default)
+            return false;
 
         if (wayPoints.Count != 1)
             return false;
@@ -1402,16 +1489,32 @@ public sealed partial class Navigation : IDisposable
 
     private bool RouteTargetsWaypointTop(float eps = 1.5f)
     {
-        if (routeToNextWaypoint.Count == 0 || wayPoints.Count == 0)
+        if (routeToNextWaypoint.Count == 0)
             return true;
 
-        Vector3 wpTop = wayPoints.Peek();
+        // ── Fix FE (run-158) ── During ApproachEscape the routeToNextWaypoint
+        // is computed to reach the projection, NOT wayPoints.Peek(). Comparing
+        // routeEnd to wpTop would always show a mismatch and the consistency
+        // check would falsely clear the in-flight escape route every tick.
+        // Compare to the effective destination instead.
+        bool escapeDest = _approachEscapeActive && _approachEscapeProjectionW != default;
+        Vector3 target;
+        if (escapeDest)
+        {
+            target = _approachEscapeProjectionW;
+        }
+        else
+        {
+            if (wayPoints.Count == 0)
+                return true;
+            target = wayPoints.Peek();
+        }
 
         // Stack.ToArray() returns top-first. Bottom (final route destination) is last.
         var arr = routeToNextWaypoint.ToArray();
         Vector3 routeEnd = arr[arr.Length - 1];
 
-        return routeEnd.WorldDistanceXYTo(wpTop) <= eps;
+        return routeEnd.WorldDistanceXYTo(target) <= eps;
     }
 
     private static float MinDistToAny(Vector3 p, IEnumerable<Vector3> pts)
@@ -2273,6 +2376,36 @@ public sealed partial class Navigation : IDisposable
     /// to the same target (waypoint-sharing mode).
     /// </summary>
     public Vector3 TopWaypointW => wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
+
+    /// <summary>
+    /// Fix FE — the effective navigation destination for path-request,
+    /// reach-detection, and route-consistency purposes. When ApproachEscape is
+    /// active and has a valid projection, returns the projection; otherwise
+    /// returns the patrol top waypoint.
+    /// <para>
+    /// This is the override that prevents ApproachEscape from clobbering the
+    /// patrol stack (run-158 16:33:01: SetSingleWaypoint destroyed 230
+    /// patrol waypoints to navigate to a Z=93.75 cliff projection the bot
+    /// could not reach; the patrol route then could not be restored because
+    /// the only restoration path was OnDestinationReached → FRG.RefillWaypoints,
+    /// which fires only on actually-reaching the projection).
+    /// </para>
+    /// <para>
+    /// Returns <see langword="default"/> when there is no destination at all
+    /// (no escape projection AND no patrol waypoints).
+    /// </para>
+    /// <para>
+    /// Note: <see cref="TopPublishableWaypointW"/> is intentionally NOT
+    /// overridden by escape state — FRG publishes the PATROL waypoint to the
+    /// leader API for the assist to follow, never the local escape
+    /// projection (the assist must not be redirected to the leader's
+    /// transient escape targets).
+    /// </para>
+    /// </summary>
+    public Vector3 EffectiveDestinationW =>
+        (_approachEscapeActive && _approachEscapeProjectionW != default)
+            ? _approachEscapeProjectionW
+            : TopWaypointW;
 
     /// <summary>
     /// World-space coordinates of the topmost <i>non-blacklisted</i> waypoint in the
@@ -3259,7 +3392,53 @@ public sealed partial class Navigation : IDisposable
 
         IsApproachEscapeExhausted = false;
         _approachEscapeHeartbeatLastSec = -1;
-        SetSingleWaypoint(projection);
+
+        // ── Fix FE (run-158 16:33:01:083) ──
+        // Was: SetSingleWaypoint(projection) — which clobbered the patrol stack
+        // (wayPoints.Clear + push of single projection) and relied on the bot
+        // physically reaching the projection to trigger
+        // OnDestinationReached → FRG.RefillWaypoints for route restoration.
+        // When the projection landed off-mesh (Z=93.75 cliff in run-158), the
+        // bot could not reach it and the patrol route was never restored —
+        // permanent stuck.
+        //
+        // Now: store the projection in _approachEscapeProjectionW (Nav2D-
+        // flattened to match wayPoints storage convention). Path-request
+        // target derivation, TryConsumeReachedWaypoint, REFILL's pop-if-reached
+        // check, and RouteTargetsWaypointTop all consult this field while
+        // _approachEscapeActive — the patrol stack stays untouched. Reaching
+        // the projection clears the escape and fires OnDestinationReached
+        // (same FRG.RefillWaypoints outcome as the old success path);
+        // failing/exhausting the escape just clears the projection and the
+        // patrol stack resumes from where it left off.
+        //
+        // We still need the side effects that SetSingleWaypoint/SetWayPoints
+        // produced (other than the wayPoints clobber):
+        //   * active = true with stuckDetector.Acquire if was paused
+        //   * SetLastSafeAnchor at the current player position
+        //   * routeToNextWaypoint.Clear() so the next path request uses the
+        //     new (projection) destination, not a stale patrol-route cache
+        _approachEscapeProjectionW = Nav2D(projection);
+
+        bool wasActive = active;
+        if (!wasActive)
+        {
+            // Mirrors the re-Acquire in SetWayPoints. Without it the
+            // stuckDetector stays in ownerId=0 and Navigation.Update's
+            // IsGettingCloser/SetTargetLocation calls silently no-op (see
+            // StuckDetector.IsOwner gate); the bot would stop moving.
+            stuckDetector.Acquire(StuckOwnerId);
+        }
+        active = true;
+        SetLastSafeAnchor(playerReader.WorldPos);
+        routeToNextWaypoint.Clear();
+
+        logger.LogInformation(
+            $"[NAV-DIAG] ApproachEscape: install projection (no wayPoints clobber) " +
+            $"wasActive={wasActive} stuckDetector.OwnerId={stuckDetector.OwnerId} " +
+            $"Enabled={stuckDetector.Enabled} wpCount={wayPoints.Count}" +
+            (wasActive ? " (already active, no Acquire)" : " (was paused, re-Acquired)"));
+
         _approachEscapeActive = true;
         _approachEscapeStartUtc = DateTime.UtcNow;
         _approachEscapeStartPos = Nav2D(playerReader.WorldPos);
@@ -3736,6 +3915,13 @@ public sealed partial class Navigation : IDisposable
             logger.LogDebug(logMsg);
         _approachEscapeActive = false;
         _approachEscapeCurrentYards = ApproachEscapeStartYards - 10f;
+        // ── Fix FE ── Clear the dedicated projection destination so the
+        // next REFILL tick reverts to wayPoints.Peek()-based navigation.
+        // Without this, EffectiveDestinationW could still report a stale
+        // projection from a prior episode (defensive — the active flag
+        // alone gates it, but defaulting the field is cheap and removes
+        // a foot-gun for future readers).
+        _approachEscapeProjectionW = default;
         _approachRecordedW = default;
         _approachPrevRecordedW = default;
         _approachEscapeAnchorW = default;
@@ -4185,27 +4371,90 @@ public sealed partial class Navigation : IDisposable
 
             if (!SkipBlacklistedWaypoints())
             {
-                RefillExit("SkipBlacklistedWaypoints_false_destinationReached");
-                logger.LogInformation("[NAV] Refill: SkipBlacklistedWaypoints returned false -> destination reached");
-                CompleteDestinationReached();
-                _phase = "exit_SkipBlacklistedWaypoints_false_destinationReached";
-                goto REFILL_EXIT;
+                // ── Fix FE ── If ApproachEscape is active with a valid
+                // projection, the destination is the projection — not
+                // wayPoints.Peek(). Don't let an empty/all-blacklisted
+                // wayPoints stack prematurely fire CompleteDestinationReached
+                // and yank FRG.RefillWaypoints in mid-escape; the escape
+                // either completes by reaching the projection (handled in
+                // TryConsumeReachedWaypoint + the REFILL pop-if-reached
+                // block below) or terminates via ResetApproachEscape (in
+                // which case _approachEscapeActive becomes false and this
+                // branch resumes its old behavior).
+                if (!(_approachEscapeActive && _approachEscapeProjectionW != default))
+                {
+                    RefillExit("SkipBlacklistedWaypoints_false_destinationReached");
+                    logger.LogInformation("[NAV] Refill: SkipBlacklistedWaypoints returned false -> destination reached");
+                    CompleteDestinationReached();
+                    _phase = "exit_SkipBlacklistedWaypoints_false_destinationReached";
+                    goto REFILL_EXIT;
+                }
+                logger.LogDebug(
+                    "[NAV] Refill: SkipBlacklistedWaypoints returned false but ApproachEscape " +
+                    "is active with projection — continuing toward escape destination instead of " +
+                    "firing CompleteDestinationReached.");
             }
 
-            Vector3 targetRaw = wayPoints.Peek();
-            Vector3 targetW = Nav2D(wayPoints.Peek());
+            // ── Fix FE (run-158): treat ApproachEscape projection as the
+            // REFILL destination when escape is active. The empty-stack
+            // SkipBlacklistedWaypoints branch above can be skipped in that
+            // case because the projection — not wayPoints.Peek() — is the
+            // actual destination. (In practice wayPoints is rarely empty
+            // during escape because ATG/PTG triggers escape mid-patrol with
+            // a full route stack; we guard the case defensively.)
+            bool refillEscapeDest = _approachEscapeActive && _approachEscapeProjectionW != default;
+
+            Vector3 targetRaw;
+            Vector3 targetW;
+            if (refillEscapeDest)
+            {
+                targetRaw = _approachEscapeProjectionW;
+                targetW = _approachEscapeProjectionW; // already Nav2D-flattened
+            }
+            else
+            {
+                targetRaw = wayPoints.Peek();
+                targetW = Nav2D(wayPoints.Peek());
+            }
 
             float distance = startW.WorldDistanceXYTo(targetW);
 
             logger.LogDebug(
-                $"[NAV-DBG] REFILL start={startW} wpTop(raw)={targetRaw} wpTop(norm)={targetW} " +
-                $"dist={distance:0.00} usePather? TBD wpCount={wayPoints.Count}");
+                $"[NAV-DBG] REFILL start={startW} {(refillEscapeDest ? "escapeProj" : "wpTop")}(raw)={targetRaw} " +
+                $"{(refillEscapeDest ? "escapeProj" : "wpTop")}(norm)={targetW} " +
+                $"dist={distance:0.00} usePather? TBD wpCount={wayPoints.Count}" +
+                (refillEscapeDest ? " [escapeActive]" : ""));
 
             float wpReached = ReachedDistance(OutDoorMinDistance);
             float wpPopThreshold = MathF.Max(wpReached + 0.35f, POP_DIST - 0.05f);
 
             if (distance <= wpPopThreshold)
             {
+                if (refillEscapeDest)
+                {
+                    // ── Fix FE ── Escape destination reached via REFILL's
+                    // proximity check (mirrors the TryConsumeReachedWaypoint
+                    // path above). Do NOT pop wayPoints — the patrol stack
+                    // is unaffected by ApproachEscape under the structural
+                    // fix. Clear the escape, fire OnDestinationReached so
+                    // FRG.RefillWaypoints picks up the closest patrol
+                    // waypoint to the bot's new position.
+                    Vector3 reachedProjection = _approachEscapeProjectionW;
+                    logger.LogWarning(
+                        $"[NAV] ApproachEscape: projection reached via REFILL " +
+                        $"proximity (projection={reachedProjection} player={startW} " +
+                        $"d={distance:0.00} thr={wpPopThreshold:0.00}) — clearing escape, " +
+                        $"patrol stack intact (wp={wayPoints.Count}).");
+
+                    SetLastSafeAnchor(startW);
+                    ResetApproachEscape();
+                    routeToNextWaypoint.Clear();
+                    CompleteDestinationReached();
+                    RefillExit("approachEscapeProjectionReached_refill");
+                    _phase = "exit_approachEscapeProjectionReached_refill";
+                    goto REFILL_EXIT;
+                }
+
                 var completed = wayPoints.Peek();
                 wayPoints.Pop();
 

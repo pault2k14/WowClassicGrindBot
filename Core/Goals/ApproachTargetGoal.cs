@@ -308,6 +308,24 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             approachStart = GetTimestamp();
             nextStuckCheckTime = MIN_TIME_TILL_IDLE;
 
+            // ── Fix FF Q1-C (audit completion of Fix FC) ──
+            // Fix FC's reset is INCOMPLETE: it resets approachStart and
+            // nextStuckCheckTime (the "Seems stuck" timer family) but
+            // leaves _rangeStuckCheckAtMs and _rangeStuckLastMinRange in
+            // their pre-E5 state. The range-progress check at line ~929
+            // reads those fields; on subsequent ticks after E5 they retain
+            // values from the previous ATG run. Even with Q1-B's
+            // currentRange<=0 sentinel in place, a non-zero-but-stale
+            // _rangeStuckLastMinRange from minutes ago can produce a
+            // currentRange >= stale comparison that fires TryUnstuck
+            // spuriously. Reset both range-tracker fields here so the
+            // E5 early return matches what the normal-path setup at
+            // lines 320-321 below produces (initialMinRange/approachStart
+            // both reset). Symmetric with the OnEnter-time defaults at
+            // lines 365-366 (RangeStuckIntervalMs / float.MaxValue).
+            _rangeStuckCheckAtMs = RangeStuckIntervalMs;
+            _rangeStuckLastMinRange = float.MaxValue;
+
             return;
         }
 
@@ -528,6 +546,31 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             stopMoving.StopForward();
             navigation.Stop();
             navigation.ResetApproachEscape();
+
+            // ── Fix FF Q1-D (Q2a / Fix FC reset symmetry) ──
+            // Fix FC's OnEnter E5 path resets approachStart, nextStuckCheckTime,
+            // _rangeStuckCheckAtMs, _rangeStuckLastMinRange (the last two via
+            // Q1-C above). Q2a is the same semantic path — abort the approach
+            // because the target is in a blacklist rect — but it runs in
+            // Update rather than OnEnter, so without a matching reset the
+            // approach-timer family stays loaded with values from the
+            // current ATG.OnEnter (typically only 100-200 ms in, so
+            // ApproachDurationMs is small and the line ~926 / line ~960
+            // checks usually don't fire YET on the same tick). However:
+            //   * If the planner re-enters ATG for a sibling target before
+            //     the OnEnter reset path runs again (re-entry via the
+            //     ApproachTarget plan rather than a fresh OnEnter), these
+            //     stale baselines persist.
+            //   * Range-progress baseline staleness is the exact failure
+            //     mode Fix FC was originally added to prevent on the E5
+            //     side; Q2a inherits the same hazard.
+            // Mirror Fix FC's reset (now Fix FC + Q1-C combined) for
+            // strict symmetry. Cheap; no downside.
+            approachStart = GetTimestamp();
+            nextStuckCheckTime = MIN_TIME_TILL_IDLE;
+            _rangeStuckCheckAtMs = RangeStuckIntervalMs;
+            _rangeStuckLastMinRange = float.MaxValue;
+
             wait.Update(playerReader.DoubleNetworkLatency);
             wait.Update();
             return;
@@ -926,7 +969,27 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         if (ApproachDurationMs >= _rangeStuckCheckAtMs && !navigation.IsApproachEscapeActive)
         {
             float currentRange = playerReader.MinRange();
-            if (currentRange >= _rangeStuckLastMinRange)
+            // ── Fix FF Q1-B (audit followup, mirrors Fix DS in PTG lines 497, 532) ──
+            // MinRange()==0 is the sentinel for "target not in any detectable
+            // range bracket" (out of every range check, target dead, or
+            // LOS-blocked), NOT a real 0y distance. Without this guard the
+            // comparison reads currentRange=0 and _rangeStuckLastMinRange=0
+            // (or float.MaxValue freshly demoted to 0 via line 1013-1015), then
+            // 0 >= 0 yields TRUE and TryUnstuck fires spuriously. The
+            // run-131 13:42:03 PTG side of this bug is what motivated Fix
+            // DS; the equivalent ATG range-progress check (line 991 below)
+            // carried the same defect uncovered by the Q1 audit. Treat 0
+            // the same way Fix DS treats it: defer to the next interval
+            // rather than fire-and-add-rect.
+            //
+            // Pre-Fix-FE this was catastrophic (clobber → unreachable
+            // projection → deadlock). Post-Fix-FE the bot wastes ~30 s
+            // per spurious fire and the resulting rects accumulate.
+            if (currentRange <= 0f)
+            {
+                _rangeStuckCheckAtMs = ApproachDurationMs + RangeStuckIntervalMs;
+            }
+            else if (currentRange >= _rangeStuckLastMinRange)
             {
                 Log($"No range progress after {RangeStuckIntervalMs}ms ({_rangeStuckLastMinRange:0.0} -> {currentRange:0.0}y) — attempting pather escape. " +
                     $"escalating={navigation.IsApproachEscapeEscalating} exhausted={navigation.IsApproachEscapeExhausted}");
