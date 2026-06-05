@@ -567,17 +567,40 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             navigation.IsApproachEscapePhysicallyStuck
             || navigation.IsApproachEscapeExhausted
             || !navigation.IsInBlacklistArea();
+
+        // ── Fix FN (run-162) — backtrack engage signal ──
+        //
+        // FollowRouteGoal's backtrack state machine drives the leader through
+        // a sequence of route waypoints in reverse. At each waypoint it faces
+        // the IsIgnored caster and runs IsTargetLikelyInBlacklistRect. When
+        // that verdict reads FALSE (mob has stepped outside the rect), FRG
+        // sets navigation.BacktrackEngageGuid = targetGuid for THIS guid
+        // only, signalling Fix 17 to engage on the next tick despite the
+        // mob still being on the IsIgnored map (per the operator's call:
+        // keep IsIgnored sticky, use a one-shot override for engagement).
+        //
+        // engageAllowed in the standard path can still be false on the
+        // EngageWindow tick (the verdict at navigation.IsTargetLikelyIn
+        // BlacklistRect() can flicker between ticks — P3 degenerate may
+        // re-fire while FRG's evaluation snapshot showed P1/P2 miss).
+        // btEngageOverride bypasses that flicker for the verified guid only.
+        // Other IsIgnored GUIDs are unaffected — strictly per-guid scope.
+        bool btEngageOverride =
+            navigation.BacktrackEngageGuid != 0 &&
+            navigation.BacktrackEngageGuid == playerReader.TargetGuid;
+
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
             && !assistStatusProvider.EvadeRecoveryActive
-            && engageAllowed)
+            && (engageAllowed || btEngageOverride))
         {
             logger.LogInformation(
                 $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +
                 $"is on IsIgnored but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
                 $"playerCombat=true, dmgTaken=true, evadeRecovery=false, " +
-                $"insideBlacklistArea={navigation.IsInBlacklistArea()}, noEngage={targetNoEngage}, latched={overrideAlreadyLatched}) — " +
+                $"insideBlacklistArea={navigation.IsInBlacklistArea()}, noEngage={targetNoEngage}, latched={overrideAlreadyLatched}, " +
+                $"btEngageOverride={btEngageOverride}) — " +
                 $"treating as fightable, falling through to engage rather than bailing.");
             currentTargetIsIgnored = false;
 

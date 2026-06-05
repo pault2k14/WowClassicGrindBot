@@ -1690,12 +1690,34 @@ public sealed partial class GoapAgent : IDisposable
         //     / Grind. Standalone Grind doesn't reach Fix L (gated by isPartyModeForFixL
         //     at line ~1500), so this variable is unused in Grind regardless.
         bool engageAllowedForJoin = declaredStuck || !botInsideBlacklistArea;
+
+        // ── Fix FN (run-162) — backtrack signal integration ──
+        //
+        // FollowRouteGoal's backtrack state machine drives the leader through
+        // route waypoints in reverse for caster-in-BL retreat. During the
+        // Navigating/Evaluating phases (IsBacktrackingActive=true), we MUST
+        // suppress this override — otherwise the per-tick verdict flicker
+        // on IsTargetLikelyInBlacklistRect would intermittently set
+        // engageAllowed=true, the override would fire on those ticks, Combat
+        // plan would become eligible (cost 4) and steal from FRG, then press
+        // Approach toward the IsIgnored caster (which is in the rect we're
+        // trying to retreat from) — defeating the purpose of backtrack.
+        //
+        // During the EngageWindow phase (IsBacktrackingActive=false,
+        // BacktrackEngageGuid=verified-out-of-rect guid), we want Combat to
+        // engage CONSISTENTLY, not flicker. So btEngageGuidMatch acts as a
+        // sticky override boost for THIS guid only — additive with the
+        // standard engageAllowed path so other override fires are unaffected.
+        bool btEngageGuidMatch =
+            navigation.BacktrackEngageGuid != 0 &&
+            navigation.BacktrackEngageGuid == playerReader.TargetGuid;
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
-            engageAllowed;
+            !navigation.IsBacktrackingActive &&   // Fix FN: suppress during backtrack travel
+            (engageAllowed || btEngageGuidMatch);  // Fix FN: backtrack EngageWindow boost
         if (selfDefenseOverride)
         {
             targetIgnored = false;
@@ -1706,7 +1728,8 @@ public sealed partial class GoapAgent : IDisposable
                     $"[GoapAgent] IsIgnored self-defense override: target guid={playerReader.TargetGuid} " +
                     $"is on IsIgnored map but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
                     $"playerCombat=true, dmgTaken=true, evadeRecovery=false, " +
-                    $"insideBlacklistArea={botInsideBlacklistArea}, latched={overrideAlreadyLatched}) — " +
+                    $"insideBlacklistArea={botInsideBlacklistArea}, latched={overrideAlreadyLatched}, " +
+                    $"btEngageGuidMatch={btEngageGuidMatch}) — " +
                     $"treating as not-ignored so Combat plan can engage.");
             }
         }

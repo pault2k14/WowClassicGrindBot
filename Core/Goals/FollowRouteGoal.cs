@@ -117,6 +117,33 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     public bool WaitingForAssist =>
         _assistReturnActive || _assistWaitingForFollowing;
 
+    // ── Fix FN (run-162) — caster-in-BL retreat backtrack state ──
+    //
+    // State machine that drives the leader back through prior route
+    // waypoints when an IsIgnored caster inside a BL rect is hitting us
+    // from outside our reachable range. At each backtrack waypoint, we
+    // face the mob (Interact + StepBackwards to cancel auto-run), wait
+    // ~700ms for TargetMapPos to refresh, then re-check IsTargetLikelyIn
+    // BlacklistRect. If OUT-OF-RECT, signal Combat to engage (via
+    // navigation.BacktrackEngageGuid). If still IN-RECT, advance to
+    // the next prior waypoint. See UpdateBacktrackStateMachine for the
+    // full state transitions.
+    //
+    // State persists across Combat-plan preemption (Combat steals briefly
+    // when a non-IsIgnored mob aggros during travel, then returns to FRG;
+    // backtrack resumes from the preserved phase). State clears on Abort()
+    // or when self-defense conditions no longer hold (combat drop, target
+    // lost, target killed, or route start reached).
+    private enum BacktrackPhase { None, Navigating, Evaluating, EngageWindow }
+    private BacktrackPhase _btPhase = BacktrackPhase.None;
+    private int _btStartRouteIdx = -1;
+    private int _btStepsBack;
+    private int _btTargetGuid;
+    private DateTime _btArrivalUtc = DateTime.MinValue;
+    private Vector3 _btCurrentWaypointW;
+    private const int BtEvalDelayMs = 700;
+    private const float BtArrivalYards = 3.5f;
+
     private bool _assistRewindActive;
     private Vector3 _assistRewindAnchorW;
     private int _assistAttempt;
@@ -368,6 +395,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Abort()
     {
+        // Fix FN: clear backtrack state on Abort (party-combat events, plan
+        // resets via AbortEvent, etc.). Mid-backtrack Abort would otherwise
+        // leave _btPhase non-None and the navigation flags set, confusing
+        // BlacklistTargetGoal/CombatGoal/GoapAgent on the next FRG entry.
+        if (_btPhase != BacktrackPhase.None)
+            ExitBacktrack("FRG.Abort()");
+
         if (bits.Target() && targetBlacklist.Is())
             SuppressCurrentTargetBriefly();
 
@@ -1116,6 +1150,37 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         if (bits.Drowning())
             input.PressJump();
 
+        // ── Fix FN (run-162) — caster-in-BL retreat backtrack ──
+        //
+        // Drives the leader back through prior route waypoints when an
+        // IsIgnored caster inside a BL rect is hitting us from outside our
+        // reachable range. See UpdateBacktrackStateMachine for details and
+        // the BacktrackPhase fields near the class top.
+        //
+        // Must run BEFORE IsSuppressedBlacklistedTarget below (which would
+        // call PressClearTarget on our tracking target) and BEFORE the
+        // PartyLeader pause-for-assist block (which Fix FM clears for self-
+        // defense already, but backtrack supersedes that: backtrack drives
+        // navigation directly rather than just lifting the pause).
+        //
+        // Leader-only — the assist's FFG navigates to the leader's published
+        // TargetWaypoint, so when backtrack pushes a backwards waypoint and
+        // publishes it via leaderNavProvider.SetTargetWaypoint, the assist
+        // follows naturally without code changes on the FFG side.
+        if (classConfig.Mode == Mode.PartyLeader && UpdateBacktrackStateMachine())
+        {
+            // Backtrack owns this tick.
+            //   • Navigating: drive navigation toward the backtrack waypoint.
+            //   • Evaluating: stationary while we wait for facing/refresh
+            //     and the verdict re-check.
+            //   • EngageWindow: Combat plan owns the bot (selected by GOAP
+            //     planner via Fix FN engage signals); we just hold state.
+            if (_btPhase == BacktrackPhase.Navigating)
+                navigation.Update(CancellationToken.None);
+            wait.Update();
+            return;
+        }
+
         if (IsSuppressedBlacklistedTarget())
         {
             Log("Suppressed recently-blacklisted target reacquired, clearing again");
@@ -1214,26 +1279,92 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
                 bool inOrNearBlacklist = insideBlacklist || nearBlacklistEdge;
 
-                if (inOrNearBlacklist && _pausedByAssistDistance)
+                // ── Fix FM (run-162 LC=01:39:21:933→01:40:01:418 — leader paused
+                //    at <974.47, 270.15> for ~32 s under caster fire while assist
+                //    was 32.7 y away; pause set at LC=01:39:37:022 "Pausing for
+                //    assist (at waypoint) — dist=32.7y status=TooFar") ──
+                //
+                // Fix I-3's 6 y near-BL buffer caught "leader strands AT rect
+                // edge" but missed "leader strands JUST OUTSIDE the buffer under
+                // attack from a caster INSIDE the rect." Casters have ~30 y range,
+                // so the danger zone extends far beyond rect+6 y inflate.
+                //
+                // Run-162 geometry: rect 4007 = [952..999, 277..327], inflated
+                // by 6 → [946..1005, 271..333]. Leader at Y=270.15 was 0.85 y
+                // outside the inflated MinY=271. nearBlacklistEdge=false →
+                // Fix I-3 didn't fire. _pausedByAssistDistance stayed true.
+                // The caster (Deepmoss Venomspitter guid=2267577) kept hitting
+                // the leader from inside the rect for the full 32 s until the
+                // user paused the bot manually.
+                //
+                // The Fix-32 design comment at line ~2243 promises "Combat
+                // self-defense via Fix 17/22/26 still works" — but for an
+                // IN-RECT caster CombatGoal Fix 17 is gated by engageAllowed
+                // (CombatGoal.cs:528-532), which evaluates false when target
+                // reads in-rect on most ticks (P3 degenerate / P1 hit). So
+                // Fix 17 mostly doesn't fire, the combat-path escape from the
+                // pause never engages, and the leader is stranded.
+                //
+                // More precise signal: leader is in ACTIVE SELF-DEFENSE
+                // against an IsIgnored target — same conditions as GoapAgent's
+                // IsIgnored self-defense override (line 1693-1698) minus
+                // dmgTaken and !evadeRecoveryActive (omitted to avoid pulling
+                // CombatLog and AssistStatusProvider into FRG; same trade-off
+                // documented in BlacklistTargetGoal.cs Fix FL). When this
+                // state holds, pause-for-assist becomes a death trap — retreat
+                // is the path out. FRG's existing BL-avoidance (DetourMargin,
+                // RefillWaypoints rect-rejection) handles routing safely.
+                //
+                // Rendezvous safety: when both bots are in self-defense
+                // together (typical: assist's Fix 17 first-activation sets
+                // CantFollow via Fix 23, which is one of the inputs to the
+                // leader's distance gate), the assist's NavigatingToLeader
+                // path resumes following once combat dissolves on its side.
+                // Rendezvous reconstitutes naturally after caster aggro
+                // breaks.
+                bool inSelfDefenseVsIsIgnored =
+                    bits.Target() &&
+                    targetBlacklist.Is() &&
+                    bits.Combat() &&
+                    (playerReader.TargetTarget is UnitsTarget.Me
+                                              or UnitsTarget.Pet
+                                              or UnitsTarget.PartyOrPet);
+
+                if ((inOrNearBlacklist || inSelfDefenseVsIsIgnored) && _pausedByAssistDistance)
                 {
-                    string locationDesc = insideBlacklist ? "inside" : $"within {NearBLEdgeBufferYards:0}y of";
+                    string locationDesc;
+                    if (inSelfDefenseVsIsIgnored && !inOrNearBlacklist)
+                    {
+                        locationDesc = $"in active self-defense vs IsIgnored target guid=" +
+                                       $"{playerReader.TargetGuid} (TargetTarget={playerReader.TargetTarget}) " +
+                                       "[Fix FM]";
+                    }
+                    else if (insideBlacklist)
+                    {
+                        locationDesc = "inside a blacklist [Fix I-3]";
+                    }
+                    else
+                    {
+                        locationDesc = $"within {NearBLEdgeBufferYards:0}y of a blacklist [Fix I-3]";
+                    }
                     logger.LogWarning(
-                        $"[FRG] Distance gate suppressed: leader is {locationDesc} a blacklist at " +
+                        $"[FRG] Distance gate suppressed: leader is {locationDesc} at " +
                         $"<{playerReader.WorldPos.X:F2},{playerReader.WorldPos.Y:F2},{playerReader.WorldPos.Z:F2}> " +
-                        "— resuming pathing so the escape route can fire. " +
+                        "— resuming pathing so the escape/retreat route can fire. " +
                         "Distance gate will re-evaluate after escape on the next tick.");
                     _pausedByAssistDistance = false;
                     leaderNavProvider.SetPausedForAssist(false); // Fix T
                     navigation.Resume();
                 }
 
-                // When inside-or-near a blacklist, force shouldPause=false so
-                // the pause-entry branch below cannot re-enter the pause we
-                // just cleared. _pausedByAssistDistance is already false
-                // (either we just cleared it above, or the leader was never
-                // paused), so the resume-exit branch (`else if`) also cannot
-                // fire.
-                bool shouldPause = !inOrNearBlacklist && assistStateStore.ShouldLeaderPauseForAssist(
+                // When inside-or-near a blacklist OR in self-defense vs IsIgnored,
+                // force shouldPause=false so the pause-entry branch below cannot
+                // re-enter the pause we just cleared. _pausedByAssistDistance is
+                // already false (either we just cleared it above, or the leader
+                // was never paused), so the resume-exit branch (`else if`) also
+                // cannot fire.
+                bool retreatPriorityActive = inOrNearBlacklist || inSelfDefenseVsIsIgnored;
+                bool shouldPause = !retreatPriorityActive && assistStateStore.ShouldLeaderPauseForAssist(
                     playerReader.WorldPos, LeaderPauseYards);
 
                 bool shouldResume = assistStateStore.ShouldLeaderResumePatrol(
@@ -2185,8 +2316,22 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             && navigation.AreaBlacklist != null
             && navigation.AreaBlacklist.TryGetContainingRectInflated(
                 playerReader.WorldPos, NearBLEdgeBufferYards_BF, out _);
-        if (insideBlacklistHere || nearBlacklistEdgeHere)
-            return; // let the leader escape the blacklist first
+        // Fix FM (run-162): also skip pause-SET when the leader is in active
+        // self-defense vs an IsIgnored target. Casters inside a BL rect can
+        // hit the leader from beyond the 6 y near-BL buffer; setting the
+        // pause here would strand the leader in the caster's range until
+        // combat ends some other way. Mirror the Update-path Fix FM logic
+        // at line ~1217 — same conditions, same intent (retreat priority
+        // over pause-for-assist). See that block for the full rationale.
+        bool inSelfDefenseVsIsIgnoredHere =
+            bits.Target() &&
+            targetBlacklist.Is() &&
+            bits.Combat() &&
+            (playerReader.TargetTarget is UnitsTarget.Me
+                                      or UnitsTarget.Pet
+                                      or UnitsTarget.PartyOrPet);
+        if (insideBlacklistHere || nearBlacklistEdgeHere || inSelfDefenseVsIsIgnoredHere)
+            return; // let the leader escape the blacklist / retreat from in-rect caster
 
         bool shouldPauseHere = assistStateStore.ShouldLeaderPauseForAssist(
             playerReader.WorldPos, LeaderPauseYards);
@@ -2682,5 +2827,249 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             leaderNavProvider.ClearTargetWaypoint();
         }
+    }
+
+    // ── Fix FN (run-162) — caster-in-BL retreat backtrack state machine ──
+    //
+    // Returns true if backtrack owns this tick (caller skips normal forward
+    // navigation logic). False otherwise (backtrack is idle and FRG should
+    // proceed with its standard patrol behavior).
+    //
+    // Per-phase responsibilities:
+    //   • None — entry detection. When self-defense conditions hold AND the
+    //     verdict says target is in a BL rect AND we have route waypoints
+    //     behind us, transition to Navigating and push the first backtrack
+    //     waypoint. Set navigation.IsBacktrackingActive=true so BL goal
+    //     yields and GoapAgent's self-defense override suppresses (preventing
+    //     Combat steal during travel).
+    //   • Navigating — drive navigation toward the current backtrack waypoint.
+    //     On arrival, stop motion, face the target (PressInteract — and
+    //     immediately tap StepBackwards to cancel the Interact auto-run),
+    //     transition to Evaluating.
+    //   • Evaluating — wait BtEvalDelayMs (~700ms) for facing + TargetMapPos
+    //     refresh, then re-check IsTargetLikelyInBlacklistRect:
+    //       - verdict=false (mob outside rect) → set BacktrackEngageGuid,
+    //         clear IsBacktrackingActive, transition to EngageWindow. Combat
+    //         plan will become eligible via Fix 17 btEngageOverride and
+    //         engage this guid.
+    //       - verdict=true (still in rect) → advance to next prior waypoint
+    //         and transition back to Navigating.
+    //   • EngageWindow — Combat owns the bot. We monitor for exit conditions:
+    //       - bits.Combat() false → exit (combat dropped).
+    //       - target lost or guid changed → exit (kill credit or escape).
+    //       - mob re-enters rect → resume backtrack from current spot.
+    //
+    // Exit conditions (any phase): self-defense continuation check fails
+    // (target lost, combat dropped, target swapped) → ExitBacktrack with
+    // diagnostic reason logged.
+    private bool UpdateBacktrackStateMachine()
+    {
+        // Same condition signature as Fix FM in FRG line ~1260 PLUS the
+        // verdict requirement: we only enter backtrack when target reads
+        // IN the rect (= can't engage from current spot). If verdict says
+        // OUT, the existing override path handles engagement.
+        bool inSelfDefenseInRect =
+            bits.Target() &&
+            targetBlacklist.Is() &&
+            bits.Combat() &&
+            (playerReader.TargetTarget is UnitsTarget.Me
+                                       or UnitsTarget.Pet
+                                       or UnitsTarget.PartyOrPet) &&
+            navigation.IsTargetLikelyInBlacklistRect();
+
+        switch (_btPhase)
+        {
+            case BacktrackPhase.None:
+                if (!inSelfDefenseInRect)
+                    return false;
+                int curIdx = ProjectCurrentRouteIndex();
+                if (curIdx <= 0)
+                {
+                    // No route loaded, or already at start of route — cannot backtrack.
+                    return false;
+                }
+                _btStartRouteIdx = curIdx;
+                _btStepsBack = 1;
+                _btTargetGuid = playerReader.TargetGuid;
+                navigation.IsBacktrackingActive = true;
+                navigation.BacktrackEngageGuid = 0;
+                if (!PushBacktrackWaypoint())
+                {
+                    ExitBacktrack("could not push first backtrack waypoint");
+                    return false;
+                }
+                _btPhase = BacktrackPhase.Navigating;
+                logger.LogWarning(
+                    $"[FRG] [FIX-FIRE] FN: Entering BACKTRACK — IsIgnored caster guid={_btTargetGuid} reads in-rect. " +
+                    $"Starting route idx={_btStartRouteIdx}; first backtrack target " +
+                    $"<{_btCurrentWaypointW.X:F2},{_btCurrentWaypointW.Y:F2}>.");
+                return true;
+
+            case BacktrackPhase.Navigating:
+                if (!IsBacktrackContinuationValid())
+                {
+                    ExitBacktrack("self-defense conditions cleared during navigation");
+                    return false;
+                }
+                float dist = playerReader.WorldPos.WorldDistanceXYTo(_btCurrentWaypointW);
+                if (dist < BtArrivalYards)
+                {
+                    navigation.StopMovement();  // release any held forward key
+                    // Face target. PressInteract turns the character toward
+                    // the target AND starts the interact auto-run (the bot
+                    // would walk to interact range, i.e. ~5y). To avoid the
+                    // bot drifting TOWARD the caster (into the rect we're
+                    // retreating from), immediately tap StepBackwards: any
+                    // direct movement key cancels the auto-run, and the 100ms
+                    // backward tap also displaces the bot ~0.5y away. Net
+                    // result: bot is now facing the target, stationary, and
+                    // ~0.5y further from the rect.
+                    input.PressInteract();
+                    input.StepBackwards();
+                    _btArrivalUtc = DateTime.UtcNow;
+                    _btPhase = BacktrackPhase.Evaluating;
+                    logger.LogInformation(
+                        $"[FRG] FN: Arrived at backtrack waypoint #{_btStepsBack} " +
+                        $"(routeIdx={(_btStartRouteIdx - _btStepsBack)}). " +
+                        $"Faced target via Interact+StepBackwards; settling {BtEvalDelayMs}ms for verdict.");
+                }
+                return true;
+
+            case BacktrackPhase.Evaluating:
+                if (!IsBacktrackContinuationValid())
+                {
+                    ExitBacktrack("self-defense conditions cleared during evaluation");
+                    return false;
+                }
+                if ((DateTime.UtcNow - _btArrivalUtc).TotalMilliseconds < BtEvalDelayMs)
+                    return true;  // wait for facing + addon refresh
+                bool stillInRect = navigation.IsTargetLikelyInBlacklistRect();
+                if (!stillInRect)
+                {
+                    // Mob has stepped out — engage via Fix FN signal. We
+                    // intentionally keep IsIgnored sticky on this guid (per
+                    // design call); the BacktrackEngageGuid signal makes
+                    // CombatGoal Fix 17 and GoapAgent's self-defense override
+                    // ignore the IsIgnored map for THIS guid only.
+                    navigation.IsBacktrackingActive = false;
+                    navigation.BacktrackEngageGuid = _btTargetGuid;
+                    _btPhase = BacktrackPhase.EngageWindow;
+                    logger.LogWarning(
+                        $"[FRG] [FIX-FIRE] FN: Verdict at backtrack waypoint #{_btStepsBack} = OUT-OF-RECT " +
+                        $"for guid={_btTargetGuid}. Signaling BacktrackEngageGuid; Combat plan will engage.");
+                }
+                else
+                {
+                    _btStepsBack++;
+                    int nextIdx = _btStartRouteIdx - _btStepsBack;
+                    if (nextIdx >= 0 && PushBacktrackWaypoint())
+                    {
+                        _btPhase = BacktrackPhase.Navigating;
+                        logger.LogInformation(
+                            $"[FRG] FN: Verdict still IN-RECT — advancing to backtrack waypoint #{_btStepsBack} (routeIdx={nextIdx}).");
+                    }
+                    else
+                    {
+                        ExitBacktrack($"reached start of route (stepsBack={_btStepsBack} from start={_btStartRouteIdx})");
+                        return false;
+                    }
+                }
+                return true;
+
+            case BacktrackPhase.EngageWindow:
+                // Combat plan owns the bot during this phase. We just hold
+                // state and watch for exit conditions.
+                if (!bits.Combat() || !bits.Target() || playerReader.TargetGuid != _btTargetGuid)
+                {
+                    ExitBacktrack("combat dropped or target changed during engage window");
+                    return false;
+                }
+                if (navigation.IsTargetLikelyInBlacklistRect())
+                {
+                    // Mob slipped back into the rect during the engage
+                    // attempt. Resume backtracking from current position
+                    // (don't reset _btStartRouteIdx — keep retreating).
+                    logger.LogWarning(
+                        $"[FRG] FN: Engage window — guid={_btTargetGuid} re-entered rect. Resuming backtrack.");
+                    navigation.BacktrackEngageGuid = 0;
+                    navigation.IsBacktrackingActive = true;
+                    _btStepsBack++;
+                    int nextIdx = _btStartRouteIdx - _btStepsBack;
+                    if (nextIdx >= 0 && PushBacktrackWaypoint())
+                    {
+                        _btPhase = BacktrackPhase.Navigating;
+                    }
+                    else
+                    {
+                        ExitBacktrack("mob re-entered rect but no more backwards waypoints");
+                        return false;
+                    }
+                }
+                // Returning true keeps the caller from running normal FRG
+                // forward-navigation logic — Combat plan is selected by the
+                // GOAP planner via the engage signal and drives the bot.
+                return true;
+        }
+        return false;
+    }
+
+    private bool IsBacktrackContinuationValid()
+    {
+        return bits.Combat()
+            && bits.Target()
+            && playerReader.TargetGuid == _btTargetGuid
+            && targetBlacklist.Is();
+    }
+
+    private void ExitBacktrack(string reason)
+    {
+        logger.LogInformation(
+            $"[FRG] FN: Exiting backtrack — {reason}. " +
+            $"phase={_btPhase}→None, stepsBack={_btStepsBack}, guid={_btTargetGuid}.");
+        _btPhase = BacktrackPhase.None;
+        _btStartRouteIdx = -1;
+        _btStepsBack = 0;
+        _btTargetGuid = 0;
+        _btCurrentWaypointW = default;
+        _btArrivalUtc = DateTime.MinValue;
+        navigation.IsBacktrackingActive = false;
+        navigation.BacktrackEngageGuid = 0;
+    }
+
+    private int ProjectCurrentRouteIndex()
+    {
+        Vector3[] path = pathSettings.Path;
+        if (path.Length == 0)
+            return -1;
+
+        Vector3 playerW = playerReader.WorldPos;
+        int bestIdx = -1;
+        float bestDistSq = float.MaxValue;
+        for (int i = 0; i < path.Length; i++)
+        {
+            Vector3 wpW = WorldMapAreaDB.ToWorld_FlipXY(path[i], playerReader.WorldMapArea);
+            float dx = wpW.X - playerW.X;
+            float dy = wpW.Y - playerW.Y;
+            float dSq = dx * dx + dy * dy;
+            if (dSq < bestDistSq)
+            {
+                bestDistSq = dSq;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
+    }
+
+    private bool PushBacktrackWaypoint()
+    {
+        Vector3[] path = pathSettings.Path;
+        int idx = _btStartRouteIdx - _btStepsBack;
+        if (idx < 0 || idx >= path.Length)
+            return false;
+        Vector3 wpW = WorldMapAreaDB.ToWorld_FlipXY(path[idx], playerReader.WorldMapArea);
+        _btCurrentWaypointW = wpW;
+        navigation.SetSingleWaypoint(wpW);
+        leaderNavProvider.SetTargetWaypoint(wpW);
+        return true;
     }
 }

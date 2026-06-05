@@ -223,6 +223,23 @@ public sealed partial class Navigation : IDisposable
     // body-chase semantics during patrol.
     public Vector3[] LoadedRoute { get; private set; } = Array.Empty<Vector3>();
 
+    // ── Fix FN (run-162) — caster-in-BL retreat backtrack signals ──
+    //
+    // Set/cleared by FollowRouteGoal's backtrack state machine. Consumed by:
+    //   • BlacklistTargetGoal.CanRun() — yields when IsBacktrackingActive=true
+    //     so the target slot stays occupied for facing + IsTargetLikelyInBlacklist
+    //     Rect evaluation at each backtrack waypoint.
+    //   • CombatGoal Fix 17 — accepts BacktrackEngageGuid as an additional
+    //     "engage allowed" signal for the matching GUID during the EngageWindow
+    //     phase (mob has been verified outside the rect; Combat plan may engage
+    //     this specific GUID without flipping the IsIgnored map).
+    //
+    // volatile because the consumers may read these from goal-execution threads
+    // while FRG writes from the same thread — declared volatile defensively to
+    // match the convention used by other cross-component flags on this class.
+    public volatile bool IsBacktrackingActive;
+    public volatile int BacktrackEngageGuid;
+
     public DateTime LastActive { get; private set; }
 
     public event Action? OnPathCalculated;
