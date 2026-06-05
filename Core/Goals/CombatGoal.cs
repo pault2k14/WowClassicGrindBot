@@ -785,17 +785,108 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (currentTargetIsIgnored && isPartyMode && !focusTargetIsIgnored)
+        // ── Fix FJ (run-161 LC=15:11:26:328 → 15:11:35:090) ──
+        //
+        // Run-161 final combat session evidence — leader is PartyLeader,
+        // focus is the assist:
+        //
+        //   LC=15:11:26:273  Kill credit detected (mob 2229960 dies — the
+        //                    assist's smite/SW:Pain damage finished it; the
+        //                    leader was frozen 15s before and contributed
+        //                    nothing offensive to this kill).
+        //   LC=15:11:26:328  CombatGoal "Lost target!" (line 1216).
+        //   LC=15:11:26:374  "Possible threats 2!" (line 1481) +
+        //                    PressNearestTarget(Tab) fires (FindPossibleThreats
+        //                    line ~1320). Tab is async — keypress takes ~50ms
+        //                    OS → ~variable WoW client → next addon GlobalTime
+        //                    tick before bits.Target() reflects the new GUID.
+        //   LC=15:11:29:406  Case 2 (this block) fires:
+        //                       "Current target guid=0 is ignored —
+        //                        swapping to focus chain target guid=2229960"
+        //                    But 2229960 is dead (the leader saw kill credit
+        //                    for it at LC=15:11:26:273). The leader's
+        //                    FocusTargetGuid is stale because the assist had
+        //                    looted but the assist's status broadcast hadn't
+        //                    propagated a refreshed focus state yet.
+        //                    PressTargetFocus + PressTargetOfTarget → target
+        //                    becomes 2229960 (dead) or 0; WoW immediately
+        //                    clears dead target slots.
+        //   LC=15:11:29:544  "Lost target!" / "Clear current dead target!"
+        //                    (lines 1216, 1225).
+        //   LC=15:11:29:606  Search Possible Threats → FindPossibleThreats
+        //                    line 1280 correctly skips "Found new combat
+        //                    target of focus" because that path gates on
+        //                    bits.FocusTarget_Alive() which is FALSE.
+        //   LC=15:11:29:652  Tab pressed (PressNearestTarget).
+        //   LC=15:11:29:653  Falls through to wait.Till(GCD*2 ≈ 3s) at
+        //                    line 1482 waiting for alive target OR
+        //                    !bits.Combat().
+        //   LC=15:11:32:705  Cycle repeats — Case 2 fires AGAIN with the
+        //                    same dead GUID 2229960, overwriting whatever
+        //                    Tab finally selected during the 3s wait.
+        //   LC=15:11:35:090  Plan transitions to Consume Corpse — second
+        //                    mob died (the assist killed it during the
+        //                    9-second swap loop the leader spent doing
+        //                    nothing useful).
+        //
+        // Root cause: this block is the only focus-chain swap path in
+        // CombatGoal.cs that does NOT gate on bits.FocusTarget_Alive().
+        // Every parallel path does:
+        //   line 969  (... && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile())
+        //   line 1052 (... && bits.FocusTarget_Hostile() && bits.FocusTarget_Alive())
+        //   line 1058 (... && bits.FocusTarget_Alive() && bits.Focus_Combat())
+        //   line 1221 (... && bits.FocusTarget() && bits.FocusTarget_Alive() && bits.FocusTarget_Hostile())
+        //   line 1280 (... && bits.FocusTarget_Alive() && ...)
+        //   line 1463 (... && bits.FocusTarget_Hostile() && bits.FocusTarget_Alive())
+        //
+        // The `!focusTargetIsIgnored` precondition only checks
+        //   focusTargetIsIgnored = !bits.FocusTarget() || playerReader.IsIgnored(playerReader.FocusTargetGuid)
+        // — a focus target that just died still has its slot populated
+        // (bits.FocusTarget()=true) and isn't in the IsIgnored map
+        // (IsIgnored=false), so the gate passes. The asymmetry was
+        // benign while Case 2 only ran in the "bot auto-aggroed a
+        // blacklisted mob, focus is fighting a live one" scenario it was
+        // designed for (line 790-795 comment) — focus targets in that
+        // scenario are alive by construction. The run-161 scenario
+        // exposes it: bot has NO target (TargetGuid=0, which also makes
+        // currentTargetIsIgnored=true via !bits.Target()), and the
+        // focus's reported target just died. Case 2 was never meant for
+        // "swap to whatever the focus is currently pointing at, even if
+        // dead" — adding the alive gate restores the original intent.
+        //
+        // Fix: add `&& bits.FocusTarget_Alive()`. When the focus's target
+        // is reported dead/stale, do not swap to it. Fall through to the
+        // "Lost target!" / FindPossibleThreats path, which has the
+        // matching alive gate at line 1280 and will correctly:
+        //   - skip the focus-chain swap (FocusTarget_Alive=false)
+        //   - run Tab cycling (PressNearestTarget)
+        //   - wait via wait.Till for either alive-target or out-of-combat
+        // Tab results that do bind are no longer overwritten by Case 2
+        // firing again on the same dead GUID.
+        //
+        // What this does NOT change:
+        //   - Case 2's original use case (auto-aggro onto blacklisted mob
+        //     while focus has live fightable target): focus is alive, gate
+        //     passes, swap fires identically.
+        //   - Case 3 (line 774) bail behavior is untouched — that path
+        //     already handles "nothing fightable in any party slot".
+        //   - Fix L party-assist mirror (line 710) is upstream and
+        //     untouched — it flips focusTargetIsIgnored=false when the
+        //     party-assist override conditions hold; those conditions
+        //     already include FocusTarget_Alive checks elsewhere.
+        if (currentTargetIsIgnored && isPartyMode && !focusTargetIsIgnored
+            && bits.FocusTarget_Alive())
         {
             // Case 2: bot's own target is blacklisted but focus chain has a
-            // fightable mob. Swap: TargetFocus selects the focus unit
+            // fightable LIVE mob. Swap: TargetFocus selects the focus unit
             // (party member), TargetOfTarget then selects what they're
             // fighting. WoW Classic sticky-targeting will keep us on that
             // GUID for the remainder of the fight (auto-aggro from Mob A
             // will not re-acquire because we already have a target).
             logger.LogInformation(
-                $"[CombatGoal] Current target guid={playerReader.TargetGuid} is ignored — " +
-                $"swapping to focus chain target guid={playerReader.FocusTargetGuid}.");
+                $"[CombatGoal] [FIX-FIRE] FJ: Current target guid={playerReader.TargetGuid} " +
+                $"is ignored — swapping to focus chain target guid={playerReader.FocusTargetGuid} " +
+                $"(focus target alive: gate passed).");
             input.PressTargetFocus();
             wait.Update();
             input.PressTargetOfTarget();
