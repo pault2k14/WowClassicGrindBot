@@ -3412,6 +3412,34 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private bool TryCasterRetreat()
     {
+        // ── Section D DISABLED (run-163 operator decision) ──
+        //
+        // "Extend away from the rect instead of reuniting" was the wrong
+        // design for this scenario. Operator clarified after run-163: when
+        // the assist is attacked by an in-rect (invalid) mob, the assist
+        // should navigate to the LEADER and help with whatever the leader
+        // is engaging — NOT retreat further from the leader.
+        //
+        // The replacement mechanism:
+        //   • Fix M (CombatGoal.cs:~471) already blacklists the in-rect
+        //     attacker on the assist's IsIgnored map.
+        //   • Combat's AssistFocus precondition incombatrange=true (added
+        //     at CombatGoal.cs:~171) makes Combat ineligible when the
+        //     assist is out of attack range — preventing the run-163
+        //     "stuck on focus chain target it can't reach" loop.
+        //   • The new assistshouldfollow disjunct (Fix FQ, GoapAgent.cs
+        //     line ~1916) keeps FFG eligible while in-combat-but-can't-
+        //     engage, so FFG drives the assist toward the leader. Once
+        //     close enough, Combat re-fires via Fix FJ swap to the
+        //     leader's target and assist helps with the kill.
+        //
+        // The Section D logic below is preserved as inert reference code
+        // (early return here disables it). If a future scenario surfaces
+        // where retreating-not-reuniting is the right call, this gate can
+        // be lifted and the logic re-enabled with stronger guards.
+        return false;
+
+#pragma warning disable CS0162 // Unreachable code — intentional (Section D disabled per run-163)
         if (_navState == NavState.CantFollow) return false;
         if (_escapePhase != CantFollowEscapePhase.NotStarted) return false;
         if (navigation.IsInBlacklistArea()) { DeactivateCasterRetreat(); return false; }
@@ -3469,6 +3497,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         }
         wait.Update();
         return true;
+#pragma warning restore CS0162
     }
 
     private void DeactivateCasterRetreat()

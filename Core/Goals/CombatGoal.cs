@@ -116,6 +116,28 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             // (= the leader's target). When only Mob A is around, both slots
             // are ignored → key true → Combat blocked → FFG continues retreat.
             AddPrecondition(GoapKey.allPartyTargetsIsIgnored, false);
+            // ── Fix FQ (run-163) — require in-range target to engage ──
+            //
+            // Previously absent from the AssistFocus branch (Grind has it
+            // at line ~188), which meant Combat ran even when the assist
+            // was 40+ y from the focus chain target it was trying to
+            // engage — the assist locked into the "Taking damage but not
+            // within combat range of focus target" branch at line ~1205,
+            // spinning Tab for 15 s+ while taking caster fire (run-163
+            // AC=12:24:02→17 at <952, 291.6>). With this precondition,
+            // Combat exits when out of attack range; FFG takes over via
+            // the new assistshouldfollow disjunct (GoapAgent.cs ~line
+            // 1916) and navigates the assist toward the leader. Once
+            // close enough, incombatrange flips true and Combat re-fires
+            // — assist joins the leader's engagement via Fix FJ.
+            //
+            // For Priest (the run-163 assist class) WithinCombatRange
+            // checks Priest_Smite at ~30 y range (SpellInRange.cs:168).
+            // CW hysteresis (1500 ms grace, published at GoapAgent
+            // ~line 800) prevents flicker at the boundary so Combat
+            // doesn't oscillate as the assist moves through the edge
+            // of range. Mirrors the gating ATG.AssistFocus already uses.
+            AddPrecondition(GoapKey.incombatrange, true);
         }
         else if(classConfig.Mode == Mode.PartyLeader)
         {

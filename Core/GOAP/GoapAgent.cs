@@ -1915,7 +1915,41 @@ public sealed partial class GoapAgent : IDisposable
             (evadeRecoveryActive ||
              assistStatusProvider.CantFollow ||
              (!(playerCombat && dmgTaken) && !dmgDone && !dmgTaken) ||
-             (targetIgnored && focusTargetIgnored));
+             (targetIgnored && focusTargetIgnored) ||
+             // ── Fix FQ (run-163) — in-combat-but-can't-engage → follow leader ──
+             //
+             // When the assist is in combat but can't actually attack — either
+             // no target acquired, or current target is the focus chain target
+             // (= leader's target) and it's out of combat range — the right
+             // behavior is "go to the leader and help with what they're
+             // fighting" (operator design clarified after run-163). Keeping
+             // assistshouldfollow=true here makes FFG eligible so it navigates
+             // toward the leader; once close enough, the AssistFocus Combat
+             // precondition incombatrange=true (added at CombatGoal.cs line
+             // ~171) becomes satisfied and Combat takes over to engage.
+             //
+             // run-163 failure without this disjunct: at AC=12:24:01:941 all
+             // four prior disjuncts evaluated false (in active combat with
+             // damage taken, no CantFollow rising edge, focusTargetIgnored
+             // false because leader's new pull target 2303487 was not on the
+             // assist's IsIgnored map). assistshouldfollow→false, FFG
+             // ineligible, Combat plan selected anyway via partymembercombat
+             // (which has no hastarget/incombatrange requirement in its
+             // AssistFocus branch — that's what the new precondition fixes).
+             // Combat then locked in the "Taking damage but not within combat
+             // range of focus target" branch for 15 s+, assist frozen at
+             // <952, 291.6> taking caster fire.
+             //
+             // Scope of the disjunct: deliberately narrow — only fires when
+             // the bot is in combat AND the current target is either empty
+             // or the focus chain target. This avoids hijacking aggro
+             // scenarios where the assist has its own non-focus-chain target
+             // worth engaging (Tab/SoftInteract acquisition); those continue
+             // to flow through the existing Combat path.
+             (playerCombat &&
+              playerReader.OutOfCombatRange() &&
+              (playerReader.TargetGuid == 0 ||
+               playerReader.TargetGuid == playerReader.FocusTargetGuid)));
 
         WorldState[GoapKey.partymembercombat]  = PartyMemberInCombat();
         WorldState[GoapKey.partyleadercombat]  = PartyLeaderInCombat();

@@ -2914,18 +2914,38 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 float dist = playerReader.WorldPos.WorldDistanceXYTo(_btCurrentWaypointW);
                 if (dist < BtArrivalYards)
                 {
-                    navigation.StopMovement();  // release any held forward key
-                    // Face target. PressInteract turns the character toward
-                    // the target AND starts the interact auto-run (the bot
-                    // would walk to interact range, i.e. ~5y). To avoid the
-                    // bot drifting TOWARD the caster (into the rect we're
-                    // retreating from), immediately tap StepBackwards: any
-                    // direct movement key cancels the auto-run, and the 100ms
-                    // backward tap also displaces the bot ~0.5y away. Net
-                    // result: bot is now facing the target, stationary, and
-                    // ~0.5y further from the rect.
-                    input.PressInteract();
-                    input.StepBackwards();
+                    // At the arrival moment two distinct motion sources are
+                    // active and they're cancelled differently:
+                    //
+                    //   (1) Navigation's held ForwardKey — pressed by
+                    //       navigation.Update each tick while pathing toward
+                    //       the backtrack waypoint. Cancel = release the W key.
+                    //       navigation.StopMovement() does exactly that:
+                    //       input.StopForward(true) → release ForwardKey if held.
+                    //       Nothing else (no waypoint clearing, no events,
+                    //       no state-machine side effects — it's a one-line
+                    //       wrapper).
+                    //
+                    //   (2) Interact's click-to-move — initiated by PressInteract
+                    //       on the next line. WoW internally drives the bot
+                    //       toward the target's CURRENT position WITHOUT
+                    //       pressing any movement key. So step (1) does NOT
+                    //       cancel this — releasing W has zero effect on an
+                    //       in-flight click-to-move. Cancel = any direct
+                    //       movement input. StepBackwards taps BackwardKey
+                    //       for 100ms which (a) cancels the click-to-move
+                    //       and (b) displaces the bot ~0.5y away from the
+                    //       target — slight extra retreat for free.
+                    //
+                    // Both calls are required: drop (1) and the held W key
+                    // resumes pushing us forward after StepBackwards releases
+                    // the back key. Drop (2) and the click-to-move keeps
+                    // pulling us toward the caster (= into the rect we're
+                    // retreating from). Net result with both: stationary,
+                    // facing the mob, ~0.5y further from the rect.
+                    navigation.StopMovement();   // cancel (1) — release held ForwardKey
+                    input.PressInteract();       // face target (starts (2) click-to-move)
+                    input.StepBackwards();       // cancel (2) — 100ms Backward tap
                     _btArrivalUtc = DateTime.UtcNow;
                     _btPhase = BacktrackPhase.Evaluating;
                     logger.LogInformation(
