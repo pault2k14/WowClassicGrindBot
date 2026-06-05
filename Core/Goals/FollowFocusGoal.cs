@@ -2989,7 +2989,16 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // updates do NOT log (chase-mode target moves with leader every tick); only
         // mode transitions log, so spam is bounded by the rate of approach/patrol
         // phase changes (~1 per few seconds in practice).
-        if (_currentNavTargetMode != _lastLoggedNavTargetMode)
+        //
+        // Fix FR (run-164): capture the mode-change comparison as a local flag
+        // BEFORE updating _lastLoggedNavTargetMode, so the alignment-based path-
+        // preservation suppression in the drift block below can consult it. The
+        // suppression's "existing route is a valid prefix" assumption breaks
+        // across mode transitions — the existing waypoint was generated for a
+        // different semantic context (e.g., PositionChase body-chase point) and
+        // may not be a valid prefix in the new mode's (e.g., RouteWalk's) path.
+        bool modeChangedThisTick = (_currentNavTargetMode != _lastLoggedNavTargetMode);
+        if (modeChangedThisTick)
         {
             logger.LogInformation(
                 $"[FFG] Nav target mode change: {_lastLoggedNavTargetMode} → {_currentNavTargetMode} " +
@@ -3070,8 +3079,37 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                         $"until escape completes (target reached or all attempts " +
                         $"exhausted).");
                 }
-                else
+                else if (!modeChangedThisTick)
                 {
+                    // Fix FR (run-164): only run the alignment-based suppression
+                    // when the nav target mode has NOT changed this tick. When
+                    // the mode just changed, the existing waypoint was set by
+                    // the previous mode's logic and may not be a meaningful
+                    // prefix of the new mode's path. Run-164 freeze evidence:
+                    //   AC=15:48:12:414 (PositionChase): SetSingleWaypoint to
+                    //     <903.31, 169.62, 0> — but this is a body-chase point
+                    //     for the leader's then-current position (7y from bot).
+                    //   AC=15:48:14:497: GetNavigationTarget switched mode to
+                    //     RouteWalk, new target <903.76, 194.56, 0> (31.9y).
+                    //   Pre-Fix-FR: cos=1.00, nLen>=aLen → suppress → keep the
+                    //     stale 7y body-chase wp. PPather then could not route
+                    //     to it (Z=0 destination unreachable from bot Z=0,
+                    //     pather returned "closest spot" at Z=27.7 elevation
+                    //     repeatedly). Bot frozen at <903.08, 162.63> for 28
+                    //     seconds until the navigation-stuck 30s timeout fired
+                    //     CantFollow, which then SetSingleWaypoint-ed the
+                    //     correct 31.9y target — and PPather found a clean 31-
+                    //     node path in 368ms. The new target was reachable; the
+                    //     old one wasn't. Suppression sat on the bad waypoint.
+                    //   Post-Fix-FR: at AC=15:48:14:497 the mode change forces
+                    //     refresh to the 31.9y target immediately. Pather
+                    //     succeeds, bot navigates, no freeze.
+                    //
+                    // The original Log 20 motivation for suppression (steady-
+                    // state PositionChase tracking the leader's body moving 3-4y
+                    // per tick) is unaffected: those drift updates happen WITHIN
+                    // a mode (modeChangedThisTick=false), so the alignment check
+                    // still gates them.
                     Vector3 existingWp = navigation.TopWaypointW;
                     Vector3 botPos = playerReader.WorldPos;
 
@@ -3102,6 +3140,18 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                                 "Keeping existing route.");
                         }
                     }
+                }
+                else
+                {
+                    // Fix FR mode-change branch — log so we can see when this gate
+                    // fires in future runs.
+                    logger.LogInformation(
+                        $"[FFG] [FIX-FIRE] FR: Path-preservation suppression skipped at mode " +
+                        $"change → {_currentNavTargetMode} (existing wp at {navigation.TopWaypointW}, " +
+                        $"new target {currentNavigationTarget}, drift={navTargetDrift:0.0}y). The " +
+                        $"existing waypoint was set by the previous mode and may not be a valid " +
+                        $"prefix of the new mode's path — forcing refresh to avoid the run-164 " +
+                        $"stale-wp pathing loop.");
                 }
             }
 
