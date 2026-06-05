@@ -9,6 +9,7 @@ using SharedLib;
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 
@@ -188,7 +189,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // To" which only logs on a change).
         logger.LogInformation($"[Combat] OnEnter TARGET-GUID={playerReader.TargetGuid}");
 
-        wait.Update();
+        // ── Fix FK-DIAG site #1 — OnEnter prelude wait ──
+        // Run-161 evidence: this site returned in ~7ms (LC=15:11:06:082 OnEnter
+        // log → LC=15:11:06:089 ResetApproachEscape log), so it was NOT the
+        // block point in that incident. Instrumented anyway because future
+        // freezes could originate here. See WaitUpdateTimed comment block at
+        // end of file for the full rationale.
+        WaitUpdateTimed("OnEnter:prelude");
         stuckDetector.Reset();
         if (!navigation.IsApproachEscapeActive) navigation.ResetApproachEscape();
 
@@ -197,7 +204,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
         lastDirection = playerReader.Direction;
         input.PressDisableSoftInteract();
-        wait.Update();
+        // ── Fix FK-DIAG site #2 — OnEnter post-DisableSoftInteract wait ──
+        // Run-161 evidence: PRIMARY suspect for the 16s freeze. The last log
+        // before the 15s silence was the NumPad7 (DisableSoftInteract) press
+        // at LC=15:11:06:159; the next log was LC=15:11:22:193 — exactly the
+        // duration we'd expect if THIS wait.Update() blocked. If FK-DIAG fires
+        // here in a future run, we have proof.
+        WaitUpdateTimed("OnEnter:post-DisableSoftInteract");
 
         _stuckApproachingActive = false;
         _stuckApproachingSinceUtc = DateTime.MinValue;
@@ -313,7 +326,13 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     {
         bool targetGuidChanged = false;
         bool castOnTargetThisUpdate = false;
-        wait.Update();
+        // ── Fix FK-DIAG site #3 — Update entry wait ──
+        // Fires every Update tick (~60Hz). If OnEnter completed normally but
+        // the first Update tick blocks (e.g., addon stalls slightly later),
+        // this site catches it. Overhead per call is sub-microsecond; the
+        // log warning only fires on abnormal blocks (>5s). See WaitUpdateTimed
+        // comment block at end of file.
+        WaitUpdateTimed("Update:entry");
 
         if (chatReader.ForcedFollow)
         {
@@ -1785,5 +1804,93 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             playerReader.SoftInteract_Type != GuidType.Creature ||
             bits.SoftInteract_Dead() ||
             bits.SoftInteract_Tagged());
+    }
+
+    // ── Fix FK-DIAG (run-161 LC=15:11:06:159 → 15:11:22:193) ──
+    //
+    // Diagnostic instrumentation, NOT a fix. The run-161 leader log
+    // showed 15 contiguous seconds of zero log lines from any source
+    // (LC=15:11:07 through 15:11:21), bracketed by Combat OnEnter's
+    // PressDisableSoftInteract (last log before silence) and a recovery
+    // burst of activity (first log after silence). The natural blocking
+    // points in that code path are wait.Update() calls — first at
+    // OnEnter:191 (post-OnEnter-log), then at OnEnter:200 (post-
+    // PressDisableSoftInteract), then at Update:316 (every Update tick).
+    //
+    // wait.Update() is a blocking call on a ManualResetEventSlim
+    // (`globalTime`) that is only signaled by AddonReader.Update() at
+    // /Core/Addon/AddonReader.cs:100 when the WoW addon's GlobalTime
+    // counter advances. If the addon stalls, wait.Update() blocks
+    // indefinitely. But there are other possibilities (chained pauses,
+    // OS-level GC, code path I haven't traced) and the prior analysis
+    // overstated certainty about the addon-stall hypothesis.
+    //
+    // This helper times each wait.Update() call at the three suspected
+    // sites and logs a WARNING with state context if the call blocked
+    // for >5000ms. Normal wait.Update() returns in ~15-30ms (one addon
+    // tick at WoW's frame rate). 5000ms threshold:
+    //   - Catches the 16s run-161 freeze (would have fired with
+    //     elapsedMs ≈ 16034 at the OnEnter:200 site).
+    //   - Catches any other abnormal block (3-10s, 30s+).
+    //   - Does NOT false-positive on slow but normal ticks.
+    //
+    // Sites instrumented (semantic labels in the log message, not line
+    // numbers — line numbers drift as the file grows):
+    //   "OnEnter:prelude"           — wait.Update() at the top of OnEnter,
+    //                                 right after the TARGET-GUID diagnostic.
+    //   "OnEnter:post-DisableSoftInteract"
+    //                               — wait.Update() after the NumPad7
+    //                                 keypress. THIS is the suspect for
+    //                                 the run-161 freeze.
+    //   "Update:entry"              — wait.Update() at Update()'s first
+    //                                 line. Fires every tick; if a freeze
+    //                                 starts in Update rather than OnEnter,
+    //                                 this site catches it.
+    //
+    // Overhead: Stopwatch.GetTimestamp() is a few hundred ns; the
+    // greater-than comparison is one instruction. Net cost per call is
+    // sub-microsecond. Update() runs at ~60Hz; total overhead is
+    // <0.001% CPU. The branch into the LogWarning body is taken only on
+    // abnormal blocks, so the log is never noisy in normal operation.
+    //
+    // What the next run's evidence tells us:
+    //   - If FK-DIAG fires at a site → confirms wait.Update() blocked
+    //     there. Cause is addon stall OR a chained pause that left the
+    //     globalTime event unsignaled. The state context (bits.Combat,
+    //     Target, FocusTarget) at the moment of block helps identify
+    //     conditions.
+    //   - If a freeze of >5s occurs but FK-DIAG does NOT fire → freeze
+    //     is elsewhere (not OnEnter and not Update's first wait). Likely
+    //     candidates would then be: a wait.Until/wait.Till loop later in
+    //     Update, a wait.Fixed call in a sub-handler (CastingHandler,
+    //     MountHandler), or an OS-level pause (GC).
+    //   - If freezes recur consistently at OnEnter:post-DisableSoftInteract
+    //     in particular → strong evidence the addon-stall hypothesis is
+    //     correct AND specifically that DisableSoftInteract is sometimes
+    //     followed by an addon-update lag.
+    //
+    // This diagnostic is not time-limited; it can stay in place
+    // permanently. It only logs on abnormal events. If a future fix
+    // resolves the underlying cause, FK-DIAG will simply stop firing.
+    private void WaitUpdateTimed(string siteLabel)
+    {
+        long start = Stopwatch.GetTimestamp();
+        wait.Update();
+        double elapsedMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        if (elapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[CombatGoal] [FIX-FIRE] FK-DIAG: wait.Update() at {siteLabel} " +
+                $"blocked for {elapsedMs:0}ms (>5000ms threshold). " +
+                $"This is anomalous — normal wait.Update() returns in 15-30ms " +
+                $"(one WoW addon GlobalTime tick). State at unblock: " +
+                $"TargetGuid={playerReader.TargetGuid} " +
+                $"bits.Combat={bits.Combat()} " +
+                $"bits.Target={bits.Target()} " +
+                $"bits.Target_Alive={(bits.Target() ? bits.Target_Alive().ToString() : "n/a")} " +
+                $"bits.FocusTarget={bits.FocusTarget()} " +
+                $"FocusTargetGuid={playerReader.FocusTargetGuid} " +
+                $"Mode={classConfig.Mode}.");
+        }
     }
 }
