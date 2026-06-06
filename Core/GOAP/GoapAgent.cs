@@ -1711,12 +1711,21 @@ public sealed partial class GoapAgent : IDisposable
         bool btEngageGuidMatch =
             navigation.BacktrackEngageGuid != 0 &&
             navigation.BacktrackEngageGuid == playerReader.TargetGuid;
+        // Fix FT (run-165): the original Fix FN gate
+        // `!navigation.IsBacktrackingActive` unconditionally suppressed
+        // self-defense during backtrack travel — the idea being "we're
+        // retreating, don't engage." But the operator's design says: if the
+        // bot becomes physically stuck inside the BL rect during backtrack
+        // (i.e., navigation can't make progress to the next prior waypoint),
+        // self-defense should be allowed so it doesn't die helplessly. The
+        // declaredStuck escape hatch matches engageAllowed/engageAllowedForJoin
+        // semantics elsewhere — physical-stuck overrides BL-area protections.
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
-            !navigation.IsBacktrackingActive &&   // Fix FN: suppress during backtrack travel
+            (!navigation.IsBacktrackingActive || declaredStuck) &&   // Fix FN suppress backtrack; Fix FT declaredStuck escape
             (engageAllowed || btEngageGuidMatch);  // Fix FN: backtrack EngageWindow boost
         if (selfDefenseOverride)
         {
@@ -1858,11 +1867,26 @@ public sealed partial class GoapAgent : IDisposable
         // the assist falls beyond LeaderPauseYards, so keeping this flag true during
         // NavigatingToLeader is safe — the leader just continues patrolling at a normal
         // pace while the assist catches up.
+        //
+        // Fix FT (run-165): also allow this flag when the leader is inside a BL rect.
+        // Per operator design, if the leader ends up in a BL area, it must backtrack
+        // out via prior route waypoints regardless of the assist's status — the
+        // backtrack waypoints get published via LeaderStateService and the assist's
+        // FFG closes in once it can. Without this disjunct FRG stays blocked even
+        // though CanPartyLeaderFollowRoute() is true, because the assist may be
+        // locked in the segment-blacklisted FFG loop (assistisfollowing=False,
+        // assistrequestreturn=False, assistNavigating=False — exactly the run-165
+        // worldstate at LC=16:37:11:057). The disjunct restores leader autonomy in
+        // this specific BL-escape scenario.
         bool assistNavigating = classConfig.Mode == Mode.PartyLeader
             && assistStateStore.AnyAssistNavigating();
 
+        bool leaderInBlacklistArea = classConfig.Mode == Mode.PartyLeader
+            && navigation.IsInBlacklistArea();
+
         WorldState[GoapKey.assistrequestreturnorisfollowing] =
-            assistIsFollowing || assistCantFollow || assistNavigating || _evadeLeaderWaiting;
+            assistIsFollowing || assistCantFollow || assistNavigating || _evadeLeaderWaiting
+            || leaderInBlacklistArea;
 
         // assistshouldfollow gates FollowFocusGoal on the assist.
         // Four branches keep FFG selectable:
@@ -2354,6 +2378,23 @@ public sealed partial class GoapAgent : IDisposable
         // no-engage attack. A fightable target makes InNoEngageOnlyCombat() false, so
         // Combat (cost 4) still preempts patrol.
         if (InNoEngageOnlyCombat())
+            return true;
+
+        // Fix FT (run-165): leader is geographically inside a BL rect. Per
+        // operator design, the leader must backtrack OUT via prior route
+        // waypoints (FollowRouteGoal Fix FN/FT state machine). The existing
+        // patrol-bottom check below rejects this case because it requires
+        // !dmgTaken/!dmgDone/!combat — but a leader sitting in a BL rect is
+        // almost always taking damage from the in-rect mob(s) that caused
+        // the rect to be flagged. The E4 InNoEngageOnlyCombat() check above
+        // only fires when the damaging mob is tracked in _knownBlacklistedGuids
+        // AND the bot has no fightable target; AreaBlacklistMob-on-attack
+        // doesn't always dispatch an EvadeBlacklistEvent so the membership
+        // can lag. The geographic IsInBlacklistArea() check is independent of
+        // those bookkeeping paths. When this fires, the FRG state machine
+        // will detect the same condition in UpdateBacktrackStateMachine and
+        // enter BL-escape backtrack mode.
+        if (navigation.IsInBlacklistArea())
             return true;
 
         bool dmgTaken = combatLog.DamageTakenCount() > 0;

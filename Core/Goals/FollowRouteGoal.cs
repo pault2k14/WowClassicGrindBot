@@ -144,6 +144,21 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private const int BtEvalDelayMs = 700;
     private const float BtArrivalYards = 3.5f;
 
+    // ── Fix FT (run-165) — BL-escape backtrack sub-mode ──
+    //
+    // Distinguishes Fix FN's existing combat-driven backtrack (target-tracking,
+    // EngageWindow re-engage on out-of-rect verdict) from a new no-target
+    // sub-mode entered when the leader finds itself inside a BL rect with no
+    // fightable target slot (e.g., Blacklist Target plan cleared the target
+    // after AreaBlacklistMob on attack). In BL-escape mode the state machine
+    // walks the prior route waypoints in reverse until the bot itself is back
+    // outside every static rect, then exits to normal patrol. No EngageWindow
+    // phase fires in this mode — there's no specific mob to track. If a non-
+    // BL aggro hits us during the escape, normal Combat plan preempts FRG;
+    // when Combat ends, FRG resumes and re-enters backtrack via this same
+    // trigger if the bot is still in a BL rect.
+    private bool _btIsBlEscapeMode;
+
     private bool _assistRewindActive;
     private Vector3 _assistRewindAnchorW;
     private int _assistAttempt;
@@ -2877,10 +2892,36 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                                        or UnitsTarget.PartyOrPet) &&
             navigation.IsTargetLikelyInBlacklistRect();
 
+        // ── Fix FT (run-165) — BL-escape entry trigger ──
+        //
+        // When the leader is geographically inside any static BL rect but the
+        // self-defense-in-rect path doesn't fire (because target slot has been
+        // cleared by Blacklist Target plan after AreaBlacklistMob on attack,
+        // or the bot isn't actively being damaged this tick), we still want
+        // to backtrack out. Evidence — run-165 leader log around LC=16:37:11:
+        // PressClearTarget at LC=16:37:10:224 → target=0, hastarget=False;
+        // inblacklistarea was False at LC=16:37:11:057 (bot at rect boundary
+        // <955.x, 277.x>) but True by LC=16:37:14:523 (bot at <952.88, 281.24>,
+        // deep inside rect [952..999, 277..327]). Leader sat in NO PLAN for
+        // 36 seconds until manual intervention. Per operator design: any time
+        // the leader is in a BL area, it should backtrack via prior route
+        // waypoints; if a non-BL mob aggros during the escape, normal Combat
+        // plan preempts FRG and resumes after kill; if the bot becomes
+        // physically stuck inside the rect, Fix 17 self-defense is re-allowed
+        // (see GoapAgent.cs Fix 17 declaredStuck override).
+        //
+        // Scope: PartyLeader mode only. The assist's analogous case (assist
+        // inside BL, leader outside) is handled differently — FFG's segment-
+        // crossing check is broadened in FollowFocusGoal.cs to let the assist
+        // navigate OUT toward an outside-target leader.
+        bool inBlEscape = !inSelfDefenseInRect
+            && classConfig.Mode == Mode.PartyLeader
+            && navigation.IsInBlacklistArea();
+
         switch (_btPhase)
         {
             case BacktrackPhase.None:
-                if (!inSelfDefenseInRect)
+                if (!inSelfDefenseInRect && !inBlEscape)
                     return false;
                 int curIdx = ProjectCurrentRouteIndex();
                 if (curIdx <= 0)
@@ -2890,7 +2931,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 }
                 _btStartRouteIdx = curIdx;
                 _btStepsBack = 1;
-                _btTargetGuid = playerReader.TargetGuid;
+                _btIsBlEscapeMode = inBlEscape;
+                _btTargetGuid = inSelfDefenseInRect ? playerReader.TargetGuid : 0;
                 navigation.IsBacktrackingActive = true;
                 navigation.BacktrackEngageGuid = 0;
                 if (!PushBacktrackWaypoint())
@@ -2899,10 +2941,20 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     return false;
                 }
                 _btPhase = BacktrackPhase.Navigating;
-                logger.LogWarning(
-                    $"[FRG] [FIX-FIRE] FN: Entering BACKTRACK — IsIgnored caster guid={_btTargetGuid} reads in-rect. " +
-                    $"Starting route idx={_btStartRouteIdx}; first backtrack target " +
-                    $"<{_btCurrentWaypointW.X:F2},{_btCurrentWaypointW.Y:F2}>.");
+                if (_btIsBlEscapeMode)
+                {
+                    logger.LogWarning(
+                        $"[FRG] [FIX-FIRE] FT: Entering BL-ESCAPE BACKTRACK — leader is inside a BL rect " +
+                        $"with no fightable target. Starting route idx={_btStartRouteIdx}; first backtrack target " +
+                        $"<{_btCurrentWaypointW.X:F2},{_btCurrentWaypointW.Y:F2}>. Will exit when bot is outside all rects.");
+                }
+                else
+                {
+                    logger.LogWarning(
+                        $"[FRG] [FIX-FIRE] FN: Entering BACKTRACK — IsIgnored caster guid={_btTargetGuid} reads in-rect. " +
+                        $"Starting route idx={_btStartRouteIdx}; first backtrack target " +
+                        $"<{_btCurrentWaypointW.X:F2},{_btCurrentWaypointW.Y:F2}>.");
+                }
                 return true;
 
             case BacktrackPhase.Navigating:
@@ -2943,15 +2995,25 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     // pulling us toward the caster (= into the rect we're
                     // retreating from). Net result with both: stationary,
                     // facing the mob, ~0.5y further from the rect.
+                    //
+                    // Fix FT: in BL-escape mode there's no target to face, so
+                    // skip the Interact+StepBackwards facing dance. Just stop
+                    // movement and transition straight to Evaluating; the
+                    // BtEvalDelayMs settling window still applies so the bot
+                    // pauses briefly at the waypoint before deciding to
+                    // advance or exit.
                     navigation.StopMovement();   // cancel (1) — release held ForwardKey
-                    input.PressInteract();       // face target (starts (2) click-to-move)
-                    input.StepBackwards();       // cancel (2) — 100ms Backward tap
+                    if (!_btIsBlEscapeMode)
+                    {
+                        input.PressInteract();       // face target (starts (2) click-to-move)
+                        input.StepBackwards();       // cancel (2) — 100ms Backward tap
+                    }
                     _btArrivalUtc = DateTime.UtcNow;
                     _btPhase = BacktrackPhase.Evaluating;
                     logger.LogInformation(
-                        $"[FRG] FN: Arrived at backtrack waypoint #{_btStepsBack} " +
+                        $"[FRG] {(_btIsBlEscapeMode ? "FT" : "FN")}: Arrived at backtrack waypoint #{_btStepsBack} " +
                         $"(routeIdx={(_btStartRouteIdx - _btStepsBack)}). " +
-                        $"Faced target via Interact+StepBackwards; settling {BtEvalDelayMs}ms for verdict.");
+                        $"{(_btIsBlEscapeMode ? "BL-escape mode — settling" : "Faced target via Interact+StepBackwards; settling")} {BtEvalDelayMs}ms for verdict.");
                 }
                 return true;
 
@@ -2963,6 +3025,36 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 }
                 if ((DateTime.UtcNow - _btArrivalUtc).TotalMilliseconds < BtEvalDelayMs)
                     return true;  // wait for facing + addon refresh
+
+                if (_btIsBlEscapeMode)
+                {
+                    // Fix FT: in BL-escape mode the verdict is "is the BOT
+                    // itself still inside any BL rect?" — not the target's
+                    // position. If we've stepped back to a waypoint outside
+                    // every static rect, the escape is complete and the bot
+                    // can resume normal patrol from this position. Otherwise,
+                    // advance to the next prior waypoint.
+                    if (!navigation.IsInBlacklistArea())
+                    {
+                        ExitBacktrack($"BL escape complete — bot is outside all rects at waypoint #{_btStepsBack}");
+                        return false;
+                    }
+                    _btStepsBack++;
+                    int escNextIdx = _btStartRouteIdx - _btStepsBack;
+                    if (escNextIdx >= 0 && PushBacktrackWaypoint())
+                    {
+                        _btPhase = BacktrackPhase.Navigating;
+                        logger.LogInformation(
+                            $"[FRG] FT: Bot still inside BL rect at waypoint #{_btStepsBack - 1} — advancing to backtrack waypoint #{_btStepsBack} (routeIdx={escNextIdx}).");
+                    }
+                    else
+                    {
+                        ExitBacktrack($"BL-escape reached start of route still inside rect (stepsBack={_btStepsBack} from start={_btStartRouteIdx})");
+                        return false;
+                    }
+                    return true;
+                }
+
                 bool stillInRect = navigation.IsTargetLikelyInBlacklistRect();
                 if (!stillInRect)
                 {
@@ -3035,6 +3127,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private bool IsBacktrackContinuationValid()
     {
+        // Fix FT: BL-escape continuation is just "still inside any static rect."
+        // No target tracking applies — if the bot is no longer in a BL area,
+        // Evaluating phase will exit cleanly the next time it checks. We
+        // return true here so we don't bail mid-Navigating; the Evaluating
+        // verdict handles the actual exit logic, ensuring we always finish
+        // the current waypoint before declaring success.
+        if (_btIsBlEscapeMode)
+            return navigation.IsInBlacklistArea();
+
         return bits.Combat()
             && bits.Target()
             && playerReader.TargetGuid == _btTargetGuid
@@ -3044,14 +3145,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private void ExitBacktrack(string reason)
     {
         logger.LogInformation(
-            $"[FRG] FN: Exiting backtrack — {reason}. " +
-            $"phase={_btPhase}→None, stepsBack={_btStepsBack}, guid={_btTargetGuid}.");
+            $"[FRG] {(_btIsBlEscapeMode ? "FT" : "FN")}: Exiting backtrack — {reason}. " +
+            $"phase={_btPhase}→None, stepsBack={_btStepsBack}, guid={_btTargetGuid}, blEscapeMode={_btIsBlEscapeMode}.");
         _btPhase = BacktrackPhase.None;
         _btStartRouteIdx = -1;
         _btStepsBack = 0;
         _btTargetGuid = 0;
         _btCurrentWaypointW = default;
         _btArrivalUtc = DateTime.MinValue;
+        _btIsBlEscapeMode = false;
         navigation.IsBacktrackingActive = false;
         navigation.BacktrackEngageGuid = 0;
     }

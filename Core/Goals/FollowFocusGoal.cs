@@ -6287,6 +6287,32 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                 return target;
             }
 
+            // ── Fix FT (run-165) — assist-in-BL → leader-out allows exit ──
+            //
+            // Per operator design: "if the assist is in the blacklist area and the
+            // leader is out of the blacklist area, that the assist moves out of the
+            // blacklist area to the leader." When the assist itself is inside a
+            // strict rect, the segment to a leader-position outside the rect
+            // necessarily crosses the rect boundary — but the segment is EXITING
+            // the rect, not passing through it. Distinguish:
+            //   - Pass-through: both endpoints outside, line traverses through —
+            //     dangerous, must bail (return assist position → CantFollow).
+            //   - Exit: start inside, end outside — desirable, let the assist go.
+            // Check whether the assist's current position is inside the strict
+            // rect of the blocking segment. If yes AND the leader-target is
+            // strictly outside all rects, this is an exit move; return the
+            // standard target so position-chase can drive the assist out.
+            bool assistInsideStrictRect = navigation.AreaBlacklist.ContainsWorld(assistW);
+            if (assistInsideStrictRect && !targetInsideStrictRect)
+            {
+                logger.LogWarning(
+                    $"[FFG] [FIX-FIRE] FT: Position-chase EXIT case — assist {assistW} is INSIDE a " +
+                    $"strict rect but target {target} is OUTSIDE all rects. Segment crosses the rect " +
+                    $"boundary as an exit move, not a pass-through. Returning standard target so the " +
+                    $"assist can navigate OUT toward the leader. (leader={leaderW}).");
+                return target;
+            }
+
             logger.LogWarning(
                 $"[FFG] Position-chase: leader→assist segment is entirely blacklisted " +
                 $"(leader={leaderW}, assist={assistW}, targetInsideStrictRect={targetInsideStrictRect}, " +
