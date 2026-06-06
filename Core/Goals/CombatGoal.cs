@@ -855,6 +855,18 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
         }
 
+        // ── Fix GD (run-168) — Self-backtrack cascade-break (CombatGoal mirror) ──
+        //
+        // Mirror of GoapAgent.cs Fix GD gate. See full rationale there
+        // (line ~1889). When SELF is in any backtrack mode (FN/FT/FX),
+        // suppress the Fix L mirror so the planner-level decision and the
+        // runtime decision stay in lockstep. Without this, GoapAgent's
+        // Fix L might be suppressed by Fix GD but CombatGoal's mirror
+        // might still flip currentTargetIsIgnored on a different tick,
+        // causing the planner-runtime mismatch that flickers Combat plan
+        // in/out of selection.
+        bool selfIsBacktrackingForFixGD = navigation.IsBacktrackingActive;
+
         // Position rule (operator-directed; lockstep with GoapAgent Fix L + the
         // self-defense gate): join the partner's fight only when this bot may itself
         // engage — outside the rect, or inside but declared stuck (engageAllowed,
@@ -867,7 +879,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             playerReader.FocusTargetGuid != 0 &&
             engageAllowedForJoin &&
             !assistStatusProvider.EvadeRecoveryActive &&
-            !partnerHasInRectBacktrackForFixZ)     // Fix FZ mirror: don't cascade onto partner's backtrack
+            !partnerHasInRectBacktrackForFixZ &&    // Fix FZ mirror: don't cascade onto partner's backtrack
+            !selfIsBacktrackingForFixGD)            // Fix GD mirror: don't fire while self is backtracking
         {
             bool thisBotTargetMatchesFocus =
                 bits.Target() &&
@@ -911,6 +924,25 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             if (thisBotTargetMatchesFocus)
             {
                 currentTargetIsIgnored = false;
+            }
+        }
+        else if (selfIsBacktrackingForFixGD && focusTargetIsIgnored && bits.FocusTarget()
+                 && bits.FocusTarget_Combat() && playerReader.FocusTargetGuid != 0)
+        {
+            // Fix GD mirror diagnostic — log once per backtrack-suppression event.
+            // Latches on _partyAssistMirrorGuid (paired with GoapAgent's
+            // _partyAssistOverrideGuid). If both Fix GD (self-backtrack) and
+            // Fix FZ (partner-backtrack) gates would fire, Fix GD is logged
+            // first (self-state is the closer cause).
+            if (_partyAssistMirrorGuid != playerReader.FocusTargetGuid)
+            {
+                _partyAssistMirrorGuid = playerReader.FocusTargetGuid;
+                logger.LogInformation(
+                    $"[CombatGoal] [FIX-FIRE] GD: Fix L mirror SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
+                    $"this bot is itself in active backtrack (IsBacktrackingActive=true). " +
+                    $"Engaging during backtrack would defeat the retreat's purpose; staying suppressed " +
+                    $"so FRG can complete its backtrack waypoint navigation. " +
+                    $"(Mode={classConfig.Mode})");
             }
         }
         else if (_partyAssistMirrorGuid != 0)

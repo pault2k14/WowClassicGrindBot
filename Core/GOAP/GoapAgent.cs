@@ -1947,6 +1947,63 @@ public sealed partial class GoapAgent : IDisposable
             }
         }
 
+        // ── Fix GD (run-168) — Self-backtrack cascade-break gate ──
+        //
+        // Evidence (run-168 leader 13:20:45:424 → 13:21:04:802, ~22s
+        // oscillation in BL area near <953.94, 281.55>):
+        //
+        //   1. Leader gets proximity aggro from mob 2396111 just outside
+        //      a BL rect (<946.37,290.31>, inside=False).
+        //   2. Combat plan engages 2396111. Bot chases mob across the
+        //      rect boundary — at 13:20:45:422 leader is now inside
+        //      (pos=<953.94,281.55>, inside=True).
+        //   3. Fix M fires (CombatGoal line ~436): bot inside BL with
+        //      non-IsIgnored target → blacklists 2396111, exits combat.
+        //   4. Plan=Follow at 13:20:45:422. FT-mode (BL-escape) backtrack
+        //      starts at 13:20:45:424. IsBacktrackingActive=true,
+        //      BacktrackAggressorGuid=0 (FT-mode has no specific aggressor).
+        //   5. Auto-retarget puts target=2394491 (another nearby BL mob)
+        //      in combat. Plan=Combat again. Fix M fires again, blacklists
+        //      2394491.
+        //   6. Plan=Follow. FT-mode backtrack continues.
+        //   7. ASSIST is in combat with 2394491 (Fix 17 self-defense fired
+        //      on assist side first per cross-bot timeline).
+        //   8. Leader's Fix L fires at 13:20:47:767: "partner (assist) is
+        //      in combat with 2394491 → flip focusTargetIgnored=false →
+        //      engage". Fix FZ does NOT suppress because partner (assist)
+        //      isn't backtracking — only LEADER is.
+        //   9. Combat plan re-engages. FJ swap to 2394491 (the IsIgnored
+        //      BL mob). Bot oscillates between Tab→2394491→suppress evade→
+        //      clear target→FJ→focus chain target (party member 87480, a
+        //      FRIENDLY)→"targeting friendly" warning→lost target→loop.
+        //  10. Combat finally exits at 13:21:04:802 (~22s) when assist
+        //      kills the mob alone.
+        //
+        // Phase B's Fix FZ design covers PARTNER-state backtrack ("partner
+        // is retreating, don't cascade onto them"). The gap (acknowledged
+        // in the Fix FZ comment at ~line 1912-1915 above): when SELF is
+        // backtracking and partner is NOT, Fix L fires unsuppressed
+        // because Fix FZ's condition (partner.BacktrackAggressorInRect &&
+        // partner.BacktrackAggressorGuid == focus) fails. The original
+        // assumption was that FT-mode "isn't a 'we found the cause'
+        // signal" — but run-168 shows FT-mode is exactly when Fix L's
+        // cascade does the most damage because the bot is actively
+        // trying to escape a BL rect.
+        //
+        // Fix GD: when SELF (this bot) is in any backtrack mode (FN/FT/FX),
+        // suppress Fix L. Retreat takes priority over party-assist override.
+        // The partner (which is not backtracking) continues to handle the
+        // mob via its own Fix 17 self-defense — exactly the run-168 outcome
+        // we want (assist killed the mob; leader should have just sat in
+        // backtrack instead of oscillating).
+        //
+        // Reads navigation.IsBacktrackingActive (the volatile flag FRG sets
+        // on backtrack entry and clears on ExitBacktrack). This is a
+        // self-state check, distinct from Fix FZ's partner-state check.
+        // In Standalone Grind mode (not isPartyModeForFixL), Fix L doesn't
+        // fire at all — Fix GD is a no-op there as well.
+        bool selfIsBacktracking = navigation.IsBacktrackingActive;
+
         // Position rule (operator-directed; lockstep with the self-defense gate and
         // CombatGoal): a bot may JOIN the partner's fight only when it is itself
         // allowed to engage — OUTSIDE every static rect, OR inside one but DECLARED
@@ -1961,7 +2018,8 @@ public sealed partial class GoapAgent : IDisposable
             playerReader.FocusTargetGuid != 0 &&
             engageAllowedForJoin &&
             !evadeRecoveryActive &&
-            !partnerHasInRectBacktrack)            // Fix FZ: don't cascade onto partner's backtrack
+            !partnerHasInRectBacktrack &&   // Fix FZ: don't cascade onto partner's backtrack
+            !selfIsBacktracking)            // Fix GD: don't fire while self is backtracking
         {
             focusTargetIgnored = false;
             if (_partyAssistOverrideGuid != playerReader.FocusTargetGuid)
@@ -1974,6 +2032,26 @@ public sealed partial class GoapAgent : IDisposable
                     $"is in combat with it (partner-side Fix 17 active). " +
                     $"Flipping focusTargetIgnored=false so this bot's CombatGoal " +
                     $"precondition allPartyTargetsIsIgnored=false is met. " +
+                    $"(Mode={classConfig.Mode})");
+            }
+        }
+        else if (selfIsBacktracking && focusTargetIgnored && b.FocusTarget()
+                 && b.FocusTarget_Combat() && playerReader.FocusTargetGuid != 0)
+        {
+            // Fix GD diagnostic — fired when self is backtracking and Fix L
+            // would otherwise have flipped the IsIgnored flag. Latches on
+            // _partyAssistOverrideGuid so we get one log per backtrack
+            // episode per focus guid rather than spam. Self-state check
+            // takes priority over partner-state check (Fix FZ) in this
+            // diagnostic ordering — if both gates apply, log Fix GD.
+            if (_partyAssistOverrideGuid != playerReader.FocusTargetGuid)
+            {
+                _partyAssistOverrideGuid = playerReader.FocusTargetGuid;
+                logger.LogInformation(
+                    $"[GoapAgent] [FIX-FIRE] GD: Fix L SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
+                    $"this bot is itself in active backtrack (IsBacktrackingActive=true). " +
+                    $"Engaging during backtrack would defeat the retreat's purpose; staying suppressed " +
+                    $"so FRG can complete its backtrack waypoint navigation. " +
                     $"(Mode={classConfig.Mode})");
             }
         }
