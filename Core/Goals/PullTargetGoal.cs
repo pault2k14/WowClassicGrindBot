@@ -122,6 +122,25 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         AddEffect(GoapKey.pulled, true);
     }
 
+    public override bool CanRun()
+    {
+        // Fix FU (run-166): yield to Fix FN/FT backtrack. Mirrors the
+        // ATG.CanRun and BlacklistTargetGoal.CanRun gates — when the
+        // FollowRouteGoal backtrack state machine is driving us back
+        // along prior route waypoints (IsBacktrackingActive=true), PTG
+        // must not preempt. WoW Classic auto-retargets the leader to
+        // any mob that hits us when the target slot empties; the BL
+        // caster fills it repeatedly, and PTG's hasTarget precondition
+        // is satisfied each tick. Without this gate, PTG would fire,
+        // call RATF, and either approach-pull into the rect (defeating
+        // the backtrack) or run its in-rect bail (creating another
+        // FRG.Abort cycle).
+        if (navigation.IsBacktrackingActive)
+            return false;
+
+        return true;
+    }
+
     public override void OnEnter()
     {
         // Target-tracking diagnostic (grep TARGET-GUID): live target guid + escape's

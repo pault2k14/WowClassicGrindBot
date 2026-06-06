@@ -410,12 +410,69 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Abort()
     {
-        // Fix FN: clear backtrack state on Abort (party-combat events, plan
-        // resets via AbortEvent, etc.). Mid-backtrack Abort would otherwise
-        // leave _btPhase non-None and the navigation flags set, confusing
-        // BlacklistTargetGoal/CombatGoal/GoapAgent on the next FRG entry.
-        if (_btPhase != BacktrackPhase.None)
-            ExitBacktrack("FRG.Abort()");
+        // ── Fix FU (run-166) — preserve backtrack state across plan flicker ──
+        //
+        // WoW Classic auto-retargets the leader to whatever mob is hitting it
+        // whenever the target slot becomes empty. During Fix FN/FT backtrack,
+        // any plan that calls PressClearTarget (ATG.OnEnter E5 gate, Blacklist
+        // Target plan, Combat Fix M bail) creates a brief target=0 window —
+        // the BL caster's next swing then re-fills the target slot with that
+        // same in-rect mob, satisfying ATG/BlacklistTarget/Combat-via-Fix-17
+        // preconditions on the very next planner tick. Each such preemption
+        // triggers FRG.OnExit → Abort.
+        //
+        // Run-166 evidence (leader log, leader-clock +49.35s ahead of assist):
+        //   LC=20:43:37:228  Fix FT enters BL-ESCAPE BACKTRACK at <954.9, 291.3>
+        //                    inside rect [952..999, 277..327]. First backtrack
+        //                    target <944.43, 284.25>. IsBacktrackingActive=true.
+        //   LC=20:43:38:532  ATG fires for guid 2336265 (Deepmoss Venomspitter,
+        //                    in-rect, IsIgnored — WoW auto-retargeted us after
+        //                    Fix M bail's ClearTarget at 33:806). FRG.OnExit →
+        //                    Abort → ExitBacktrack → IsBacktrackingActive=false,
+        //                    _btPhase=None. ATG.OnEnter runs E5 gate, presses
+        //                    DisableSoftInteract + ClearTarget at 38:701. ATG
+        //                    exits. FRG re-enters, Fix FT entry condition fires
+        //                    again because leader still in BL — but starts over
+        //                    from _btStepsBack=1.
+        //   LC=20:43:48:636  Second backtrack enter (same waypoint <944.43,
+        //                    284.25>) at <956.2, 295.4> — only 1.7y of progress
+        //                    in 11 seconds.
+        //   LC=20:43:50:451  ATG aborts again. Third cycle entry at <953.5,
+        //                    290.8>.
+        //   LC=20:43:55:555 → 56:636  Third cycle aborts via NO PLAN.
+        //   LC=20:44:06:048  Log ends — leader still bouncing in/at the rect
+        //                    boundary, never reaching the first backtrack
+        //                    waypoint.
+        //
+        // The existing _btPhase comment (line 132-136) claims state "persists
+        // across Combat-plan preemption" — but Abort()'s unconditional
+        // ExitBacktrack falsified that comment. Restore the documented
+        // behavior: when backtrack is in progress, Abort pauses navigation
+        // but leaves _btPhase, _btIsBlEscapeMode, _btStartRouteIdx,
+        // _btStepsBack, _btTargetGuid, _btCurrentWaypointW, and
+        // navigation.IsBacktrackingActive intact. Resume()'s preserved-state
+        // branch re-pushes the saved waypoint on the next FRG.OnEnter and
+        // backtrack picks up where it left off — instead of restarting from
+        // step 1.
+        //
+        // ExitBacktrack is now called only from within UpdateBacktrackStateMachine
+        // when backtrack genuinely completes (BL escape complete, target killed
+        // / lost, route start reached) or invalidates (continuation check fails).
+        bool backtrackPreserved = _btPhase != BacktrackPhase.None;
+        if (backtrackPreserved)
+        {
+            logger.LogInformation(
+                $"[FRG] {(_btIsBlEscapeMode ? "FT" : "FN")} [FIX-FIRE] FU: " +
+                $"Backtrack state PAUSED across plan flicker — phase={_btPhase}, " +
+                $"stepsBack={_btStepsBack}, target={_btTargetGuid}, " +
+                $"blEscapeMode={_btIsBlEscapeMode}, IsBacktrackingActive=" +
+                $"{navigation.IsBacktrackingActive}, waypoint=<{_btCurrentWaypointW.X:F2}," +
+                $"{_btCurrentWaypointW.Y:F2}>. State preserved for Resume on next FRG.OnEnter.");
+            // DO NOT call ExitBacktrack — state preserved for Resume.
+            // navigation.IsBacktrackingActive stays true (set by None→Navigating);
+            // BlacklistTargetGoal:52 and Fix 17's `!IsBacktrackingActive` gate
+            // remain in effect across the pause, blocking re-entry by those plans.
+        }
 
         if (bits.Target() && targetBlacklist.Is())
             SuppressCurrentTargetBriefly();
@@ -427,6 +484,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         // Clear the published waypoint — leader is no longer actively navigating
         // the patrol route (combat, evade, paused for assist, etc.).
+        // Fix FU: if backtrack is preserved, Resume() will re-publish the
+        // backtrack waypoint, so clearing it here is safe.
         leaderNavProvider.ClearTargetWaypoint();
 
         _syncPauseActive = false;
@@ -463,6 +522,69 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             $"inside={(navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true)}");
 
         logger.LogInformation($"Player inside blacklist: {navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true}");
+
+        // ── Fix FU (run-166) — Resume preserved backtrack state ──
+        //
+        // If backtrack was paused across a plan flicker (see Abort), pick
+        // up where we left off rather than running the normal Resume
+        // waypoint discovery logic. Validate the preserved state is still
+        // applicable; if not, clean up via ExitBacktrack and fall through
+        // to normal Resume.
+        if (_btPhase != BacktrackPhase.None)
+        {
+            bool stateValid;
+            if (_btIsBlEscapeMode)
+            {
+                // BL-escape mode: still applicable as long as the bot is
+                // still inside any static rect. If the bot drifted out
+                // during the plan flicker (e.g., a Combat plan for a
+                // non-BL aggro pushed the bot away), backtrack is done.
+                stateValid = navigation.IsInBlacklistArea();
+            }
+            else
+            {
+                // Combat-driven mode: still applicable if we're still in
+                // combat with the same IsIgnored target. Reuses the same
+                // semantic as IsBacktrackContinuationValid for that mode.
+                stateValid = bits.Combat()
+                    && bits.Target()
+                    && playerReader.TargetGuid == _btTargetGuid
+                    && targetBlacklist.Is();
+            }
+
+            if (!stateValid)
+            {
+                ExitBacktrack($"[FIX-FIRE] FU: preserved backtrack state no longer applicable on Resume (mode={(_btIsBlEscapeMode ? "BL-escape" : "combat")}, btTarget={_btTargetGuid}, currentTarget={playerReader.TargetGuid}, inBL={navigation.IsInBlacklistArea()})");
+                // Fall through to normal Resume below.
+            }
+            else
+            {
+                // Re-push the saved waypoint and publish for the assist.
+                navigation.SetSingleWaypoint(_btCurrentWaypointW);
+                leaderNavProvider.SetTargetWaypoint(_btCurrentWaypointW);
+                // IsBacktrackingActive stayed true across the pause; ensure
+                // it matches the phase invariant: true during Navigating/
+                // Evaluating, false during EngageWindow (Combat owns it).
+                navigation.IsBacktrackingActive = (_btPhase != BacktrackPhase.EngageWindow);
+
+                // Reset transient flags that the normal Resume path would
+                // reset — leaking these across the pause would confuse the
+                // distance gate / party-combat auto-resume logic.
+                onEnterTime = DateTime.UtcNow;
+                _pausedByLocalLogic = false;
+                _pausedByPartyCombat = false;
+                ResetRefillWaypointsGuard();
+
+                logger.LogInformation(
+                    $"[FRG] {(_btIsBlEscapeMode ? "FT" : "FN")} [FIX-FIRE] FU: " +
+                    $"Resuming preserved backtrack — phase={_btPhase}, stepsBack={_btStepsBack}, " +
+                    $"target={_btTargetGuid}, blEscapeMode={_btIsBlEscapeMode}, " +
+                    $"waypoint=<{_btCurrentWaypointW.X:F2},{_btCurrentWaypointW.Y:F2}>. " +
+                    $"Skipping normal Resume waypoint setup. Side-target finder NOT re-enabled " +
+                    $"during backtrack (would Tab-cycle to BL mobs).");
+                return;
+            }
+        }
 
         while (restHandler.IsResting() && !assistStateStore.AnyAssistCantFollow())
             wait.Update(1000);

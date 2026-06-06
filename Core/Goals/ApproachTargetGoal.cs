@@ -242,6 +242,36 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         AddEffect(GoapKey.incombatrange, true);
     }
 
+    public override bool CanRun()
+    {
+        // ── Fix FU (run-166) — yield to Fix FN/FT backtrack ──
+        //
+        // When the leader is inside a BL rect and the FollowRouteGoal
+        // backtrack state machine is driving us back along prior route
+        // waypoints (IsBacktrackingActive=true), ATG must not preempt.
+        // WoW Classic auto-retargets the leader to the in-rect mob each
+        // time the target slot empties — every PressClearTarget creates
+        // a brief target=0 window, the BL caster's next swing re-fills
+        // the target with the same in-rect guid, satisfying ATG's
+        // preconditions (hasTarget, targethostile, etc.) on the very
+        // next planner tick. Without this gate, ATG would fire, run its
+        // E5 in-rect ClearTarget, exit, and trigger FRG.OnExit → Abort.
+        // Even with Fix FU's state preservation across Abort, suppressing
+        // the wasted plan flicker at the planner level is cleaner.
+        //
+        // Mirrors BlacklistTargetGoal.CanRun line 52. The IsBacktrackingActive
+        // flag is true during Navigating + Evaluating phases (set by FRG
+        // backtrack state machine, preserved across FRG.Abort by Fix FU) and
+        // false during EngageWindow (where Combat plan is supposed to win via
+        // BacktrackEngageGuid → Fix 17 btEngageGuidMatch). So ATG is suppressed
+        // only when we're actively retreating, not when we're re-engaging at
+        // a backtrack waypoint.
+        if (navigation.IsBacktrackingActive)
+            return false;
+
+        return true;
+    }
+
     public void OnGoapEvent(GoapEventArgs e)
     {
         if (e.GetType() == typeof(ResumeEvent))
