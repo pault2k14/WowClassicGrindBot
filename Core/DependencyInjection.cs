@@ -284,11 +284,19 @@ public static class DependencyInjection
         s.AddSingleton<LeaderStatePoller>();
         s.AddSingleton<LeaderNavigationProvider>();
 
-        // ── Fix FW (run-167) — Recheck cache for BL aggressor position rechecks ──
-        // Per-bot singleton; cache populated at engagement time and at
-        // waypoint-arrival during FRG backtrack (Fix FX). Consumed by Fix FY
-        // gates in GoapAgent.selfDefenseOverride and CombatGoal Fix 17 mirror.
-        s.AddSingleton<BlacklistRecheckCache>();
+        // ── Fix FW (run-167) — Recheck cache RELOCATED 2026-06-06 ──
+        //
+        // BlacklistRecheckCache was originally registered here as a singleton
+        // (one per process). But GoalFactory.Create builds a SEPARATE per-bot
+        // scoped service collection that only forwards a specific set of root
+        // services via AddStartupIoC's ForwardSingleton list. The cache wasn't
+        // in that list, so per-bot consumers (CombatGoal, FollowRouteGoal,
+        // GoapAgent, BlacklistRecheckOperation) couldn't resolve it.
+        //
+        // Moved to GoalFactory.cs as `services.AddScoped<BlacklistRecheckCache>()`.
+        // Since each bot is its own scope (and its own process), per-bot
+        // semantics match what we want (each bot's combat exits clear its
+        // own cache; no cross-bot pollution).
 
         // ── Fix FW-active (run-167 Phase C) — Active recheck operation ──
         // Scoped (per-bot) — depends on ConfigurableInput / Navigation /

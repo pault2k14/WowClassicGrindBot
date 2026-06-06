@@ -38,6 +38,15 @@ public static class GoalFactory
         services.AddScoped<CancellationTokenSource<GoapAgent>>();
         services.AddScoped<IGrindSessionHandler, GrindSessionHandler>();
 
+        // ── Fix FW (run-167) — Recheck cache (scope fix 2026-06-06) ──
+        // Scoped: each bot has its own cache. Originally registered as a
+        // singleton in DependencyInjection.AddPartyApi but that's the root
+        // service collection, and GoalFactory's per-bot scoped collection
+        // only forwards services explicitly listed in AddStartupIoC.
+        // Registering here keeps the cache visible to all per-bot consumers
+        // (CombatGoal, FollowRouteGoal, GoapAgent, BlacklistRecheckOperation).
+        services.AddScoped<BlacklistRecheckCache>();
+
         // ── Fix FW-active (run-167 Phase C) — scope fix 2026-06-06 ──
         // Scoped because deps are scoped (ConfigurableInput, Navigation,
         // CombatLog). Ticked from GoapAgent.NextGoal() each planner cycle.
