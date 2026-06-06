@@ -240,22 +240,14 @@ public sealed partial class Navigation : IDisposable
     public volatile bool IsBacktrackingActive;
     public volatile int BacktrackEngageGuid;
 
-    // ── Fix GA (run-167) — Publish fields for backtrack-mode coordination ──
+    // ── Fix GA (run-167) — Backtrack publish fields RELOCATED ──
     //
-    // Written by FRG's UpdateBacktrackStateMachine each time backtrack state
-    // changes; read by PartyStatePublisher (assist→leader) and
-    // LeaderStateService (leader→assist) to populate the 5 new fields on
-    // {LeaderState,AssistState}: IsBacktracking, BacktrackAggressorGuid,
-    // BacktrackAggressorInRect, InsideBlacklistArea (already computed via
-    // IsInBlacklistArea()), BacktrackCurrentWaypointIdx.
-    //
-    // Co-located with IsBacktrackingActive / BacktrackEngageGuid for
-    // consistency — all of FRG's published backtrack telemetry on one
-    // surface. Volatile for the same reason as the other flags above
-    // (cross-thread reader concurrency).
-    public volatile int BacktrackPublishAggressorGuid;
-    public volatile bool BacktrackPublishAggressorInRect;
-    public volatile int BacktrackPublishWaypointIdx = -1;
+    // The 5 backtrack-publish fields originally added here were moved to
+    // LeaderNavigationProvider (singleton) on 2026-06-06 because
+    // PartyStatePublisher and LeaderStateService are singletons and the .NET
+    // DI validator rejects singleton-on-scoped dependencies. Navigation is
+    // scoped (per-bot). See LeaderNavigationProvider's "Fix GA scope fix"
+    // block for the relocated fields and the write API.
 
     public DateTime LastActive { get; private set; }
 

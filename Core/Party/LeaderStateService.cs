@@ -143,22 +143,19 @@ public sealed class LeaderStateService
     private const double DefinitiveAbandonmentTtlMs = 500.0;
     private DateTime _lastEngagingActivityUtc = DateTime.MinValue;
     private bool _ttlGraceLogged;
-    private readonly Core.Goals.Navigation navigation;
 
     public LeaderStateService(
         ILogger<LeaderStateService> logger,
         PlayerReader playerReader,
         AddonBits bits,
         IBotController botController,
-        LeaderNavigationProvider leaderNavProvider,
-        Core.Goals.Navigation navigation)
+        LeaderNavigationProvider leaderNavProvider)
     {
         this.logger = logger;
         this.playerReader = playerReader;
         this.bits = bits;
         this.botController = botController;
         this.leaderNavProvider = leaderNavProvider;
-        this.navigation = navigation;
     }
 
     public LeaderState GetCurrentState()
@@ -316,11 +313,16 @@ public sealed class LeaderStateService
             // Symmetric to PartyStatePublisher (assist→leader). Assist's
             // FFG Fix GB consumer reads these to enter coordinated backtrack
             // and avoid pursuing leader's oscillating target.
-            IsBacktracking = navigation.IsBacktrackingActive,
-            BacktrackAggressorGuid = navigation.BacktrackPublishAggressorGuid,
-            BacktrackAggressorInRect = navigation.BacktrackPublishAggressorInRect,
-            InsideBlacklistArea = navigation.IsInBlacklistArea(),
-            BacktrackCurrentWaypointIdx = navigation.BacktrackPublishWaypointIdx,
+            //
+            // Scope fix 2026-06-06: read from LeaderNavigationProvider
+            // (singleton, already injected as leaderNavProvider) instead of
+            // Navigation (scoped). FRG writes via SetBacktrackEntry /
+            // UpdateBacktrackProgress / ClearBacktrack.
+            IsBacktracking = leaderNavProvider.IsBacktracking,
+            BacktrackAggressorGuid = leaderNavProvider.BacktrackAggressorGuid,
+            BacktrackAggressorInRect = leaderNavProvider.BacktrackAggressorInRect,
+            InsideBlacklistArea = leaderNavProvider.InsideBlacklistArea,
+            BacktrackCurrentWaypointIdx = leaderNavProvider.BacktrackCurrentWaypointIdx,
         };
     }
 

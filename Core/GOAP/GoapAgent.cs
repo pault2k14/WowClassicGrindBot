@@ -1197,6 +1197,14 @@ public sealed partial class GoapAgent : IDisposable
 
     private GoapGoal? NextGoal()
     {
+        // ── Fix FW-active (Phase C scope fix) — advance the recheck operation ──
+        // BlacklistRecheckOperation is scoped (depends on scoped Navigation /
+        // ConfigurableInput), so it cannot be a singleton IReader auto-ticked
+        // by AddonReader. Instead we tick it from the GOAP planner loop,
+        // which runs on every NextGoal call (~50-100ms cadence — fast enough
+        // for the operation's 200ms / 700ms timing constants).
+        recheckOperation.Tick();
+
         UpdateWorldState();
         CheckGhostCombat();
 

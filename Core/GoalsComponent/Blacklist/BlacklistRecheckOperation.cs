@@ -68,9 +68,18 @@ namespace Core;
 /// <summary>
 /// Per-guid active position recheck operation. Performs the multi-step
 /// physical operation (Tab/Interact/Stop/Read) and populates the
-/// <see cref="BlacklistRecheckCache"/>. Singleton; one per bot.
+/// <see cref="BlacklistRecheckCache"/>.
+///
+/// <para>Scope: scoped (per-bot). Originally registered as a singleton +
+/// IReader, but the .NET DI validator rejected that because its dependencies
+/// (ConfigurableInput, Navigation, PlayerReader, CombatLog) are scoped. The
+/// scope fix on 2026-06-06 makes this scoped and drives its state-machine
+/// advancement from <c>GoapAgent.NextGoal()</c> via the public <c>Tick()</c>
+/// method — every planner tick advances the operation. Per-tick frequency
+/// of the GOAP planner (~50-100ms) is fast enough for the operation's
+/// timing constants (200ms inter-Tab, 700ms settle).</para>
 /// </summary>
-public sealed class BlacklistRecheckOperation : IReader
+public sealed class BlacklistRecheckOperation
 {
     private enum SubPhase
     {
@@ -224,9 +233,20 @@ public sealed class BlacklistRecheckOperation : IReader
             $"[Recheck] FW-active: Abort guid={abortedGuid} fromPhase={abortedPhase} reason={reason}");
     }
 
-    // ── IReader.Update — ticks every addon frame ──────────────────
+    // ── Tick entry — called from GoapAgent.NextGoal each planner tick ─
 
-    public void Update(IAddonDataProvider reader)
+    /// <summary>
+    /// Advance the operation state machine by one step. Called from
+    /// <c>GoapAgent.NextGoal()</c> at the start of every planner tick.
+    /// No-op when phase == Idle. Originally this was <c>IReader.Update</c>
+    /// driven by every addon frame, but scope constraints (this component
+    /// depends on scoped <c>ConfigurableInput</c> / <c>Navigation</c> so it
+    /// must itself be scoped, which excludes it from the singleton-scoped
+    /// IReader collection on AddonReader). Planner-tick frequency is
+    /// adequate — the operation's internal timing constants (200ms, 700ms)
+    /// are coarse compared to the planner cadence.
+    /// </summary>
+    public void Tick()
     {
         // Snapshot state under lock; advance the phase, then write back.
         SubPhase phase;
@@ -272,8 +292,6 @@ public sealed class BlacklistRecheckOperation : IReader
                 break;
         }
     }
-
-    public void Reset() { /* nothing — combat-exit invalidation handled by cache + guard */ }
 
     // ── Phase ticks ───────────────────────────────────────────────
 

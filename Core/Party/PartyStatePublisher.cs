@@ -26,7 +26,7 @@ public sealed class PartyStatePublisher : IReader
     private readonly AssistStatusProvider assistStatusProvider;
     private readonly IPartyApiClient apiClient;
     private readonly PartyApiConfig config;
-    private readonly Core.Goals.Navigation navigation;
+    private readonly LeaderNavigationProvider navPublishProvider;
     private DateTime _lastPostUtc = DateTime.MinValue;
     private readonly CancellationToken _shutdownToken;
 
@@ -39,7 +39,7 @@ public sealed class PartyStatePublisher : IReader
         IPartyApiClient apiClient,
         IOptions<PartyApiConfig> configOptions,
         CancellationTokenSource cts,
-        Core.Goals.Navigation navigation)
+        LeaderNavigationProvider navPublishProvider)
     {
         this.logger = logger;
         this.playerReader = playerReader;
@@ -48,7 +48,7 @@ public sealed class PartyStatePublisher : IReader
         this.assistStatusProvider = assistStatusProvider;
         this.apiClient = apiClient;
         this.config = configOptions.Value;
-        this.navigation = navigation;
+        this.navPublishProvider = navPublishProvider;
         _shutdownToken = cts.Token;
     }
 
@@ -146,11 +146,17 @@ public sealed class PartyStatePublisher : IReader
             // to decide whether to fire Fix L; assist's FFG Fix GB consumer
             // reads leader.IsBacktracking + LeaderBacktrackCurrentWaypointIdx
             // to enter coordinated backtrack mode.
-            IsBacktracking = navigation.IsBacktrackingActive,
-            BacktrackAggressorGuid = navigation.BacktrackPublishAggressorGuid,
-            BacktrackAggressorInRect = navigation.BacktrackPublishAggressorInRect,
-            InsideBlacklistArea = navigation.IsInBlacklistArea(),
-            BacktrackCurrentWaypointIdx = navigation.BacktrackPublishWaypointIdx,
+            //
+            // Scope fix 2026-06-06: read from LeaderNavigationProvider
+            // (singleton bridge) instead of Navigation (scoped) because this
+            // publisher is a singleton and DI rejects singleton-on-scoped.
+            // FRG writes the fields via SetBacktrackEntry / UpdateBacktrackProgress
+            // / ClearBacktrack on the goal-execution path.
+            IsBacktracking = navPublishProvider.IsBacktracking,
+            BacktrackAggressorGuid = navPublishProvider.BacktrackAggressorGuid,
+            BacktrackAggressorInRect = navPublishProvider.BacktrackAggressorInRect,
+            InsideBlacklistArea = navPublishProvider.InsideBlacklistArea,
+            BacktrackCurrentWaypointIdx = navPublishProvider.BacktrackCurrentWaypointIdx,
             Timestamp = DateTime.UtcNow
         };
     }

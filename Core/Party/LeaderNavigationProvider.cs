@@ -82,6 +82,98 @@ public sealed class LeaderNavigationProvider
     }
 
     // -----------------------------------------------------------------------
+    // Fix GA (run-167) — Backtrack-mode coordination publish (scope fix 2026-06-06)
+    //
+    // Originally these lived on Navigation, but Navigation is scoped per-bot
+    // while the publishers (PartyStatePublisher / LeaderStateService) are
+    // singletons. The .NET DI validator rejects a singleton depending on a
+    // scoped service. Moving the fields here — LeaderNavigationProvider is
+    // already a singleton bridge between scoped goal writers and singleton
+    // publish readers — preserves the publish semantics without the scope
+    // collision.
+    //
+    // FollowRouteGoal writes these from its UpdateBacktrackStateMachine on
+    // backtrack entry, per-waypoint, and exit. The publishers read the
+    // snapshot.
+    // -----------------------------------------------------------------------
+
+    private volatile bool _isBacktracking;
+    private volatile bool _insideBlacklistArea;
+    private volatile int _backtrackAggressorGuid;
+    private volatile bool _backtrackAggressorInRect;
+    private volatile int _backtrackCurrentWaypointIdx = -1;
+
+    /// <summary>True iff this bot is currently inside an FRG backtrack
+    /// state-machine (phase != None). Mirror of <c>navigation.IsBacktrackingActive</c>
+    /// for partner-state publish.</summary>
+    public bool IsBacktracking => _isBacktracking;
+
+    /// <summary>True iff this bot is currently inside any static BL rect.
+    /// Snapshot of <c>navigation.IsInBlacklistArea()</c> taken at publish points.</summary>
+    public bool InsideBlacklistArea => _insideBlacklistArea;
+
+    /// <summary>Guid of the in-rect aggressor driving the backtrack, or 0 when
+    /// not backtracking / Fix FT BL-escape mode (no specific aggressor).</summary>
+    public int BacktrackAggressorGuid => _backtrackAggressorGuid;
+
+    /// <summary>True iff the recheck cache currently reads InRect for the
+    /// aggressor (authoritative verdict from the active recheck operation).</summary>
+    public bool BacktrackAggressorInRect => _backtrackAggressorInRect;
+
+    /// <summary>Route waypoint index this bot is retreating to, or -1 when
+    /// not backtracking.</summary>
+    public int BacktrackCurrentWaypointIdx => _backtrackCurrentWaypointIdx;
+
+    /// <summary>
+    /// FRG entry — set all backtrack-publish fields atomically. Called when
+    /// FRG transitions into BacktrackPhase.None → Navigating.
+    /// </summary>
+    public void SetBacktrackEntry(int aggressorGuid, bool aggressorInRect, bool insideBl, int waypointIdx)
+    {
+        _backtrackAggressorGuid = aggressorGuid;
+        _backtrackAggressorInRect = aggressorInRect;
+        _insideBlacklistArea = insideBl;
+        _backtrackCurrentWaypointIdx = waypointIdx;
+        _isBacktracking = true; // volatile write last — acts as memory fence for readers
+    }
+
+    /// <summary>
+    /// FRG per-waypoint update — refresh the current rect verdict, waypoint idx,
+    /// and inside-BL snapshot during an active backtrack.
+    /// </summary>
+    public void UpdateBacktrackProgress(bool aggressorInRect, bool insideBl, int waypointIdx)
+    {
+        _backtrackAggressorInRect = aggressorInRect;
+        _insideBlacklistArea = insideBl;
+        _backtrackCurrentWaypointIdx = waypointIdx;
+    }
+
+    /// <summary>
+    /// FRG exit — clear backtrack-publish fields. Called when FRG transitions
+    /// out of backtrack (any exit path).
+    /// </summary>
+    public void ClearBacktrack()
+    {
+        _isBacktracking = false; // volatile write first — readers see the clear immediately
+        _backtrackAggressorGuid = 0;
+        _backtrackAggressorInRect = false;
+        _backtrackCurrentWaypointIdx = -1;
+        // Note: _insideBlacklistArea is NOT cleared here — it reflects current
+        // bot position regardless of backtrack state. FRG continues to publish
+        // it via UpdateInsideBlacklistArea below during normal patrol.
+    }
+
+    /// <summary>
+    /// Standalone update for InsideBlacklistArea — written each FRG tick so
+    /// the partner sees current position even outside backtrack. Cheap volatile
+    /// write; no allocation.
+    /// </summary>
+    public void UpdateInsideBlacklistArea(bool insideBl)
+    {
+        _insideBlacklistArea = insideBl;
+    }
+
+    // -----------------------------------------------------------------------
     // Approach-start anchor
     // -----------------------------------------------------------------------
 

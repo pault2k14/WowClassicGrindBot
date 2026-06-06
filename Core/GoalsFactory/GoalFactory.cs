@@ -38,6 +38,11 @@ public static class GoalFactory
         services.AddScoped<CancellationTokenSource<GoapAgent>>();
         services.AddScoped<IGrindSessionHandler, GrindSessionHandler>();
 
+        // ── Fix FW-active (run-167 Phase C) — scope fix 2026-06-06 ──
+        // Scoped because deps are scoped (ConfigurableInput, Navigation,
+        // CombatLog). Ticked from GoapAgent.NextGoal() each planner cycle.
+        services.AddScoped<BlacklistRecheckOperation>();
+
         if (classConfig.LogBagChanges)
             services.AddScoped<IBagChangeTracker, BagChangeTracker>();
         else

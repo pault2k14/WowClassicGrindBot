@@ -3143,10 +3143,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                               : (inCausedBacktrack ? causeGuid : 0);
                 navigation.IsBacktrackingActive = true;
                 navigation.BacktrackEngageGuid = 0;
-                // Fix GA: publish backtrack state for partner coordination.
-                navigation.BacktrackPublishAggressorGuid = _btTargetGuid;
-                navigation.BacktrackPublishAggressorInRect = (_btTargetGuid != 0); // entry implies in-rect verdict
-                navigation.BacktrackPublishWaypointIdx = curIdx - 1;
+                // Fix GA: publish backtrack state for partner coordination
+                // (scope fix 2026-06-06: routed via LeaderNavigationProvider
+                // singleton, not Navigation scoped).
+                leaderNavProvider.SetBacktrackEntry(
+                    aggressorGuid: _btTargetGuid,
+                    aggressorInRect: (_btTargetGuid != 0), // entry implies in-rect verdict
+                    insideBl: navigation.IsInBlacklistArea(),
+                    waypointIdx: curIdx - 1);
                 if (!PushBacktrackWaypoint())
                 {
                     ExitBacktrack("could not push first backtrack waypoint");
@@ -3343,10 +3347,19 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 // ── Fix GA: refresh published rect-verdict for partner ──
                 if (_btTargetGuid != 0)
                 {
-                    navigation.BacktrackPublishAggressorInRect = stillInRect;
+                    leaderNavProvider.UpdateBacktrackProgress(
+                        aggressorInRect: stillInRect,
+                        insideBl: navigation.IsInBlacklistArea(),
+                        waypointIdx: _btStartRouteIdx - _btStepsBack);
                 }
-                // Fix GA: publish current waypoint idx (the one we're at).
-                navigation.BacktrackPublishWaypointIdx = _btStartRouteIdx - _btStepsBack;
+                else
+                {
+                    // BL-escape mode or no aggressor — still refresh waypoint + in-BL.
+                    leaderNavProvider.UpdateBacktrackProgress(
+                        aggressorInRect: false,
+                        insideBl: navigation.IsInBlacklistArea(),
+                        waypointIdx: _btStartRouteIdx - _btStepsBack);
+                }
 
                 if (!stillInRect)
                 {
@@ -3456,10 +3469,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         _btIsBlEscapeMode = false;
         navigation.IsBacktrackingActive = false;
         navigation.BacktrackEngageGuid = 0;
-        // Fix GA: clear publish fields so partner sees backtrack ended.
-        navigation.BacktrackPublishAggressorGuid = 0;
-        navigation.BacktrackPublishAggressorInRect = false;
-        navigation.BacktrackPublishWaypointIdx = -1;
+        // Fix GA: clear backtrack publish so partner sees backtrack ended
+        // (scope fix 2026-06-06: routed via LeaderNavigationProvider).
+        leaderNavProvider.ClearBacktrack();
     }
 
     private int ProjectCurrentRouteIndex()

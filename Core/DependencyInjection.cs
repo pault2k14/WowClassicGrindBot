@@ -291,12 +291,17 @@ public static class DependencyInjection
         s.AddSingleton<BlacklistRecheckCache>();
 
         // ── Fix FW-active (run-167 Phase C) — Active recheck operation ──
-        // Standalone IReader (decision #11) — ticks every addon frame
-        // regardless of which GOAP plan is active, so engagement-time
-        // rechecks can fire from CombatGoal / GoapAgent.selfDefenseOverride
-        // without requiring FRG to be the active plan.
-        s.AddSingleton<BlacklistRecheckOperation>();
-        s.AddSingleton<IReader>(x => x.GetRequiredService<BlacklistRecheckOperation>());
+        // Scoped (per-bot) — depends on ConfigurableInput / Navigation /
+        // CombatLog which are themselves scoped. Originally tried to register
+        // as a singleton + IReader (so AddonReader would tick it every frame)
+        // but DI rejected scoped-deps-from-singleton. Instead, GoapAgent
+        // calls recheckOperation.Tick() at the top of NextGoal() each
+        // planner cycle — the operation's internal timing (200ms inter-Tab,
+        // 700ms settle) is coarse enough that planner cadence (~50-100ms)
+        // drives it adequately.
+        //
+        // Registered in BotController instead of here so it lives in the
+        // same scope as Navigation, ConfigurableInput, GoapAgent.
 
         return s;
     }
