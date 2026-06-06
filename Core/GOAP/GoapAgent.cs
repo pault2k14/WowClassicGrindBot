@@ -48,6 +48,8 @@ public sealed partial class GoapAgent : IDisposable
     private readonly IScreenCapture screenCapture;
     private readonly IBagChangeTracker bagChangeTracker;
     private readonly Navigation navigation;
+    private readonly BlacklistRecheckCache recheckCache;
+    private readonly BlacklistRecheckOperation recheckOperation;
 
     // Party API services
     private readonly AssistStateStore assistStateStore;
@@ -334,7 +336,9 @@ public sealed partial class GoapAgent : IDisposable
         AssistStateStore assistStateStore,
         LeaderConnectionStatus leaderConnection,
         AssistStatusProvider assistStatusProvider,
-        LeaderNavigationProvider leaderNavProvider)
+        LeaderNavigationProvider leaderNavProvider,
+        BlacklistRecheckCache recheckCache,
+        BlacklistRecheckOperation recheckOperation)
     {
         this.routeInfo = routeInfo;
         this.cts = cts;
@@ -362,6 +366,8 @@ public sealed partial class GoapAgent : IDisposable
         this.leaderConnection = leaderConnection;
         this.assistStatusProvider = assistStatusProvider;
         this.leaderNavProvider = leaderNavProvider;
+        this.recheckCache = recheckCache;
+        this.recheckOperation = recheckOperation;
 
         // ── Fix AV (Route A): leader-side StuckRect propagation ──
         //
@@ -1720,13 +1726,86 @@ public sealed partial class GoapAgent : IDisposable
         // self-defense should be allowed so it doesn't die helplessly. The
         // declaredStuck escape hatch matches engageAllowed/engageAllowedForJoin
         // semantics elsewhere — physical-stuck overrides BL-area protections.
+        // ── Fix FY (run-167) — Gate self-defense on active recheck cache ──
+        //
+        // Operator's locked design: the propagated IsNoEngage flag is sticky
+        // but mob positions change. When a propagated BL mob walks out of its
+        // rect and attacks us, the existing engageAllowed clause permits
+        // engagement (good — mob is now a legitimate threat). But when a BL
+        // mob is STILL inside the rect and we're at the rect boundary in
+        // melee range (or being hit by a caster from inside), the existing
+        // engageAllowed permits engagement based only on the bot's position
+        // and the passive verdict — which can be wrong at boundary cases.
+        //
+        // PHASE C (active): the cache verdict is populated by the standalone
+        // BlacklistRecheckOperation component performing the multi-step
+        // physical operation (Tab/Interact/Stop/Read). When cache says Unknown
+        // for the current engagement target AND we have a self-defense trigger,
+        // call BeginRecheck to start the operation; the cache transitions to
+        // Pending; the gate suppresses engagement while Pending (decision #12:
+        // bot sits still while the operation runs ~300-700ms).
+        //
+        // After the operation completes:
+        //   - InRect → gate continues to suppress; FRG cause-based entry (Fix
+        //     FX) takes over with backtrack.
+        //   - NotInRect → gate passes; engagement proceeds normally.
+        //   - SearchFailed → gate suppresses (treat as InRect during wait-retry).
+        //   - Resolved → gate passes (mob declared killed/leashed; engaging
+        //     re-acquired target is now safe; if guid re-appears with a
+        //     fresh aggression it will get a fresh Unknown→recheck cycle
+        //     when combat-exit invalidation fires).
+        //
+        // declaredStuck escape preserved: physical-stuck overrides BL rect
+        // protections regardless of cache state.
+        int fyTargetGuid = playerReader.TargetGuid;
+        RecheckVerdict fyVerdict = recheckCache.GetVerdict(fyTargetGuid);
+
+        // ── BeginRecheck trigger ──
+        // When the self-defense conditions HOLD (target IsIgnored, in combat,
+        // taking damage from this target, not in evade recovery) AND the cache
+        // is Unknown for this guid, kick off the active operation. Set the
+        // cache to Pending immediately so subsequent gate evaluations on this
+        // tick (e.g., the CombatGoal mirror) see Pending and suppress
+        // engagement consistently.
+        //
+        // Guards:
+        //   - targetIgnored: only recheck for IsNoEngage-mapped guids; non-BL
+        //     aggressors don't need this gate.
+        //   - hasTarget + playerCombat + dmgTaken + TargetTarget=Me/Pet: the
+        //     standard self-defense activation pattern. Without these we
+        //     have no signal that engagement is imminent.
+        //   - !evadeRecoveryActive: during recovery we suppress everything;
+        //     no point starting a recheck.
+        //   - fyTargetGuid != 0: defensive.
+        if (fyVerdict == RecheckVerdict.Unknown &&
+            targetIgnored && hasTarget && playerCombat && dmgTaken &&
+            playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
+            !evadeRecoveryActive &&
+            fyTargetGuid != 0)
+        {
+            recheckOperation.BeginRecheck(fyTargetGuid);
+            // BeginRecheck transitions the cache to Pending; the gate below
+            // will pick that up on this same tick.
+            fyVerdict = recheckCache.GetVerdict(fyTargetGuid);
+        }
+
+        bool fyCacheInRect = fyVerdict == RecheckVerdict.InRect;
+        bool fyCachePending = fyVerdict == RecheckVerdict.Pending;
+        bool fyCacheSearchFailed = fyVerdict == RecheckVerdict.SearchFailed;
+        // Treat Pending and SearchFailed as "uncertain — suppress engagement
+        // until the operation resolves." Only InRect (definitive) and
+        // Resolved (30s exhausted, treat as safe) get explicit branches above.
+        bool fyCacheBlocking = fyCacheInRect || fyCachePending || fyCacheSearchFailed;
+        bool fyCacheGatePasses = !fyCacheBlocking || declaredStuck;
+
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
             (!navigation.IsBacktrackingActive || declaredStuck) &&   // Fix FN suppress backtrack; Fix FT declaredStuck escape
-            (engageAllowed || btEngageGuidMatch);  // Fix FN: backtrack EngageWindow boost
+            (engageAllowed || btEngageGuidMatch) &&  // Fix FN: backtrack EngageWindow boost
+            fyCacheGatePasses;                       // Fix FY: cache verdict gate (Phase C: also blocks Pending/SearchFailed)
         if (selfDefenseOverride)
         {
             targetIgnored = false;
@@ -1798,6 +1877,68 @@ public sealed partial class GoapAgent : IDisposable
         // log message is gated.
         bool isPartyModeForFixL = classConfig.Mode == Mode.PartyLeader
                                 || classConfig.Mode == Mode.AssistFocus;
+
+        // ── Fix FZ (run-167) — Partner-backtrack cascade-break gate ──
+        //
+        // When the partner has entered BL-backtrack (Fix FN/FT/FX) with the
+        // current focus guid as its confirmed in-rect aggressor, Fix L MUST
+        // NOT fire — partner is already handling recovery via its own
+        // retreat. Without this gate, the cascade pattern observed in run-167
+        // recurs on the OPPOSITE bot: leader retreats correctly, but assist
+        // sees leader in combat with an IsIgnored mob, flips
+        // focusTargetIgnored=false here, CombatGoal Fix FJ swaps to the same
+        // mob, AreaBlacklistMob fires on attack, Blacklist Target plan clears
+        // target, oscillates — same symptom, opposite bot.
+        //
+        // Gate reads partner's published state via Fix GA's 5 fields
+        // (LeaderState / AssistState). Staleness handled by the store's
+        // existing IsStale check (AssistStateStore) or HasValidLeaderState
+        // (LeaderConnectionStatus) — both use the same configured
+        // staleThresholdMs. If partner state is stale, the gate fails open
+        // (Fix L fires per existing behavior) — better to risk a transient
+        // cascade than to lock up if partner went offline.
+        //
+        // Per-guid match: gate ONLY suppresses Fix L for the SPECIFIC guid
+        // partner is backtracking from. Other IsIgnored focus targets
+        // (different mob, partner not handling it) still trigger Fix L
+        // normally. The partner's BacktrackAggressorGuid==0 case (Fix FT
+        // BL-escape mode with no specific aggressor) also fails open —
+        // BL-escape isn't a "we found the cause" signal, just "leader is
+        // in BL with nothing to fight."
+        bool partnerHasInRectBacktrack = false;
+        int partnerBacktrackGuid = 0;
+        if (isPartyModeForFixL && playerReader.FocusTargetGuid != 0)
+        {
+            if (classConfig.Mode == Mode.PartyLeader)
+            {
+                // Scan non-stale assists for backtrack matching the focus guid.
+                foreach (var assistState in assistStateStore.GetAll())
+                {
+                    if (assistStateStore.IsStale(assistState)) continue;
+                    if (assistState.IsBacktracking &&
+                        assistState.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
+                        assistState.BacktrackAggressorInRect)
+                    {
+                        partnerHasInRectBacktrack = true;
+                        partnerBacktrackGuid = assistState.BacktrackAggressorGuid;
+                        break;
+                    }
+                }
+            }
+            else // AssistFocus
+            {
+                LeaderState? ls = leaderConnection.HasValidLeaderState ? leaderConnection.LastLeaderState : null;
+                if (ls != null &&
+                    ls.IsBacktracking &&
+                    ls.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
+                    ls.BacktrackAggressorInRect)
+                {
+                    partnerHasInRectBacktrack = true;
+                    partnerBacktrackGuid = ls.BacktrackAggressorGuid;
+                }
+            }
+        }
+
         // Position rule (operator-directed; lockstep with the self-defense gate and
         // CombatGoal): a bot may JOIN the partner's fight only when it is itself
         // allowed to engage — OUTSIDE every static rect, OR inside one but DECLARED
@@ -1811,7 +1952,8 @@ public sealed partial class GoapAgent : IDisposable
             b.FocusTarget_Combat() &&
             playerReader.FocusTargetGuid != 0 &&
             engageAllowedForJoin &&
-            !evadeRecoveryActive)
+            !evadeRecoveryActive &&
+            !partnerHasInRectBacktrack)            // Fix FZ: don't cascade onto partner's backtrack
         {
             focusTargetIgnored = false;
             if (_partyAssistOverrideGuid != playerReader.FocusTargetGuid)
@@ -1825,6 +1967,22 @@ public sealed partial class GoapAgent : IDisposable
                     $"Flipping focusTargetIgnored=false so this bot's CombatGoal " +
                     $"precondition allPartyTargetsIsIgnored=false is met. " +
                     $"(Mode={classConfig.Mode})");
+            }
+        }
+        else if (partnerHasInRectBacktrack && focusTargetIgnored && b.FocusTarget()
+                 && playerReader.FocusTargetGuid != 0)
+        {
+            // Diagnostic: log once per backtrack-suppression event so we can
+            // confirm Fix FZ is firing where it should. Latching on the same
+            // _partyAssistOverrideGuid slot prevents log spam.
+            if (_partyAssistOverrideGuid != playerReader.FocusTargetGuid)
+            {
+                _partyAssistOverrideGuid = playerReader.FocusTargetGuid;
+                logger.LogInformation(
+                    $"[GoapAgent] [FIX-FIRE] FZ: Fix L SUPPRESSED for focus guid={playerReader.FocusTargetGuid} — " +
+                    $"partner ({(classConfig.Mode == Mode.PartyLeader ? "assist" : "leader")}) is in active backtrack " +
+                    $"with this aggressor confirmed in-rect (partnerBacktrackGuid={partnerBacktrackGuid}). " +
+                    $"Partner is handling recovery; this bot will not cascade into Combat. (Mode={classConfig.Mode})");
             }
         }
         else if (_partyAssistOverrideGuid != 0 && isPartyModeForFixL)

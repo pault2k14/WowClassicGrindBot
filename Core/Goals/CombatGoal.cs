@@ -32,7 +32,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     private readonly ChatReader chatReader;
     private readonly StuckDetector stuckDetector;
     private readonly Navigation navigation;
+    private readonly BlacklistRecheckCache recheckCache;
     private readonly AssistStateStore assistStateStore;
+    private readonly LeaderConnectionStatus leaderConnection;
+    private readonly BlacklistRecheckOperation recheckOperation;
     private readonly AssistStatusProvider assistStatusProvider;
 
     private float lastDirection;
@@ -87,7 +90,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         IMountHandler mountHandler, ChatReader chatReader,
         StuckDetector stuckDetector, Navigation navigation,
         AssistStateStore assistStateStore,
-        AssistStatusProvider assistStatusProvider)
+        AssistStatusProvider assistStatusProvider,
+        BlacklistRecheckCache recheckCache,
+        LeaderConnectionStatus leaderConnection,
+        BlacklistRecheckOperation recheckOperation)
         : base(nameof(CombatGoal))
     {
         this.logger = logger;
@@ -104,7 +110,10 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         this.stuckDetector = stuckDetector;
         this.navigation = navigation;
         this.assistStateStore = assistStateStore;
+        this.leaderConnection = leaderConnection;
+        this.recheckOperation = recheckOperation;
         this.assistStatusProvider = assistStatusProvider;
+        this.recheckCache = recheckCache;
 
         if (classConfig.Mode == Mode.AssistFocus)
         {
@@ -611,18 +620,60 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             navigation.BacktrackEngageGuid != 0 &&
             navigation.BacktrackEngageGuid == playerReader.TargetGuid;
 
+        // ── Fix FY (run-167) — Cache verdict gate (CombatGoal mirror) ──
+        //
+        // Mirror of the GoapAgent.cs Fix FY gate. See full rationale there.
+        // CombatGoal's Fix 17 must consult the same recheck cache so the
+        // planner-level override and the runtime gate stay in lockstep.
+        // declaredStuck escape (engageAllowed via IsApproachEscapePhysically
+        // Stuck/Exhausted) is already captured in engageAllowed above; the
+        // cache gate adds the additional InRect/Pending/SearchFailed
+        // suppression on top.
+        //
+        // PHASE C: also triggers active recheck if cache is Unknown, and
+        // blocks engagement while Pending/SearchFailed (decision #12).
+        int fyMirrorGuid = playerReader.TargetGuid;
+        RecheckVerdict fyMirrorVerdict = recheckCache.GetVerdict(fyMirrorGuid);
+
+        bool fyMirrorDeclaredStuck =
+            navigation.IsApproachEscapePhysicallyStuck
+            || navigation.IsApproachEscapeExhausted;
+
+        // BeginRecheck trigger (mirror of GoapAgent's). Note that the planner
+        // pass already typically beat us here, so this is mostly idempotent
+        // (BlacklistRecheckOperation.BeginRecheck is a no-op when same guid
+        // already in flight). Kept here so CombatGoal can also be the entry
+        // point if it's selected without the planner pass on this tick.
+        if (fyMirrorVerdict == RecheckVerdict.Unknown &&
+            currentTargetIsIgnored && bits.Target() && bits.Combat()
+            && combatLog.DamageTakenCount() > 0
+            && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
+            && !assistStatusProvider.EvadeRecoveryActive
+            && fyMirrorGuid != 0)
+        {
+            recheckOperation.BeginRecheck(fyMirrorGuid);
+            fyMirrorVerdict = recheckCache.GetVerdict(fyMirrorGuid);
+        }
+
+        bool fyMirrorCacheInRect = fyMirrorVerdict == RecheckVerdict.InRect;
+        bool fyMirrorCachePending = fyMirrorVerdict == RecheckVerdict.Pending;
+        bool fyMirrorCacheSearchFailed = fyMirrorVerdict == RecheckVerdict.SearchFailed;
+        bool fyMirrorCacheBlocking = fyMirrorCacheInRect || fyMirrorCachePending || fyMirrorCacheSearchFailed;
+        bool fyMirrorCacheGatePasses = !fyMirrorCacheBlocking || fyMirrorDeclaredStuck;
+
         if (currentTargetIsIgnored && bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
             && !assistStatusProvider.EvadeRecoveryActive
-            && (engageAllowed || btEngageOverride))
+            && (engageAllowed || btEngageOverride)
+            && fyMirrorCacheGatePasses)
         {
             logger.LogInformation(
                 $"[CombatGoal] Self-defense override (Fix 17): target guid={playerReader.TargetGuid} " +
                 $"is on IsIgnored but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
                 $"playerCombat=true, dmgTaken=true, evadeRecovery=false, " +
                 $"insideBlacklistArea={navigation.IsInBlacklistArea()}, noEngage={targetNoEngage}, latched={overrideAlreadyLatched}, " +
-                $"btEngageOverride={btEngageOverride}) — " +
+                $"btEngageOverride={btEngageOverride}, fyCacheVerdict={fyMirrorVerdict}) — " +
                 $"treating as fightable, falling through to engage rather than bailing.");
             currentTargetIsIgnored = false;
 
@@ -766,6 +817,44 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // partner while Combat runs. When the mob dies, CombatGoal exits
         // naturally, plan returns to FFG, FFG's projection re-engages,
         // and the assist navigates back out of BL.
+        // ── Fix FZ (run-167) — Partner-backtrack cascade-break (CombatGoal mirror) ──
+        //
+        // Mirror of GoapAgent.cs Fix FZ gate. See full rationale there.
+        // Both gates must lockstep so the planner-level decision and the
+        // runtime decision agree. Reads partner state via Fix GA's published
+        // BacktrackAggressorGuid / BacktrackAggressorInRect; suppresses the
+        // Fix L mirror when partner is actively backtracking from the
+        // current focus guid.
+        bool partnerHasInRectBacktrackForFixZ = false;
+        if (isPartyMode && playerReader.FocusTargetGuid != 0)
+        {
+            if (classConfig.Mode == Mode.PartyLeader)
+            {
+                foreach (var assistState in assistStateStore.GetAll())
+                {
+                    if (assistStateStore.IsStale(assistState)) continue;
+                    if (assistState.IsBacktracking &&
+                        assistState.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
+                        assistState.BacktrackAggressorInRect)
+                    {
+                        partnerHasInRectBacktrackForFixZ = true;
+                        break;
+                    }
+                }
+            }
+            else // AssistFocus
+            {
+                LeaderState? ls = leaderConnection.HasValidLeaderState ? leaderConnection.LastLeaderState : null;
+                if (ls != null &&
+                    ls.IsBacktracking &&
+                    ls.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
+                    ls.BacktrackAggressorInRect)
+                {
+                    partnerHasInRectBacktrackForFixZ = true;
+                }
+            }
+        }
+
         // Position rule (operator-directed; lockstep with GoapAgent Fix L + the
         // self-defense gate): join the partner's fight only when this bot may itself
         // engage — outside the rect, or inside but declared stuck (engageAllowed,
@@ -777,7 +866,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             bits.FocusTarget_Combat() &&
             playerReader.FocusTargetGuid != 0 &&
             engageAllowedForJoin &&
-            !assistStatusProvider.EvadeRecoveryActive)
+            !assistStatusProvider.EvadeRecoveryActive &&
+            !partnerHasInRectBacktrackForFixZ)     // Fix FZ mirror: don't cascade onto partner's backtrack
         {
             bool thisBotTargetMatchesFocus =
                 bits.Target() &&

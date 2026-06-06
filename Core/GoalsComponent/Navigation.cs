@@ -240,6 +240,23 @@ public sealed partial class Navigation : IDisposable
     public volatile bool IsBacktrackingActive;
     public volatile int BacktrackEngageGuid;
 
+    // ── Fix GA (run-167) — Publish fields for backtrack-mode coordination ──
+    //
+    // Written by FRG's UpdateBacktrackStateMachine each time backtrack state
+    // changes; read by PartyStatePublisher (assist→leader) and
+    // LeaderStateService (leader→assist) to populate the 5 new fields on
+    // {LeaderState,AssistState}: IsBacktracking, BacktrackAggressorGuid,
+    // BacktrackAggressorInRect, InsideBlacklistArea (already computed via
+    // IsInBlacklistArea()), BacktrackCurrentWaypointIdx.
+    //
+    // Co-located with IsBacktrackingActive / BacktrackEngageGuid for
+    // consistency — all of FRG's published backtrack telemetry on one
+    // surface. Volatile for the same reason as the other flags above
+    // (cross-thread reader concurrency).
+    public volatile int BacktrackPublishAggressorGuid;
+    public volatile bool BacktrackPublishAggressorInRect;
+    public volatile int BacktrackPublishWaypointIdx = -1;
+
     public DateTime LastActive { get; private set; }
 
     public event Action? OnPathCalculated;

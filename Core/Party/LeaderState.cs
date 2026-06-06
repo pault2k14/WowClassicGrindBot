@@ -116,6 +116,46 @@ public sealed class LeaderState
     public StuckRectInfo[] StuckRects { get; set; } = System.Array.Empty<StuckRectInfo>();
 
     // ------------------------------------------------------------------
+    // Fix GA (run-167) — backtrack-mode coordination fields.
+    //
+    // When a bot enters BL-backtrack (Fix FN/FT/FX), the partner needs
+    // to know in order to coordinate (assist follows leader to same
+    // waypoint, doesn't pursue leader's oscillating target, doesn't
+    // navigate into the rect when leader is inside, etc.) and to apply
+    // Fix FZ's gate on `Fix L party-assist override` for the published
+    // aggressor.
+    //
+    // All five fields are symmetrically defined on AssistState as well
+    // so the leader can see assist's backtrack state.
+    // ------------------------------------------------------------------
+
+    /// <summary>True when this bot is in an active BL-backtrack
+    /// (Fix FN/FT/FX state machine, _btPhase != None).</summary>
+    public bool IsBacktracking { get; set; }
+
+    /// <summary>The aggressor guid driving the backtrack
+    /// (_btTargetGuid), or 0 when IsBacktracking is false or the
+    /// backtrack is Fix FT's BL-escape with no specific target.</summary>
+    public int BacktrackAggressorGuid { get; set; }
+
+    /// <summary>The bot's local recheck cache result for the
+    /// aggressor at last recheck. True = aggressor was IN_RECT at
+    /// last evaluation; false = NOT_IN_RECT or unknown. Source of
+    /// truth for the partner's Fix FZ gate.</summary>
+    public bool BacktrackAggressorInRect { get; set; }
+
+    /// <summary>This bot's current Navigation.IsInBlacklistArea()
+    /// result. Used by the partner's FFG to decide whether to follow
+    /// the bot's body into a rect (don't) or hold/coordinate.</summary>
+    public bool InsideBlacklistArea { get; set; }
+
+    /// <summary>Route waypoint index this bot is currently
+    /// retreating to during backtrack, or -1 when not backtracking.
+    /// The assist mirrors this to coordinate same-waypoint
+    /// targeting in Fix GC.</summary>
+    public int BacktrackCurrentWaypointIdx { get; set; } = -1;
+
+    // ------------------------------------------------------------------
     // Convenience — not serialised, reconstructed on the consumer side.
     // ------------------------------------------------------------------
 

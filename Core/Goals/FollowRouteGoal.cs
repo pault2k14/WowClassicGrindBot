@@ -41,6 +41,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private readonly IBlacklist targetBlacklist;
     private readonly TargetFinder targetFinder;
+    private readonly BlacklistRecheckCache recheckCache;
+    private readonly BlacklistRecheckOperation recheckOperation;
     private const NpcNames NpcNameToFind = NpcNames.Enemy | NpcNames.Neutral;
 
     private const int MIN_TIME_TO_START_CYCLE_PROFESSION = 5000;
@@ -158,6 +160,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // when Combat ends, FRG resumes and re-enters backtrack via this same
     // trigger if the bot is still in a BL rect.
     private bool _btIsBlEscapeMode;
+
+    // ── Fix FX (run-167) — Combat-exit detection for recheck cache invalidation ──
+    // Set/read in FRG.Update; transitions true→false triggers cache wipe.
+    private bool _prevCombatThisTick;
 
     private bool _assistRewindActive;
     private Vector3 _assistRewindAnchorW;
@@ -286,7 +292,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         IBlacklist targetBlacklist, RestHandler restHandler,
         ChatReader chatReader,
         AssistStateStore assistStateStore,
-        LeaderNavigationProvider leaderNavProvider)
+        LeaderNavigationProvider leaderNavProvider,
+        BlacklistRecheckCache recheckCache,
+        BlacklistRecheckOperation recheckOperation)
     : base("Follow " + System.IO.Path.GetFileNameWithoutExtension(pathSettings.FileName))
     {
         this.cost = cost;
@@ -304,6 +312,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         this.chatReader = chatReader;
         this.assistStateStore = assistStateStore;
         this.leaderNavProvider = leaderNavProvider;
+        this.recheckCache = recheckCache;
+        this.recheckOperation = recheckOperation;
 
         if (pathSettings.Requirements.Count > 0)
         {
@@ -1097,6 +1107,32 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public override void Update()
     {
+        // ── Fix FX (run-167) — Recheck cache combat-exit invalidation ──
+        //
+        // The cache is only meaningful while bots are actively engaged with the
+        // cached aggressor(s). Per operator's locked design, cache entries
+        // become stale on combat exit (mob killed or leashed). Detect the
+        // bits.Combat() true→false transition and clear the cache wholesale.
+        //
+        // Tracking via _prevCombatThisTick: avoids double-clearing while combat
+        // stays false across many ticks and avoids missing a quick true→false→
+        // true bounce (each transition fires once).
+        bool combatNow = bits.Combat();
+        if (_prevCombatThisTick && !combatNow)
+        {
+            // Just left combat. Wipe all cache entries.
+            recheckCache.InvalidateOnCombatExit();
+            // Phase C: also abort any in-flight active recheck operation —
+            // its cache-invalidation guard would catch this on the next
+            // tick, but an explicit abort logs the reason and keeps the
+            // shutdown deterministic.
+            if (recheckOperation.AnyInFlight())
+                recheckOperation.Abort("combat exit (FRG.Update detected bits.Combat() true→false)");
+            logger.LogInformation(
+                "[FRG] [FIX-FIRE] FW: Combat exit — recheck cache cleared (all aggressors killed or leashed).");
+        }
+        _prevCombatThisTick = combatNow;
+
         // ── Target finder suppression expiry (must run before early returns) ──
         // The per-target evade-blacklist suppression window has elapsed.
         // Use the helper so the side thread is only re-enabled when the
@@ -3001,6 +3037,33 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // diagnostic reason logged.
     private bool UpdateBacktrackStateMachine()
     {
+        // ── Fix FX (run-167) — Cause-based entry via recheck cache ──
+        //
+        // The original Fix FN entry trigger (inSelfDefenseInRect below)
+        // requires the passive verdict `IsTargetLikelyInBlacklistRect()`
+        // to read in-rect. That worked for Fix FN's caster scenarios
+        // because the leader was facing the caster (dead-reckoning
+        // estimate was correct). For run-167's BL-mob cycle, the leader's
+        // target was oscillating (Combat ↔ Blacklist Target plan flicker
+        // every ~600ms via Fix FJ swap → AreaBlacklistMob → ClearTarget),
+        // so the passive verdict was unreliable.
+        //
+        // Fix FX adds the recheck cache as a parallel source of truth.
+        // When Fix FY (CombatGoal/GoapAgent self-defense override gate)
+        // detects a new aggressor and runs the engagement-time active
+        // recheck (Fix FW), the cache is populated with InRect/NotInRect.
+        // Any guid with cache.GetVerdict()==InRect triggers backtrack
+        // here regardless of the current passive verdict — even if the
+        // bot's target was cleared (auto-retarget will set it again, but
+        // not before this entry condition fires).
+        //
+        // The Fix FN combat-driven path AND the cache-driven path are
+        // OR-combined. Either route into backtrack; once in, the same
+        // state machine logic applies.
+        int curTargetGuid = playerReader.TargetGuid;
+        RecheckVerdict cacheVerdict = recheckCache.GetVerdict(curTargetGuid);
+        bool cacheSaysInRect = cacheVerdict == RecheckVerdict.InRect;
+
         // Same condition signature as Fix FM in FRG line ~1260 PLUS the
         // verdict requirement: we only enter backtrack when target reads
         // IN the rect (= can't engage from current spot). If verdict says
@@ -3012,7 +3075,29 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             (playerReader.TargetTarget is UnitsTarget.Me
                                        or UnitsTarget.Pet
                                        or UnitsTarget.PartyOrPet) &&
-            navigation.IsTargetLikelyInBlacklistRect();
+            (navigation.IsTargetLikelyInBlacklistRect() || cacheSaysInRect);
+
+        // ── Fix FX (run-167) — Cache-only entry (target may be cleared) ──
+        //
+        // Even when the target slot is currently 0 (e.g., Blacklist Target
+        // plan ran ClearTarget right before this tick), the cache verdict
+        // can still drive backtrack entry: bits.Combat() stays true while
+        // the BL mob keeps damaging us; we know from the cache which guid
+        // is the in-rect threat. Use that to seed _btTargetGuid.
+        bool inCausedBacktrack = false;
+        int causeGuid = 0;
+        if (!inSelfDefenseInRect && bits.Combat() && classConfig.Mode == Mode.PartyLeader)
+        {
+            // Prefer the current target if it has an InRect cache entry;
+            // else scan for any InRect entry (whichever cached aggressor
+            // is most recent). The recheck cache is small in practice
+            // (one or two entries per engagement).
+            if (curTargetGuid != 0 && cacheVerdict == RecheckVerdict.InRect)
+            {
+                inCausedBacktrack = true;
+                causeGuid = curTargetGuid;
+            }
+        }
 
         // ── Fix FT (run-165) — BL-escape entry trigger ──
         //
@@ -3043,7 +3128,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         switch (_btPhase)
         {
             case BacktrackPhase.None:
-                if (!inSelfDefenseInRect && !inBlEscape)
+                if (!inSelfDefenseInRect && !inBlEscape && !inCausedBacktrack)
                     return false;
                 int curIdx = ProjectCurrentRouteIndex();
                 if (curIdx <= 0)
@@ -3054,9 +3139,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 _btStartRouteIdx = curIdx;
                 _btStepsBack = 1;
                 _btIsBlEscapeMode = inBlEscape;
-                _btTargetGuid = inSelfDefenseInRect ? playerReader.TargetGuid : 0;
+                _btTargetGuid = inSelfDefenseInRect ? playerReader.TargetGuid
+                              : (inCausedBacktrack ? causeGuid : 0);
                 navigation.IsBacktrackingActive = true;
                 navigation.BacktrackEngageGuid = 0;
+                // Fix GA: publish backtrack state for partner coordination.
+                navigation.BacktrackPublishAggressorGuid = _btTargetGuid;
+                navigation.BacktrackPublishAggressorInRect = (_btTargetGuid != 0); // entry implies in-rect verdict
+                navigation.BacktrackPublishWaypointIdx = curIdx - 1;
                 if (!PushBacktrackWaypoint())
                 {
                     ExitBacktrack("could not push first backtrack waypoint");
@@ -3069,6 +3159,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         $"[FRG] [FIX-FIRE] FT: Entering BL-ESCAPE BACKTRACK — leader is inside a BL rect " +
                         $"with no fightable target. Starting route idx={_btStartRouteIdx}; first backtrack target " +
                         $"<{_btCurrentWaypointW.X:F2},{_btCurrentWaypointW.Y:F2}>. Will exit when bot is outside all rects.");
+                }
+                else if (inCausedBacktrack)
+                {
+                    logger.LogWarning(
+                        $"[FRG] [FIX-FIRE] FX: Entering CAUSE-BASED BACKTRACK — cache verdict={cacheVerdict} for guid={causeGuid} " +
+                        $"(in combat, BL aggressor confirmed in rect via active recheck). " +
+                        $"Starting route idx={_btStartRouteIdx}; first backtrack target " +
+                        $"<{_btCurrentWaypointW.X:F2},{_btCurrentWaypointW.Y:F2}>.");
                 }
                 else
                 {
@@ -3177,7 +3275,79 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     return true;
                 }
 
-                bool stillInRect = navigation.IsTargetLikelyInBlacklistRect();
+                // ── Fix FW-active (Phase C) — Active recheck at waypoint arrival ──
+                //
+                // PREVIOUSLY (Phase A): we called passive
+                // navigation.IsTargetLikelyInBlacklistRect() here and wrote
+                // the verdict directly to the cache. That read was a
+                // placeholder — unreliable when the target was cleared,
+                // swapped, or facing wrong.
+                //
+                // NOW (Phase C): delegate to BlacklistRecheckOperation, the
+                // standalone IReader component that performs the multi-step
+                // physical operation (Tab cycle + Interact + Stop + read).
+                // The component:
+                //   - sets cache to Pending on BeginRecheck
+                //   - ticks every addon frame independent of FRG
+                //   - writes definitive InRect/NotInRect/Resolved when done
+                //   - SearchFailed → wait-retry; we stay paused at this
+                //     waypoint and let the component drive
+                //   - HandingOff → wait while caller's Combat plan engages
+                //     a discovered non-BL aggressor; we stay paused here
+                //
+                // FRG's role here becomes: kick off the operation, then
+                // poll the cache. When the verdict settles (InRect /
+                // NotInRect / Resolved), make the existing decision
+                // (advance / engage / exit). Until then, stay in
+                // Evaluating phase (the bot is stopped from Navigating's
+                // arrival transition; navigation.StopMovement() + the
+                // PressInteract + StepBackwards already fired there).
+                if (_btTargetGuid != 0)
+                {
+                    RecheckVerdict frgVerdict = recheckCache.GetVerdict(_btTargetGuid);
+                    if (frgVerdict == RecheckVerdict.Unknown)
+                    {
+                        // First arrival at this waypoint; start the operation.
+                        // The Settling time before our IsTargetLikelyInBlacklistRect()
+                        // call (BtEvalDelayMs above) has already elapsed at this
+                        // point, but the active operation re-does its own
+                        // Tab cycle + facing + settle (decisions #11/13). The
+                        // arrival's Interact+StepBackwards stopped the bot; the
+                        // component's own actions will refresh facing.
+                        recheckOperation.BeginRecheck(_btTargetGuid);
+                        return true;  // stay in Evaluating; bot is stopped
+                    }
+                    if (frgVerdict == RecheckVerdict.Pending
+                        || frgVerdict == RecheckVerdict.SearchFailed)
+                    {
+                        // Operation in flight; wait for verdict.
+                        // The bot is stationary at this waypoint; that's
+                        // the correct posture for the operation's Tab
+                        // cycle + facing + read sequence.
+                        return true;  // stay in Evaluating
+                    }
+                    if (frgVerdict == RecheckVerdict.Resolved)
+                    {
+                        // Operation declared the aggressor Resolved (30s
+                        // wait-retry exhausted, mob assumed killed/leashed).
+                        // Exit backtrack cleanly.
+                        ExitBacktrack($"recheck operation declared guid={_btTargetGuid} Resolved (30s wait-retry exhausted)");
+                        return false;
+                    }
+                    // Else: verdict is definitive (InRect or NotInRect). Use it.
+                }
+                bool stillInRect = _btTargetGuid != 0
+                    ? recheckCache.GetVerdict(_btTargetGuid) == RecheckVerdict.InRect
+                    : navigation.IsTargetLikelyInBlacklistRect();  // fallback (no target guid in non-escape mode is unusual)
+
+                // ── Fix GA: refresh published rect-verdict for partner ──
+                if (_btTargetGuid != 0)
+                {
+                    navigation.BacktrackPublishAggressorInRect = stillInRect;
+                }
+                // Fix GA: publish current waypoint idx (the one we're at).
+                navigation.BacktrackPublishWaypointIdx = _btStartRouteIdx - _btStepsBack;
+
                 if (!stillInRect)
                 {
                     // Mob has stepped out — engage via Fix FN signal. We
@@ -3269,6 +3439,14 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         logger.LogInformation(
             $"[FRG] {(_btIsBlEscapeMode ? "FT" : "FN")}: Exiting backtrack — {reason}. " +
             $"phase={_btPhase}→None, stepsBack={_btStepsBack}, guid={_btTargetGuid}, blEscapeMode={_btIsBlEscapeMode}.");
+        // ── Fix FX (run-167) — invalidate recheck cache for this aggressor ──
+        // Backtrack-exit reasons cover the full lifecycle: combat dropped (mob
+        // killed or leashed), target changed (kill credit), bot escaped rect,
+        // route exhausted. In every case the cached verdict for _btTargetGuid
+        // is now stale — the next time the guid (or a new one) attacks us,
+        // a fresh engagement-time recheck must run.
+        if (_btTargetGuid != 0)
+            recheckCache.Invalidate(_btTargetGuid);
         _btPhase = BacktrackPhase.None;
         _btStartRouteIdx = -1;
         _btStepsBack = 0;
@@ -3278,6 +3456,10 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         _btIsBlEscapeMode = false;
         navigation.IsBacktrackingActive = false;
         navigation.BacktrackEngageGuid = 0;
+        // Fix GA: clear publish fields so partner sees backtrack ended.
+        navigation.BacktrackPublishAggressorGuid = 0;
+        navigation.BacktrackPublishAggressorInRect = false;
+        navigation.BacktrackPublishWaypointIdx = -1;
     }
 
     private int ProjectCurrentRouteIndex()

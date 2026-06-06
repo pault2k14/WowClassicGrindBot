@@ -26,6 +26,7 @@ public sealed class PartyStatePublisher : IReader
     private readonly AssistStatusProvider assistStatusProvider;
     private readonly IPartyApiClient apiClient;
     private readonly PartyApiConfig config;
+    private readonly Core.Goals.Navigation navigation;
     private DateTime _lastPostUtc = DateTime.MinValue;
     private readonly CancellationToken _shutdownToken;
 
@@ -37,7 +38,8 @@ public sealed class PartyStatePublisher : IReader
         AssistStatusProvider assistStatusProvider,
         IPartyApiClient apiClient,
         IOptions<PartyApiConfig> configOptions,
-        CancellationTokenSource cts)
+        CancellationTokenSource cts,
+        Core.Goals.Navigation navigation)
     {
         this.logger = logger;
         this.playerReader = playerReader;
@@ -46,6 +48,7 @@ public sealed class PartyStatePublisher : IReader
         this.assistStatusProvider = assistStatusProvider;
         this.apiClient = apiClient;
         this.config = configOptions.Value;
+        this.navigation = navigation;
         _shutdownToken = cts.Token;
     }
 
@@ -137,6 +140,17 @@ public sealed class PartyStatePublisher : IReader
             // TargetWaypoint broadcast — closes the same "position-without-
             // route-context" asymmetry on the assist→leader direction.
             AssistRouteIndex = assistStatusProvider.CurrentRouteIndex,
+            // ── Fix GA (run-167) — Backtrack-mode coordination publish ──
+            // Symmetric to LeaderStateService.cs (leader→assist direction).
+            // The leader's Fix FZ gate consults assist.BacktrackAggressorInRect
+            // to decide whether to fire Fix L; assist's FFG Fix GB consumer
+            // reads leader.IsBacktracking + LeaderBacktrackCurrentWaypointIdx
+            // to enter coordinated backtrack mode.
+            IsBacktracking = navigation.IsBacktrackingActive,
+            BacktrackAggressorGuid = navigation.BacktrackPublishAggressorGuid,
+            BacktrackAggressorInRect = navigation.BacktrackPublishAggressorInRect,
+            InsideBlacklistArea = navigation.IsInBlacklistArea(),
+            BacktrackCurrentWaypointIdx = navigation.BacktrackPublishWaypointIdx,
             Timestamp = DateTime.UtcNow
         };
     }

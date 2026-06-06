@@ -284,6 +284,20 @@ public static class DependencyInjection
         s.AddSingleton<LeaderStatePoller>();
         s.AddSingleton<LeaderNavigationProvider>();
 
+        // ── Fix FW (run-167) — Recheck cache for BL aggressor position rechecks ──
+        // Per-bot singleton; cache populated at engagement time and at
+        // waypoint-arrival during FRG backtrack (Fix FX). Consumed by Fix FY
+        // gates in GoapAgent.selfDefenseOverride and CombatGoal Fix 17 mirror.
+        s.AddSingleton<BlacklistRecheckCache>();
+
+        // ── Fix FW-active (run-167 Phase C) — Active recheck operation ──
+        // Standalone IReader (decision #11) — ticks every addon frame
+        // regardless of which GOAP plan is active, so engagement-time
+        // rechecks can fire from CombatGoal / GoapAgent.selfDefenseOverride
+        // without requiring FRG to be the active plan.
+        s.AddSingleton<BlacklistRecheckOperation>();
+        s.AddSingleton<IReader>(x => x.GetRequiredService<BlacklistRecheckOperation>());
+
         return s;
     }
 

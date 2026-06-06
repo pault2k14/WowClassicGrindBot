@@ -143,19 +143,22 @@ public sealed class LeaderStateService
     private const double DefinitiveAbandonmentTtlMs = 500.0;
     private DateTime _lastEngagingActivityUtc = DateTime.MinValue;
     private bool _ttlGraceLogged;
+    private readonly Core.Goals.Navigation navigation;
 
     public LeaderStateService(
         ILogger<LeaderStateService> logger,
         PlayerReader playerReader,
         AddonBits bits,
         IBotController botController,
-        LeaderNavigationProvider leaderNavProvider)
+        LeaderNavigationProvider leaderNavProvider,
+        Core.Goals.Navigation navigation)
     {
         this.logger = logger;
         this.playerReader = playerReader;
         this.bits = bits;
         this.botController = botController;
         this.leaderNavProvider = leaderNavProvider;
+        this.navigation = navigation;
     }
 
     public LeaderState GetCurrentState()
@@ -308,6 +311,16 @@ public sealed class LeaderStateService
             // as the leader keeps republishing them. Empty array when the
             // leader has no current dynamic rects (between plan transitions).
             StuckRects = leaderNavProvider.StuckRectsSnapshot,
+
+            // ── Fix GA (run-167) — Backtrack-mode coordination publish ──
+            // Symmetric to PartyStatePublisher (assist→leader). Assist's
+            // FFG Fix GB consumer reads these to enter coordinated backtrack
+            // and avoid pursuing leader's oscillating target.
+            IsBacktracking = navigation.IsBacktrackingActive,
+            BacktrackAggressorGuid = navigation.BacktrackPublishAggressorGuid,
+            BacktrackAggressorInRect = navigation.BacktrackPublishAggressorInRect,
+            InsideBlacklistArea = navigation.IsInBlacklistArea(),
+            BacktrackCurrentWaypointIdx = navigation.BacktrackPublishWaypointIdx,
         };
     }
 

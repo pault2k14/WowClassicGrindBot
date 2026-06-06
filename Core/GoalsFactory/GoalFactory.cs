@@ -332,7 +332,9 @@ public static class GoalFactory
                 x.GetRequiredService<RestHandler>(),
                 x.GetRequiredService<ChatReader>(),
                 x.GetRequiredService<AssistStateStore>(),
-                x.GetRequiredService<LeaderNavigationProvider>()  // waypoint + blacklist sharing
+                x.GetRequiredService<LeaderNavigationProvider>(),  // waypoint + blacklist sharing
+                x.GetRequiredService<BlacklistRecheckCache>(),       // Fix FW (run-167)
+                x.GetRequiredService<BlacklistRecheckOperation>()    // Fix FW-active (Phase C)
                 ));
         }
     }

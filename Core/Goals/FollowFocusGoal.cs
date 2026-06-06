@@ -2154,14 +2154,39 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     // ApproachTargetAcquireRetryMs; if the leader's target
                     // has moved on by then (likely — Tab scan is transient),
                     // the next attempt latches a non-in-rect mob normally.
+                    // ── Fix GB (run-167) — Leader-backtrack authoritative gate ──
+                    //
+                    // When the leader has published IsBacktracking=true with the just-
+                    // acquired guid as confirmed in-rect aggressor, we know the leader
+                    // already determined this mob is unreachable. Trust that
+                    // verdict even if the local passive verdict (Q2b
+                    // IsTargetLikelyInBlacklistRect) disagrees — the leader has
+                    // an authoritative view (target was acquired during its own
+                    // backtrack waypoint-arrival recheck). This closes the
+                    // sub-case where Q2b's dead-reckoning estimate misses an
+                    // in-rect mob because the assist has poor facing/distance
+                    // info, but the leader saw it clearly.
+                    //
+                    // Behavior is unchanged from Q2b: same ClearTarget, same
+                    // log-without-latch, same retry path. Fix GB just widens
+                    // the trigger to include the leader's verdict.
+                    LeaderState? gbLeaderState = leaderConnection.HasValidLeaderState
+                        ? leaderConnection.LastLeaderState : null;
+                    bool gbLeaderConfirmedInRect = gbLeaderState != null
+                        && gbLeaderState.IsBacktracking
+                        && gbLeaderState.BacktrackAggressorGuid != 0
+                        && gbLeaderState.BacktrackAggressorGuid == playerReader.TargetGuid
+                        && gbLeaderState.BacktrackAggressorInRect;
+
                     bool focusChainTargetInRect = bits.Target() && bits.Target_Hostile()
                         && !bits.Target_Dead()
-                        && navigation.IsTargetLikelyInBlacklistRect();
+                        && (navigation.IsTargetLikelyInBlacklistRect() || gbLeaderConfirmedInRect);
                     if (focusChainTargetInRect)
                     {
                         logger.LogInformation(
-                            $"[FFG] [FIX-FIRE] Q2b: focus-chain rejected — target " +
-                            $"guid={playerReader.TargetGuid} is inside a blacklist rect. " +
+                            $"[FFG] [FIX-FIRE] Q2b{(gbLeaderConfirmedInRect ? "+GB" : "")}: focus-chain rejected — target " +
+                            $"guid={playerReader.TargetGuid} is inside a blacklist rect" +
+                            $"{(gbLeaderConfirmedInRect ? " (per leader's authoritative backtrack publish)" : "")}. " +
                             $"Clearing target without latching (we never engaged this mob); " +
                             $"next focus-chain attempt after {ApproachTargetAcquireRetryMs:0}ms.");
                         input.PressClearTarget();
@@ -6043,6 +6068,50 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
     /// </summary>
     private Vector3 ComputeFollowTargetWorldPos(LeaderState leader)
     {
+        // ── Fix GC (run-167) — Don't chase leader's body into BL during backtrack ──
+        //
+        // When leader is BOTH inside a BL rect AND in active backtrack
+        // (Fix FN/FT/FX), chasing the leader's body would drag the assist
+        // into the same rect — defeating the leader's retreat. Per
+        // operator: "assist isn't following the leader, they are
+        // coordinating with them." The leader's published TargetWaypoint
+        // already encodes "next safe spot to retreat to" (FRG's
+        // PushBacktrackWaypoint calls leaderNavProvider.SetTargetWaypoint
+        // on each backtrack waypoint). Returning that waypoint here lets
+        // the assist coordinate on the same retreat point regardless of
+        // which PositionChase entry site led here.
+        //
+        // Why guard here, not at each PositionChase mode-set site: there
+        // are ~10 sites that transition into PositionChase, all of which
+        // ultimately call this function. Guarding once at the function
+        // root catches every code path.
+        //
+        // Why require BOTH InsideBlacklistArea AND IsBacktracking: leader
+        // can be Inside-BL transiently during normal patrol (route waypoint
+        // close to a rect edge); we don't want to redirect on those false
+        // positives. Only the combined signal — leader inside BL AND
+        // actively retreating — indicates "follow the published retreat
+        // path, not the body."
+        //
+        // Fall-through: if HasTargetWaypoint=false (very brief windows
+        // mid-backtrack between waypoint pops), drop into the normal
+        // body-chase logic below. Brief exposure is bounded; next tick's
+        // TargetWaypoint publish resumes normal coordination.
+        if (leader.IsBacktracking && leader.InsideBlacklistArea && leader.HasTargetWaypoint)
+        {
+            if (_currentNavTargetMode != NavTargetMode.WaypointSharing)
+            {
+                logger.LogInformation(
+                    $"[FFG] [FIX-FIRE] GC: leader is inside BL rect during backtrack " +
+                    $"(IsBacktracking=true, InsideBlacklistArea=true) — redirecting from " +
+                    $"PositionChase to leader's published backtrack waypoint at " +
+                    $"<{leader.TargetWaypointWorldX:F2},{leader.TargetWaypointWorldY:F2}>. " +
+                    $"Assist coordinates with leader's retreat instead of chasing body into rect.");
+                _currentNavTargetMode = NavTargetMode.WaypointSharing;
+            }
+            return new Vector3(leader.TargetWaypointWorldX, leader.TargetWaypointWorldY, 0f);
+        }
+
         // Direction from leader toward assist, in world coordinates (yards).
         Vector3 leaderW = leader.WorldPos;
         Vector3 assistW = playerReader.WorldPos;

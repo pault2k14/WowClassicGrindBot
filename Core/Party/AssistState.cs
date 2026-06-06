@@ -86,6 +86,33 @@ public sealed class AssistState
     /// </summary>
     public int AssistRouteIndex { get; set; } = -1;
 
+    // ------------------------------------------------------------------
+    // Fix GA (run-167) — backtrack-mode coordination fields.
+    // Mirror of LeaderState.IsBacktracking/etc. so each bot can read
+    // the partner's backtrack state via Fix GA's two-way publish.
+    // See LeaderState.cs Fix GA block for full semantics.
+    // ------------------------------------------------------------------
+
+    /// <summary>True when the assist is in active BL-backtrack
+    /// (Fix GC coordinated backtrack, mirroring leader's).</summary>
+    public bool IsBacktracking { get; set; }
+
+    /// <summary>Assist's local aggressor guid for backtrack, or 0
+    /// when the assist's backtrack is purely coordinated (mirroring
+    /// leader's without an assist-side aggressor). When non-zero,
+    /// this is the guid the leader's Fix FZ uses to gate Fix L.</summary>
+    public int BacktrackAggressorGuid { get; set; }
+
+    /// <summary>Assist's local recheck cache result for its
+    /// aggressor. True = IN_RECT at last evaluation.</summary>
+    public bool BacktrackAggressorInRect { get; set; }
+
+    /// <summary>Assist's current Navigation.IsInBlacklistArea().</summary>
+    public bool InsideBlacklistArea { get; set; }
+
+    /// <summary>Route waypoint index assist is retreating to.</summary>
+    public int BacktrackCurrentWaypointIdx { get; set; } = -1;
+
     /// <summary>UTC timestamp set (or overwritten) by the leader controller on receipt.</summary>
     public DateTime Timestamp { get; set; }
 
