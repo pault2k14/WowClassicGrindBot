@@ -352,6 +352,37 @@ public sealed partial class Navigation : IDisposable
     // The static blacklist set by route configuration (never contains stuck rects).
     private IAreaBlacklist? _staticAreaBlacklist;
 
+    // ── Fix GN (run-171) — map-only blacklist accessor ──
+    //
+    // Public read-only view of _staticAreaBlacklist. Returns the route's
+    // map BL rects (caster mob avoidance zones) WITHOUT the runtime
+    // _stuckWorldRects appended in. Callers that need to distinguish
+    // "this is a real avoidance zone" (map BL) from "this is a terrain
+    // pathing failure" (StuckRect) use this instead of AreaBlacklist.
+    //
+    // Run-171 evidence (FollowFocusGoal.cs ~line 6252, Position-chase
+    // projection logic): the projection query used the composite
+    // AreaBlacklist, so when Fix BA added a StuckRect at the assist's
+    // stuck position — which happened to be ~3y from the leader's body —
+    // the projection logic incorrectly classified the leader's vicinity
+    // as "blacklist" and projected the assist's navigation target 47y
+    // away from the leader. Bot walked away from leader, got stuck
+    // again, cascading failure cycle until log end.
+    //
+    // Design intent of the projection: prevent overshoot INTO map BL
+    // rects (caster mob aggro zones with 3.6y POP_DIST + inertia
+    // overshoot, see Fix 18/19 comments). StuckRects mark terrain the
+    // pather couldn't traverse — they're NOT zones to project away
+    // from; they're navigation hints the pather uses internally to
+    // route around. Using map-only for projection separates these two
+    // semantics cleanly.
+    //
+    // Other Navigation queries (ContainsWorld, TryGetBlockingRect from
+    // route checks, etc.) continue to use the composite AreaBlacklist
+    // — those queries are about "is this position physically navigable"
+    // where avoiding StuckRects is correct.
+    public IAreaBlacklist? MapAreaBlacklist => _staticAreaBlacklist;
+
     // Runtime stuck rects recorded when the character makes zero movement during an escape.
     private readonly List<BlacklistRect> _stuckWorldRects = new();
 
@@ -933,6 +964,41 @@ public sealed partial class Navigation : IDisposable
 
     private long _navDebugNextTick;
     private const int NavDebugEveryMs = 250;
+
+    // ── Log-throttle fields (run-171) ──
+    //
+    // The IsTargetLikelyInBlacklistRect P1/P2/P3 logs fire once per
+    // GoapAgent.UpdateWorldState tick (~60Hz when no combat). Run-171
+    // captured 5123 P3 DEGENERATE lines alone — 47% of the entire
+    // assist log. The verdict path itself is correct (run-142/146/151
+    // shaped it); only the LOG frequency is wrong for diagnostic use.
+    //
+    // Throttle: emit one line per ~2 s per phase. Each phase has its own
+    // timer so a transition between phases (P3 → P1 HIT, etc.) doesn't
+    // suppress the transition by sharing a clock with the prior phase.
+    //
+    // Last-tick fields use Environment.TickCount64 (same as
+    // _navDebugNextTick) for cheap monotonic comparison.
+    private long _lastInRectVerdictP1MissTickMs;
+    private long _lastInRectVerdictP2MissTickMs;
+    private long _lastInRectVerdictP3DegenerateTickMs;
+    private const int InRectVerdictLogThrottleMs = 2000;
+
+    // ── No-forward diagnostic throttle fields (run-171) ──
+    //
+    // Two silent early-return paths in Update suppress input.StartForward()
+    // without emitting any log: (1) line ~1994 — route empty AND
+    // TryRefillRouteNow didn't repopulate; (2) line ~2088 — ShouldMoveToward
+    // returned false but bot is NOT at the final waypoint. Run-171 saw
+    // four "Stuck while navigating" warnings in open terrain because the
+    // bot stopped pressing Forward via one of these paths and the log gave
+    // no evidence which one. Diagnostic logs added at both sites,
+    // throttled to once per 1 s so they capture which path fires for each
+    // false-stuck event without re-introducing the spam they're meant to
+    // help diagnose.
+    private long _lastNoForwardRefillFailTickMs;
+    private long _lastNoForwardStopShortTickMs;
+    private const int NoForwardDiagLogThrottleMs = 1000;
 
     private long waitingRequestId;
 
@@ -1961,7 +2027,35 @@ public sealed partial class Navigation : IDisposable
                 TryRefillRouteNow(token, now);
 
                 if (routeToNextWaypoint.Count == 0)
+                {
+                    // ── Run-171 diagnostic — silent refill-fail return ──
+                    //
+                    // Bot's route just emptied (via the consume loop above)
+                    // and TryRefillRouteNow couldn't repopulate it: either
+                    // waitingForPathResult was true, an active cooldown
+                    // blocked the refill, or RefillRouteToNextWaypoint
+                    // produced an empty route. Without this log we silently
+                    // exit Update with no Forward press and no indication
+                    // why — the bot just stands still until FFG's 2.5s
+                    // stuck-detector fires. Throttled to
+                    // NoForwardDiagLogThrottleMs (1s) so a sustained stall
+                    // produces 2–3 lines per false-stuck event instead of
+                    // 60+/sec.
+                    long noFwdRefillTickMs = Environment.TickCount64;
+                    if (noFwdRefillTickMs - _lastNoForwardRefillFailTickMs >= NoForwardDiagLogThrottleMs)
+                    {
+                        Vector3 wpTopForLog = wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
+                        logger.LogInformation(
+                            $"[NAV-NO-FORWARD] refill-failed: route empty AND TryRefillRouteNow " +
+                            $"didn't repopulate — Update returning silently with no Forward press. " +
+                            $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
+                            $"emptyCdMs={(emptyRouteRefillCooldownUntilUtc - now).TotalMilliseconds:0} " +
+                            $"npCdMs={(noProgressRefillCooldownUntilUtc - now).TotalMilliseconds:0} " +
+                            $"wp={wayPoints.Count} wpTop={wpTopForLog} pos={playerPos}.");
+                        _lastNoForwardRefillFailTickMs = noFwdRefillTickMs;
+                    }
                     return;
+                }
 
                 // Refill produced a real route — safe to clear the latch now.
                 ClearDestinationLatch();
@@ -2052,6 +2146,32 @@ public sealed partial class Navigation : IDisposable
 
                 CompleteDestinationReached(fireWaypointReached: true);
                 return;
+            }
+
+            // ── Run-171 diagnostic — silent StopForward when not at final ──
+            //
+            // ShouldMoveToward returned false (bot within STOP_DIST=3.0y of
+            // routeTop) but IsAtFinalWaypoint also returned false (the FINAL
+            // waypoint, wpTop, is still further away). Bot stops moving with
+            // no log. Run-171 evidence (assist-clock 04:04:33:065 →
+            // 04:04:35:510): bot at <908.91, 315.84>, route had 3 nodes
+            // ending at wpTop <914.10, 309.32> (8.33y away), but routeTop
+            // <908.4, 314.4> was only 1.53y from bot — inside STOP_DIST.
+            // Forward press suppressed for 2.5s, false-positive stuck fired.
+            //
+            // Throttled to NoForwardDiagLogThrottleMs (1s).
+            long noFwdStopTickMs = Environment.TickCount64;
+            if (noFwdStopTickMs - _lastNoForwardStopShortTickMs >= NoForwardDiagLogThrottleMs)
+            {
+                float dRoute = playerPos.WorldDistanceXYTo(targetW);
+                Vector3 wpTopForLog = wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
+                float dWp = wayPoints.Count > 0 ? playerPos.WorldDistanceXYTo(wpTopForLog) : -1;
+                logger.LogInformation(
+                    $"[NAV-NO-FORWARD] stop-short: ShouldMoveToward=false at routeTop={targetW} " +
+                    $"(dist={dRoute:0.00}y <= STOP_DIST={STOP_DIST:0.00}y), but NOT at final waypoint " +
+                    $"(wpTop={wpTopForLog} dist={dWp:0.00}y). Calling StopForward — bot stays put. " +
+                    $"route={routeToNextWaypoint.Count} wp={wayPoints.Count} pos={playerPos}.");
+                _lastNoForwardStopShortTickMs = noFwdStopTickMs;
             }
 
             stopMoving.Stop();
@@ -6216,9 +6336,19 @@ public sealed partial class Navigation : IDisposable
                 }
             }
 
-            logger.LogDebug(
-                $"[NAV] InRectVerdict P1 miss bracket=[{diagMinR},{diagMaxR}] estDist={(diagMinR + diagMaxR) / 2f:F1} " +
-                $"dir={playerReader.Direction:F2} player={diagPlayer} est={estNav}");
+            // Run-171 throttle: P1 miss fires once per UpdateWorldState tick when
+            // TargetMapPos is non-zero but the estimate (and multi-sample probes)
+            // don't hit any rect. Throttled to InRectVerdictLogThrottleMs (2s) to
+            // keep log volume sane. LogDebug level — only captured when debug
+            // logging is enabled.
+            long p1MissTickMs = Environment.TickCount64;
+            if (p1MissTickMs - _lastInRectVerdictP1MissTickMs >= InRectVerdictLogThrottleMs)
+            {
+                logger.LogDebug(
+                    $"[NAV] InRectVerdict P1 miss bracket=[{diagMinR},{diagMaxR}] estDist={(diagMinR + diagMaxR) / 2f:F1} " +
+                    $"dir={playerReader.Direction:F2} player={diagPlayer} est={estNav}");
+                _lastInRectVerdictP1MissTickMs = p1MissTickMs;
+            }
             return false;
         }
 
@@ -6244,14 +6374,36 @@ public sealed partial class Navigation : IDisposable
                     return true;
                 }
             }
-            logger.LogDebug(
-                $"[NAV] InRectVerdict P2 miss (TargetMapPos=0) bracket=[{minR},{maxR}] dir={playerReader.Direction:F2} player={diagPlayer}");
+            // Run-171 throttle: P2 miss fires once per UpdateWorldState tick when
+            // (a) TargetMapPos is zero and (b) the bracket samples don't hit any rect.
+            // Throttled to InRectVerdictLogThrottleMs (2s) to keep log volume sane.
+            // LogDebug level — only captured when debug logging is enabled.
+            long p2MissTickMs = Environment.TickCount64;
+            if (p2MissTickMs - _lastInRectVerdictP2MissTickMs >= InRectVerdictLogThrottleMs)
+            {
+                logger.LogDebug(
+                    $"[NAV] InRectVerdict P2 miss (TargetMapPos=0) bracket=[{minR},{maxR}] dir={playerReader.Direction:F2} player={diagPlayer}");
+                _lastInRectVerdictP2MissTickMs = p2MissTickMs;
+            }
             return false;
         }
 
         // (3) degenerate: fail safe toward NOT engaging / NOT pulling
-        logger.LogInformation(
-            $"[NAV] InRectVerdict P3 DEGENERATE->true (maxRange=0, no estimate) player={diagPlayer}");
+        //
+        // Run-171 throttle: P3 fires once per UpdateWorldState tick whenever
+        // the bot has no target (no TargetMapPos AND maxRange=0). Run-171
+        // captured 5123 of these lines in a single session — 47% of the
+        // assist log. Throttled to InRectVerdictLogThrottleMs (2 s);
+        // diagnostic content is preserved (player position, "no estimate"
+        // marker) but at a sustainable rate. The verdict still returns true
+        // every call as before — only the logging frequency is reduced.
+        long p3TickMs = Environment.TickCount64;
+        if (p3TickMs - _lastInRectVerdictP3DegenerateTickMs >= InRectVerdictLogThrottleMs)
+        {
+            logger.LogInformation(
+                $"[NAV] InRectVerdict P3 DEGENERATE->true (maxRange=0, no estimate) player={diagPlayer}");
+            _lastInRectVerdictP3DegenerateTickMs = p3TickMs;
+        }
         return true;
     }
 
