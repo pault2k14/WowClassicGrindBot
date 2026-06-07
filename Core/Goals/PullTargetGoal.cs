@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using SharedLib.NpcFinder;
 
 using System;
+using System.Diagnostics;
 using System.Threading;
 
 using static System.Diagnostics.Stopwatch;
@@ -265,7 +266,22 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
 
     public override void Update()
     {
+        // ── Fix GK (run-169 extension) — PTG Update-entry wait timing ──
+        // See FollowFocusGoal.cs Fix GK block (~line 3326) for full writeup.
+        long gkStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkElapsedMs = Stopwatch.GetElapsedTime(gkStart).TotalMilliseconds;
+        if (gkElapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[PTG] [FIX-FIRE] GK: Update-entry wait.Update() blocked for " +
+                $"{gkElapsedMs:0}ms (>5000ms threshold). Likely cause: WoW addon " +
+                $"GlobalTime counter stalled. State at unblock: " +
+                $"TargetGuid={playerReader.TargetGuid} " +
+                $"bits.Combat={bits.Combat()} " +
+                $"bits.Target_Alive={(bits.Target() ? bits.Target_Alive().ToString() : "n/a")} " +
+                $"Mode={classConfig.Mode}.");
+        }
 
         if (bits.Drowning())
         {

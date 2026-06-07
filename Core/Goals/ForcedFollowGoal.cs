@@ -1,5 +1,7 @@
-﻿using Core.GOAP;
+using Core.GOAP;
 using Microsoft.Extensions.Logging;
+
+using System.Diagnostics;
 
 namespace Core.Goals;
 
@@ -132,7 +134,21 @@ public sealed class ForcedFollowGoal : GoapGoal
         //logger.LogInformation("ForcedFollowGoal: Inside Update");
         // Removed check for playerReader.SpellInRange.PartyMember4_Inspect
         // As inpect can't be used in combat
+
+        // ── Fix GK (run-169 extension) — ForcedFollowGoal wait timing ──
+        // See FollowFocusGoal.cs Fix GK block (~line 3326) for full writeup.
+        long gkStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkElapsedMs = Stopwatch.GetElapsedTime(gkStart).TotalMilliseconds;
+        if (gkElapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[ForcedFollowGoal] [FIX-FIRE] GK: Update wait.Update() blocked for " +
+                $"{gkElapsedMs:0}ms (>5000ms threshold). Likely cause: WoW addon " +
+                $"GlobalTime counter stalled. State at unblock: " +
+                $"TargetGuid={playerReader.TargetGuid} " +
+                $"bits.Combat={bits.Combat()}.");
+        }
 
         input.PressClearTarget();
 

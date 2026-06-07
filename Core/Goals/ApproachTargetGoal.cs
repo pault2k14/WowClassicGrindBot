@@ -4,6 +4,7 @@ using Core.Party;
 using Microsoft.Extensions.Logging;
 
 using System;
+using System.Diagnostics;
 using System.Numerics;  // Fix BN: Vector3 for anchor-position field
 using System.Threading;
 
@@ -480,7 +481,26 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
 
     public override void Update()
     {
+        // ── Fix GK (run-169 extension) — ATG Update-entry wait timing ──
+        // Mirrors the FK-DIAG/Fix GK pattern from CombatGoal + FFG + GoapAgent
+        // loop foot. Catches addon-stall blocks at the start of each ATG tick.
+        // See FollowFocusGoal.cs Fix GK block (~line 3326) for full hypothesis
+        // writeup. 5000ms threshold matches FK-DIAG; logs WARNING with state
+        // context on anomalous blocks. Non-behavioral.
+        long gkStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkElapsedMs = Stopwatch.GetElapsedTime(gkStart).TotalMilliseconds;
+        if (gkElapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[ATG] [FIX-FIRE] GK: Update-entry wait.Update() blocked for " +
+                $"{gkElapsedMs:0}ms (>5000ms threshold). Likely cause: WoW addon " +
+                $"GlobalTime counter stalled. State at unblock: " +
+                $"TargetGuid={playerReader.TargetGuid} " +
+                $"bits.Combat={bits.Combat()} " +
+                $"bits.Target_Alive={(bits.Target() ? bits.Target_Alive().ToString() : "n/a")} " +
+                $"Mode={classConfig.Mode}.");
+        }
 
         if (bits.Drowning())
             input.PressJump();

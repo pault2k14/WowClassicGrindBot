@@ -11,6 +11,7 @@ using SharedLib.Extensions;
 using SharedLib.NpcFinder;
 
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Numerics;
 using System.Threading;
@@ -1796,7 +1797,24 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             return;
 
         RandomJump();
+
+        // ── Fix GK (run-169 extension) — FRG Update-tail wait timing ──
+        // See FollowFocusGoal.cs Fix GK block (~line 3326) for full writeup.
+        long gkStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkElapsedMs = Stopwatch.GetElapsedTime(gkStart).TotalMilliseconds;
+        if (gkElapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[FRG] [FIX-FIRE] GK: Update-tail wait.Update() blocked for " +
+                $"{gkElapsedMs:0}ms (>5000ms threshold). Likely cause: WoW addon " +
+                $"GlobalTime counter stalled. State at unblock: " +
+                $"botPos={playerReader.WorldPos} " +
+                $"bits.Combat={bits.Combat()} " +
+                $"navActive={navigation.HasWaypoint()} " +
+                $"backtrackActive={navigation.IsBacktrackingActive} " +
+                $"Mode={classConfig.Mode}.");
+        }
     }
 
     private bool IsDuplicateRecentRefill(Vector3 topMapPoint, int waypointCount)

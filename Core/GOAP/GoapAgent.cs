@@ -13,6 +13,7 @@ using SharedLib.Extensions;
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Diagnostics;
 using System.Drawing.Printing;
 using System.Linq;
 using System.Numerics;
@@ -1090,7 +1091,46 @@ public sealed partial class GoapAgent : IDisposable
             }
 
             Thread.Sleep(1);
+
+            // ── Fix GK (run-169) — GoapThread loop-foot wait timing diagnostic ──
+            //
+            // Run-169 assist freeze 21:21:29:650 → 21:21:45:489 (~15.8s of
+            // total log silence on main + Navigation thread, while
+            // LeaderStatePoller on a separate thread continued ticking).
+            // Pattern: identical to run-161 LC=15:11:06:159 → 15:11:22:193
+            // (the 16s freeze that motivated Fix FK-DIAG in CombatGoal). In
+            // run-169 the freeze occurred during FFG.UpdateNavigatingToLeader
+            // (Follow Focus mode, not Combat), so Fix FK-DIAG never fired —
+            // it only instrumented CombatGoal sites.
+            //
+            // This site extends the diagnostic to the GoapThread main loop
+            // foot's manualReset.Wait(). Per Fix FK-DIAG documentation
+            // (CombatGoal.cs:2226-2291): manualReset (alias `globalTime`
+            // in some contexts) is a process-singleton ManualResetEventSlim
+            // signaled by AddonReader.Update() when the WoW addon's
+            // GlobalTime counter advances. An addon stall blocks every
+            // wait at this primitive, including this one. If the freeze is
+            // here, we want to know.
+            //
+            // 5000ms threshold matches Fix FK-DIAG. Overhead negligible
+            // (Stopwatch.GetTimestamp ~ns, comparison ~ns; LogWarning body
+            // entered only on abnormal blocks).
+            long gkStart = Stopwatch.GetTimestamp();
             manualReset.Wait();
+            double gkElapsedMs = Stopwatch.GetElapsedTime(gkStart).TotalMilliseconds;
+            if (gkElapsedMs > 5000)
+            {
+                logger.LogWarning(
+                    $"[GoapAgent] [FIX-FIRE] GK: GoapThread loop-foot manualReset.Wait() " +
+                    $"blocked for {gkElapsedMs:0}ms (>5000ms threshold). " +
+                    $"This is anomalous — normal wait returns in 15-30ms (one WoW " +
+                    $"addon GlobalTime tick). Likely cause: WoW addon GlobalTime " +
+                    $"counter stalled. State at unblock: Mode={classConfig.Mode} " +
+                    $"CurrentGoal={CurrentGoal?.Name ?? "(null)"} " +
+                    $"TargetGuid={playerReader.TargetGuid} " +
+                    $"FocusTargetGuid={playerReader.FocusTargetGuid} " +
+                    $"bits.Combat={bits.Combat()}.");
+            }
         }
 
         if (logger.IsEnabled(LogLevel.Debug))

@@ -1,6 +1,8 @@
-﻿using Core.GOAP;
+using Core.GOAP;
 
 using Microsoft.Extensions.Logging;
+
+using System.Diagnostics;
 
 namespace Core.Goals;
 
@@ -90,7 +92,22 @@ public sealed class AssistFocusGoal : GoapGoal
 
     public override void Update()
     {
+        // ── Fix GK (run-169 extension) — AssistFocusGoal Update-entry wait timing ──
+        // See FollowFocusGoal.cs Fix GK block (~line 3326) for full writeup.
+        long gkStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkElapsedMs = Stopwatch.GetElapsedTime(gkStart).TotalMilliseconds;
+        if (gkElapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[AssistFocusGoal] [FIX-FIRE] GK: Update-entry wait.Update() blocked for " +
+                $"{gkElapsedMs:0}ms (>5000ms threshold). Likely cause: WoW addon " +
+                $"GlobalTime counter stalled. State at unblock: " +
+                $"TargetGuid={playerReader.TargetGuid} " +
+                $"FocusTargetGuid={playerReader.FocusTargetGuid} " +
+                $"bits.Combat={bits.Combat()} " +
+                $"Mode={classConfig.Mode}.");
+        }
 
         if (bits.Drowning())
         {

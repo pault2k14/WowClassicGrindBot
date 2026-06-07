@@ -13,6 +13,7 @@ using SharedLib.NpcFinder;
 using System;
 using System.Buffers;
 using System.Collections.Frozen;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -226,7 +227,20 @@ public sealed partial class AdhocNPCGoal : GoapGoal, IGoapEventListener, IRouteP
         if (pathState != PathState.Finished)
             navigation.Update();
 
+        // ── Fix GK (run-169 extension) — AdhocNPCGoal Update-tail wait timing ──
+        // See FollowFocusGoal.cs Fix GK block (~line 3326) for full writeup.
+        long gkStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkElapsedMs = Stopwatch.GetElapsedTime(gkStart).TotalMilliseconds;
+        if (gkElapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[AdhocNPCGoal] [FIX-FIRE] GK: Update-tail wait.Update() blocked for " +
+                $"{gkElapsedMs:0}ms (>5000ms threshold). Likely cause: WoW addon " +
+                $"GlobalTime counter stalled. State at unblock: " +
+                $"pathState={pathState} " +
+                $"bits.Combat={bits.Combat()}.");
+        }
     }
 
 

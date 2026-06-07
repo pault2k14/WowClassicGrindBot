@@ -8,6 +8,7 @@ using SharedLib;
 using SharedLib.Extensions;
 
 using System;
+using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
 
@@ -2749,7 +2750,28 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             }
         }
 
+        // ── Fix GK (run-169) — UpdateIdle end-of-tick wait timing ──
+        //
+        // Defensive coverage. Run-169's freeze was in UpdateNavigatingToLeader,
+        // not Idle, but addon-stall blocks affect every wait at the
+        // ManualResetEventSlim primitive — if a future freeze occurs while
+        // the bot is parked in Idle (e.g., next to the leader, between
+        // pulls), this site catches it. Same hypothesis and threshold as
+        // the primary FFG site (see UpdateNavigatingToLeader Fix GK block
+        // ~line 3301 for full writeup).
+        long gkIdleStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkIdleElapsedMs = Stopwatch.GetElapsedTime(gkIdleStart).TotalMilliseconds;
+        if (gkIdleElapsedMs > 5000)
+        {
+            logger.LogWarning(
+                $"[FFG] [FIX-FIRE] GK: UpdateIdle end-of-tick wait.Update() " +
+                $"blocked for {gkIdleElapsedMs:0}ms (>5000ms threshold). " +
+                $"Likely cause: WoW addon GlobalTime counter stalled. " +
+                $"State at unblock: NavState={_navState} " +
+                $"botPos={playerReader.WorldPos} " +
+                $"localAgeMs={leaderConnection.LocalAgeMs}.");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3297,7 +3319,50 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
             assistStatusProvider.CurrentStatus = BotStatus.NavigatingToLeader;
         }
 
+        // ── Fix GK (run-169) — UpdateNavigatingToLeader end-of-tick wait timing ──
+        //
+        // PRIMARY run-169 freeze site. Run-169 assist freeze
+        // 21:21:29:650 → 21:21:45:489 (~15.8s): last main-thread log was
+        // Navigation's "EXIT noWork" (from navigation.Update() call ~line
+        // 3206 above), then total silence on main + Navigation thread for
+        // 15.8s. LeaderStatePoller on a separate thread continued (proves
+        // process and OS scheduler healthy). Stuck warning fired at
+        // 21:21:45:490 ("moved only 0.00y in 15.8s") on the very first
+        // tick of UpdateNavigatingToLeader after the freeze ended — i.e.,
+        // the previous tick's `wait.Update()` finally returned.
+        //
+        // Mirrors Fix FK-DIAG in CombatGoal (see CombatGoal.cs:2226-2291
+        // for the full hypothesis writeup; the underlying mechanism is the
+        // ManualResetEventSlim signaled by AddonReader.Update() blocking
+        // when the WoW addon's GlobalTime counter stalls). FK-DIAG only
+        // instrumented CombatGoal sites; in run-169 the freeze was in FFG,
+        // so FK-DIAG never fired. This site closes that gap.
+        //
+        // Threshold 5000ms matches FK-DIAG. State context tailored for FFG
+        // diagnosis: NavState, current leader distance, nav target mode,
+        // and whether navigation has a waypoint help correlate the block
+        // with any preceding internal state mutation.
+        long gkNavStart = Stopwatch.GetTimestamp();
         wait.Update();
+        double gkNavElapsedMs = Stopwatch.GetElapsedTime(gkNavStart).TotalMilliseconds;
+        if (gkNavElapsedMs > 5000)
+        {
+            LeaderState? gkLeader = leaderConnection.LastLeaderState;
+            float gkDistToLeader = gkLeader != null
+                ? playerReader.WorldPos.WorldDistanceXYTo(gkLeader.WorldPos)
+                : -1f;
+            logger.LogWarning(
+                $"[FFG] [FIX-FIRE] GK: UpdateNavigatingToLeader end-of-tick " +
+                $"wait.Update() blocked for {gkNavElapsedMs:0}ms (>5000ms threshold). " +
+                $"This is anomalous — normal wait returns in 15-30ms (one WoW addon " +
+                $"GlobalTime tick). Likely cause: WoW addon GlobalTime counter stalled. " +
+                $"State at unblock: NavState={_navState} " +
+                $"NavTargetMode={_currentNavTargetMode} " +
+                $"distToLeader={gkDistToLeader:0.0}y " +
+                $"hasWaypoint={navigation.HasWaypoint()} " +
+                $"botPos={playerReader.WorldPos} " +
+                $"localAgeMs={leaderConnection.LocalAgeMs}.");
+        }
     }
 
     // -----------------------------------------------------------------------
