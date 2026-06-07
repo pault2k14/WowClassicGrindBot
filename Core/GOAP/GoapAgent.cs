@@ -1769,24 +1769,43 @@ public sealed partial class GoapAgent : IDisposable
         RecheckVerdict fyVerdict = recheckCache.GetVerdict(fyTargetGuid);
 
         // ── BeginRecheck trigger ──
-        // When the self-defense conditions HOLD (target IsIgnored, in combat,
-        // taking damage from this target, not in evade recovery) AND the cache
-        // is Unknown for this guid, kick off the active operation. Set the
-        // cache to Pending immediately so subsequent gate evaluations on this
-        // tick (e.g., the CombatGoal mirror) see Pending and suppress
+        // When the self-defense conditions HOLD (target in combat with us,
+        // taking damage from this target, not in evade recovery) AND the
+        // cache is Unknown for this guid, kick off the active operation.
+        // Set the cache to Pending immediately so subsequent gate evaluations
+        // on this tick (e.g., the CombatGoal mirror) see Pending and suppress
         // engagement consistently.
         //
+        // ── Fix GG (run-168, phase E) — engagement-time recheck for ALL aggros ──
+        //
+        // PREVIOUSLY (Phase A+C): the trigger required `targetIgnored` —
+        // only IsIgnored mobs got an engagement-time recheck. This was
+        // implicit scoping from Fix FY's original purpose (gate the
+        // IsIgnored self-defense override).
+        //
+        // NOW (Phase E): per run167-fix-plan.md Operator-Locked Decision #2
+        // (line 311): "Engagement-time recheck for ALL aggros (not just
+        // propagated IsNoEngage). Can't know position without targeting."
+        // Removing the targetIgnored gate ensures the cache gets populated
+        // for non-IsIgnored mobs too; Fix GH's augmented Fix M trigger then
+        // consults that cache to bail BEFORE the bot chases into a rect.
+        //
         // Guards:
-        //   - targetIgnored: only recheck for IsNoEngage-mapped guids; non-BL
-        //     aggressors don't need this gate.
-        //   - hasTarget + playerCombat + dmgTaken + TargetTarget=Me/Pet: the
-        //     standard self-defense activation pattern. Without these we
-        //     have no signal that engagement is imminent.
-        //   - !evadeRecoveryActive: during recovery we suppress everything;
-        //     no point starting a recheck.
-        //   - fyTargetGuid != 0: defensive.
+        //   - hasTarget + fyTargetGuid != 0: required to begin the recheck
+        //     (operation needs a target to Tab toward).
+        //   - playerCombat + dmgTaken + TargetTarget=Me/Pet: standard
+        //     "engagement imminent" signal. Without these we have no
+        //     reason to spend a recheck cycle.
+        //   - bits.Target_Combat(): NEW for Fix GG. The current target is
+        //     actively in combat with us (not just hostile-flagged —
+        //     bits.Target_Hostile would include neutral mobs that aren't
+        //     engaging us). Filters out friendly-targeting cases (e.g.,
+        //     priest healing) AND yellow neutrals on the screen we
+        //     happen to have selected.
+        //   - !evadeRecoveryActive: during recovery we suppress everything.
         if (fyVerdict == RecheckVerdict.Unknown &&
-            targetIgnored && hasTarget && playerCombat && dmgTaken &&
+            hasTarget && playerCombat && dmgTaken &&
+            bits.Target_Combat() &&  // Fix GG: target is in combat with us
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
             fyTargetGuid != 0)
@@ -1795,6 +1814,11 @@ public sealed partial class GoapAgent : IDisposable
             // BeginRecheck transitions the cache to Pending; the gate below
             // will pick that up on this same tick.
             fyVerdict = recheckCache.GetVerdict(fyTargetGuid);
+            logger.LogInformation(
+                $"[GoapAgent] [FIX-FIRE] GG: Engagement-time recheck for guid={fyTargetGuid} " +
+                $"(targetIgnored={targetIgnored}, botInsideBL={navigation.IsInBlacklistArea()}, " +
+                $"targetCombat={bits.Target_Combat()}). Per design Decision #2: recheck for ALL " +
+                $"aggros, not just IsIgnored.");
         }
 
         bool fyCacheInRect = fyVerdict == RecheckVerdict.InRect;
@@ -1806,12 +1830,33 @@ public sealed partial class GoapAgent : IDisposable
         bool fyCacheBlocking = fyCacheInRect || fyCachePending || fyCacheSearchFailed;
         bool fyCacheGatePasses = !fyCacheBlocking || declaredStuck;
 
+        // Fix GE (run-168, phase D) — extend self-state backtrack gate to
+        // the AssistFocus mode. The leader's own IsBacktrackingActive check
+        // below already handles PartyLeader (Fix FN heritage). For the
+        // assist, FRG doesn't run, so navigation.IsBacktrackingActive is
+        // always false on the assist — which means without this extension
+        // the assist would still engage IsIgnored mobs during the
+        // coordinated backtrack (Fix GC design line 237: "BL mobs attacking
+        // assist during coordinated backtrack are IGNORED"). The
+        // coordinated-backtrack mirror reads the leader's published
+        // IsBacktracking via Fix GA. Release of suppression on the assist
+        // happens when the leader publishes IsBacktracking=false (state
+        // transition propagated when leader's FRG exits backtrack).
+        bool selfInBacktrackForSDOverride =
+            navigation.IsBacktrackingActive  // own state (leader, or always-false on assist)
+            || (classConfig.Mode == Mode.AssistFocus
+                && leaderConnection.HasValidLeaderState
+                && leaderConnection.LastLeaderState != null
+                && leaderConnection.LastLeaderState.IsBacktracking);  // coordinated mirror (assist)
+
         bool selfDefenseOverride =
             targetIgnored &&
             hasTarget && playerCombat && dmgTaken &&
             playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet &&
             !evadeRecoveryActive &&
-            (!navigation.IsBacktrackingActive || declaredStuck) &&   // Fix FN suppress backtrack; Fix FT declaredStuck escape
+            (!selfInBacktrackForSDOverride                                       // Fix FN (leader) + Fix GE (assist mirror)
+             || MobConfirmedOutsideForGE(playerReader.TargetGuid)                // Fix GE amendment (Phase E): allow engagement when mob verified outside
+             || declaredStuck) &&                                                // declaredStuck escape per operator rule
             (engageAllowed || btEngageGuidMatch) &&  // Fix FN: backtrack EngageWindow boost
             fyCacheGatePasses;                       // Fix FY: cache verdict gate (Phase C: also blocks Pending/SearchFailed)
         if (selfDefenseOverride)
@@ -1825,8 +1870,33 @@ public sealed partial class GoapAgent : IDisposable
                     $"is on IsIgnored map but actively attacking us (TargetTarget={playerReader.TargetTarget}, " +
                     $"playerCombat=true, dmgTaken=true, evadeRecovery=false, " +
                     $"insideBlacklistArea={botInsideBlacklistArea}, latched={overrideAlreadyLatched}, " +
-                    $"btEngageGuidMatch={btEngageGuidMatch}) — " +
+                    $"btEngageGuidMatch={btEngageGuidMatch}, mobConfirmedOutside={MobConfirmedOutsideForGE(playerReader.TargetGuid)}) — " +
                     $"treating as not-ignored so Combat plan can engage.");
+            }
+        }
+        else if (selfInBacktrackForSDOverride && !declaredStuck
+                 && !MobConfirmedOutsideForGE(playerReader.TargetGuid)  // Fix GE amendment: don't log SUPPRESSED when amendment would have overridden
+                 && targetIgnored && hasTarget && playerCombat && dmgTaken
+                 && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
+                 && !evadeRecoveryActive)
+        {
+            // Fix GE diagnostic — selfDefenseOverride blocked because this
+            // bot is in a backtrack state and the mob isn't a verified-
+            // outside-rect aggressor (no btEngageGuidMatch). Latch on
+            // _selfDefenseOverrideGuid so we get one log per episode.
+            if (_selfDefenseOverrideGuid != playerReader.TargetGuid)
+            {
+                _selfDefenseOverrideGuid = playerReader.TargetGuid;
+                string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
+                    ? "navigation.IsBacktrackingActive=true (own FRG state)"
+                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
+                logger.LogInformation(
+                    $"[GoapAgent] [FIX-FIRE] GE: selfDefenseOverride SUPPRESSED for target " +
+                    $"guid={playerReader.TargetGuid}  this bot is itself in active backtrack " +
+                    $"({selfBacktrackSource}). Engaging IsIgnored mob during backtrack would " +
+                    $"defeat the retreat's purpose; staying suppressed so FRG (leader) or " +
+                    $"coordinated retreat (assist) can complete its waypoint navigation. " +
+                    $"(Mode={classConfig.Mode})");
             }
         }
         else if (_selfDefenseOverrideGuid != 0)
@@ -1947,7 +2017,11 @@ public sealed partial class GoapAgent : IDisposable
             }
         }
 
-        // ── Fix GD (run-168) — Self-backtrack cascade-break gate ──
+        // ── Fix GE (run-168, phase D) — Self-backtrack cascade-break gate ──
+        //
+        // RENAMED from misnamed "Fix GD" 2026-06-06: the Fix GD label was
+        // already reserved in run167-fix-plan.md lines 255-267 for a vestigial
+        // FV revert. This fix is structurally distinct and gets a new label.
         //
         // Evidence (run-168 leader 13:20:45:424 → 13:21:04:802, ~22s
         // oscillation in BL area near <953.94, 281.55>):
@@ -1990,19 +2064,40 @@ public sealed partial class GoapAgent : IDisposable
         // cascade does the most damage because the bot is actively
         // trying to escape a BL rect.
         //
-        // Fix GD: when SELF (this bot) is in any backtrack mode (FN/FT/FX),
-        // suppress Fix L. Retreat takes priority over party-assist override.
-        // The partner (which is not backtracking) continues to handle the
-        // mob via its own Fix 17 self-defense — exactly the run-168 outcome
-        // we want (assist killed the mob; leader should have just sat in
-        // backtrack instead of oscillating).
+        // Fix GE — symmetric across both bots: when SELF is in any
+        // backtrack mode (own FRG-driven on leader; coordinated mirror
+        // on assist via leader's published IsBacktracking), suppress
+        // Fix L. Retreat takes priority over party-assist override per
+        // operator's stated rule (2026-06-06): "if you are in a backtrack
+        // state don't fight blacklisted mobs unless you know they are now
+        // outside of the blacklisted area." On the leader the "mob now
+        // outside" release happens via FRG's BacktrackEngageGuid state
+        // transition (Fix FN/FX pattern). On the assist the release
+        // happens when the leader publishes IsBacktracking=false (state
+        // transition propagated via Fix GA).
         //
-        // Reads navigation.IsBacktrackingActive (the volatile flag FRG sets
-        // on backtrack entry and clears on ExitBacktrack). This is a
-        // self-state check, distinct from Fix FZ's partner-state check.
-        // In Standalone Grind mode (not isPartyModeForFixL), Fix L doesn't
-        // fire at all — Fix GD is a no-op there as well.
-        bool selfIsBacktracking = navigation.IsBacktrackingActive;
+        // Mode-aware definition:
+        //   PartyLeader → navigation.IsBacktrackingActive (own FRG state).
+        //   AssistFocus → leader's published IsBacktracking (coordinated
+        //                 backtrack mirror per Fix GC design line 229-247).
+        //   Other modes → false (Fix L doesn't fire in Standalone Grind
+        //                 either; this is a no-op there).
+        bool selfInBacktrackForGE;
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            selfInBacktrackForGE = navigation.IsBacktrackingActive;
+        }
+        else if (classConfig.Mode == Mode.AssistFocus)
+        {
+            selfInBacktrackForGE =
+                leaderConnection.HasValidLeaderState &&
+                leaderConnection.LastLeaderState != null &&
+                leaderConnection.LastLeaderState.IsBacktracking;
+        }
+        else
+        {
+            selfInBacktrackForGE = false;
+        }
 
         // Position rule (operator-directed; lockstep with the self-defense gate and
         // CombatGoal): a bot may JOIN the partner's fight only when it is itself
@@ -2019,7 +2114,8 @@ public sealed partial class GoapAgent : IDisposable
             engageAllowedForJoin &&
             !evadeRecoveryActive &&
             !partnerHasInRectBacktrack &&   // Fix FZ: don't cascade onto partner's backtrack
-            !selfIsBacktracking)            // Fix GD: don't fire while self is backtracking
+            (!selfInBacktrackForGE          // Fix GE: don't fire while self is backtracking (own or coordinated)
+             || MobConfirmedOutsideForGE(playerReader.FocusTargetGuid)))  // Fix GE amendment (Phase E): unless mob is verifiably outside the rect — handles assist-side EngageWindow coordination
         {
             focusTargetIgnored = false;
             if (_partyAssistOverrideGuid != playerReader.FocusTargetGuid)
@@ -2032,26 +2128,33 @@ public sealed partial class GoapAgent : IDisposable
                     $"is in combat with it (partner-side Fix 17 active). " +
                     $"Flipping focusTargetIgnored=false so this bot's CombatGoal " +
                     $"precondition allPartyTargetsIsIgnored=false is met. " +
-                    $"(Mode={classConfig.Mode})");
+                    $"(Mode={classConfig.Mode}, mobConfirmedOutside={MobConfirmedOutsideForGE(playerReader.FocusTargetGuid)})");
             }
         }
-        else if (selfIsBacktracking && focusTargetIgnored && b.FocusTarget()
+        else if (selfInBacktrackForGE
+                 && !MobConfirmedOutsideForGE(playerReader.FocusTargetGuid)  // Fix GE amendment: don't log SUPPRESSED when amendment would have overridden
+                 && focusTargetIgnored && b.FocusTarget()
                  && b.FocusTarget_Combat() && playerReader.FocusTargetGuid != 0)
         {
-            // Fix GD diagnostic — fired when self is backtracking and Fix L
-            // would otherwise have flipped the IsIgnored flag. Latches on
+            // Fix GE diagnostic — fired when self is in a backtrack state
+            // (own FRG-driven on leader, or coordinated mirror on assist via
+            // leader's published IsBacktracking) and Fix L would otherwise
+            // have flipped the IsIgnored flag. Latches on
             // _partyAssistOverrideGuid so we get one log per backtrack
             // episode per focus guid rather than spam. Self-state check
             // takes priority over partner-state check (Fix FZ) in this
-            // diagnostic ordering — if both gates apply, log Fix GD.
+            // diagnostic ordering — if both gates apply, log Fix GE.
             if (_partyAssistOverrideGuid != playerReader.FocusTargetGuid)
             {
                 _partyAssistOverrideGuid = playerReader.FocusTargetGuid;
+                string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
+                    ? "navigation.IsBacktrackingActive=true (own FRG state)"
+                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
                 logger.LogInformation(
-                    $"[GoapAgent] [FIX-FIRE] GD: Fix L SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
-                    $"this bot is itself in active backtrack (IsBacktrackingActive=true). " +
+                    $"[GoapAgent] [FIX-FIRE] GE: Fix L SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
+                    $"this bot is itself in active backtrack ({selfBacktrackSource}). " +
                     $"Engaging during backtrack would defeat the retreat's purpose; staying suppressed " +
-                    $"so FRG can complete its backtrack waypoint navigation. " +
+                    $"so FRG (leader) or coordinated retreat (assist) can complete its waypoint navigation. " +
                     $"(Mode={classConfig.Mode})");
             }
         }
@@ -2689,6 +2792,45 @@ public sealed partial class GoapAgent : IDisposable
     private bool IsTargetIgnoredOrAbsent(bool present, int guid)
     {
         return !present || playerReader.IsIgnored(guid);
+    }
+
+    /// <summary>
+    /// Fix GE amendment (run-168, phase E) — mobConfirmedOutside check.
+    /// Returns true when this bot has definitive evidence that the mob is
+    /// OUTSIDE all BL rects. Used to override Fix GE's strict suppression
+    /// so the assist can engage alongside the leader during the leader's
+    /// EngageWindow phase (where leader-local IsBacktrackingActive has
+    /// flipped to false but leader-published IsBacktracking is still true
+    /// until ExitBacktrack fires).
+    ///
+    /// Leader-local check: cache verdict NotInRect.
+    /// Assist check: leader's published BacktrackAggressorGuid + !BacktrackAggressorInRect.
+    /// The leader updates BacktrackAggressorInRect=false on the same Evaluating
+    /// tick where it transitions to EngageWindow (FRG line ~3460 then ~3479-3481),
+    /// so the assist has the verdict immediately after the next publish cycle.
+    /// </summary>
+    private bool MobConfirmedOutsideForGE(int guid)
+    {
+        if (guid == 0)
+            return false;
+
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            RecheckVerdict v = recheckCache.GetVerdict(guid);
+            return v == RecheckVerdict.NotInRect;
+        }
+        else if (classConfig.Mode == Mode.AssistFocus)
+        {
+            if (!leaderConnection.HasValidLeaderState)
+                return false;
+            LeaderState? ls = leaderConnection.LastLeaderState;
+            if (ls == null)
+                return false;
+            // Leader publishes a single tracked aggressor guid + its verdict.
+            // The assist trusts this for any guid matching the published one.
+            return ls.BacktrackAggressorGuid == guid && !ls.BacktrackAggressorInRect;
+        }
+        return false;
     }
 
     private void HandleGoapEvent(GoapEventArgs e)

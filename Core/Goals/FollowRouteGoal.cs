@@ -3232,6 +3232,74 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         input.PressInteract();       // face target (starts (2) click-to-move)
                         input.StepBackwards();       // cancel (2) — 100ms Backward tap
                     }
+
+                    // ── Fix GI (run-168, phase E) — per-waypoint cache invalidation ──
+                    //
+                    // Per design line 48: "on arrival at each prior waypoint,
+                    // recheck _btTargetGuid." Phase A+C shipped the single-shot
+                    // pattern (BeginRecheck only on Unknown verdict). After the
+                    // first verdict, subsequent waypoints just use the cached
+                    // verdict. This misses mid-backtrack walk-out detection.
+                    //
+                    // Fix GI invalidates the cache for the relevant guid at this
+                    // Navigating→Evaluating transition. The next Evaluating tick
+                    // sees Unknown and triggers BeginRecheck via the existing
+                    // single-shot pattern (FX-mode line ~3363; FT-mode Fix GF
+                    // line ~3298). Net: each waypoint arrival re-checks.
+                    //
+                    // Bounded by:
+                    //   - ExitBacktrack invalidation (line ~3582): on backtrack
+                    //     exit the cache is invalidated wholesale anyway.
+                    //   - 30s wait-retry → Resolved (design Decision #5): a
+                    //     Resolved verdict triggers ExitBacktrack in the
+                    //     Evaluating phase (line ~3399), so Fix GI stops firing
+                    //     once Resolved is in play.
+                    //   - Defensive guard below: only invalidate if prev verdict
+                    //     was DEFINITIVE (InRect or NotInRect). Skip Unknown
+                    //     (no prior recheck to refresh), Pending/SearchFailed
+                    //     (operation already in flight — don't disrupt), and
+                    //     Resolved (terminal state).
+                    int giInvalidationGuid;
+                    if (_btIsBlEscapeMode)
+                    {
+                        // FT-mode: use current target if it's an eligible
+                        // opportunistic guid (matches Fix GF.b gating). If
+                        // not eligible, no invalidation needed — Fix GF's
+                        // existing Unknown-gate handles the no-target case.
+                        giInvalidationGuid =
+                            playerReader.TargetGuid != 0
+                            && playerReader.IsNoEngage(playerReader.TargetGuid)
+                            && bits.Combat()
+                            && bits.Target_Alive()
+                                ? playerReader.TargetGuid
+                                : 0;
+                    }
+                    else
+                    {
+                        // FX-mode: tracked aggressor.
+                        giInvalidationGuid = _btTargetGuid;
+                    }
+
+                    if (giInvalidationGuid != 0)
+                    {
+                        RecheckVerdict giPrevVerdict = recheckCache.GetVerdict(giInvalidationGuid);
+                        // Defensive: only invalidate if we have a prior
+                        // definitive verdict to refresh. The NotInRect case is
+                        // unreachable in practice (FRG would have transitioned
+                        // to EngageWindow on NotInRect), but kept defensively.
+                        if (giPrevVerdict == RecheckVerdict.InRect
+                            || giPrevVerdict == RecheckVerdict.NotInRect)
+                        {
+                            recheckCache.Invalidate(giInvalidationGuid);
+                            logger.LogInformation(
+                                $"[FRG] [FIX-FIRE] GI: Per-waypoint cache invalidation for " +
+                                $"guid={giInvalidationGuid} (prev verdict={giPrevVerdict}). " +
+                                $"Forcing fresh recheck at waypoint #{_btStepsBack} " +
+                                $"(routeIdx={_btStartRouteIdx - _btStepsBack}). " +
+                                $"Mode={(_btIsBlEscapeMode ? "FT" : "FX")}.");
+                        }
+                    }
+
                     _btArrivalUtc = DateTime.UtcNow;
                     _btPhase = BacktrackPhase.Evaluating;
                     logger.LogInformation(
@@ -3252,6 +3320,114 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
                 if (_btIsBlEscapeMode)
                 {
+                    // ── Fix GF (run-168, phase D) — FT-mode opportunistic recheck ──
+                    //
+                    // FT-mode (_btTargetGuid=0) doesn't have a tracked aggressor
+                    // to recheck at waypoints. But during FT retreat an IsIgnored
+                    // mob may be actively damaging the bot (auto-retargeted by
+                    // WoW). If that mob's position has shifted out of the BL rect
+                    // during the retreat, we want to detect it and transition to
+                    // engagement — matching the operator's stated rule (2026-06-06):
+                    // "we don't only want a leash, we can fight the blacklisted
+                    // mob once it is out of the blacklisted area."
+                    //
+                    // Trigger: at FT-mode waypoint arrival (Evaluating phase), if
+                    // bot has a current target that is IsIgnored AND bot is in
+                    // combat, run BeginRecheck on that guid. The recheck operation
+                    // is single-tenant (idempotent on same guid in flight); if
+                    // verdict is already cached, the existing FX-mode pattern
+                    // applies (use cache, don't re-trigger). This matches
+                    // run167-fix-plan.md design line 47-48 (engagement-time AND
+                    // waypoint-arrival recheck triggers).
+                    //
+                    // On NotInRect verdict: transition same way FX-mode does
+                    // (line ~3371 below): set BacktrackEngageGuid, transition to
+                    // EngageWindow, flip FT→FN-style for Combat plan to engage.
+                    // The existing engageAllowed gate (!insideBlacklistArea ||
+                    // declaredStuck) still applies; if bot is still inside a rect
+                    // at this waypoint, Combat plan engages but bot may chase mob
+                    // out of rect, which is fine since the mob is now confirmed
+                    // outside.
+                    //
+                    // On InRect verdict: publish via Fix GA so assist sees the
+                    // guid + verdict, then fall through to existing FT-mode
+                    // logic (advance to next waypoint or exit on outside-all-rects).
+                    int gfOpportunisticGuid = playerReader.TargetGuid;
+                    bool gfOpportunisticEligible =
+                        gfOpportunisticGuid != 0 &&
+                        playerReader.IsNoEngage(gfOpportunisticGuid) &&
+                        bits.Combat() &&
+                        bits.Target_Alive();
+
+                    if (gfOpportunisticEligible)
+                    {
+                        RecheckVerdict gfVerdict = recheckCache.GetVerdict(gfOpportunisticGuid);
+
+                        if (gfVerdict == RecheckVerdict.Unknown)
+                        {
+                            // First arrival at this waypoint for the opportunistic
+                            // check — kick off the operation. Bot is already
+                            // stationary at the waypoint per the Navigating→
+                            // Evaluating transition (PressInteract + StepBackwards
+                            // fired there).
+                            recheckOperation.BeginRecheck(gfOpportunisticGuid);
+                            logger.LogInformation(
+                                $"[FRG] [FIX-FIRE] GF: FT-mode opportunistic recheck — kicking off " +
+                                $"BeginRecheck(guid={gfOpportunisticGuid}) at waypoint #{_btStepsBack} " +
+                                $"(routeIdx={_btStartRouteIdx - _btStepsBack}). FT-mode has no tracked " +
+                                $"aggressor; checking the IsIgnored mob currently attacking us to see " +
+                                $"if it has walked out of the rect.");
+                            return true;  // stay in Evaluating; bot is stopped
+                        }
+                        if (gfVerdict == RecheckVerdict.Pending
+                            || gfVerdict == RecheckVerdict.SearchFailed)
+                        {
+                            // Operation in flight; wait for verdict. Bot stays
+                            // stationary at this waypoint.
+                            return true;
+                        }
+                        if (gfVerdict == RecheckVerdict.Resolved)
+                        {
+                            // 30s wait-retry exhausted; treat as resolved.
+                            // Exit FT-mode cleanly (no EngageWindow transition
+                            // because Resolved means killed/leashed/lost, not
+                            // "outside" — no specific verified-outside guid).
+                            ExitBacktrack($"FT-mode opportunistic recheck declared guid={gfOpportunisticGuid} Resolved (30s wait-retry exhausted)");
+                            return false;
+                        }
+                        if (gfVerdict == RecheckVerdict.NotInRect)
+                        {
+                            // Mob has walked out of the rect. Publish guid +
+                            // verdict via Fix GA so the assist sees it, then
+                            // transition to EngageWindow (FN-style) so Combat
+                            // plan engages. This is the operator's "mob walks
+                            // out, bots engage" path.
+                            leaderNavProvider.UpdateBacktrackAggressorGuid(gfOpportunisticGuid);
+                            leaderNavProvider.UpdateBacktrackProgress(
+                                aggressorInRect: false,
+                                insideBl: navigation.IsInBlacklistArea(),
+                                waypointIdx: _btStartRouteIdx - _btStepsBack);
+                            navigation.IsBacktrackingActive = false;
+                            navigation.BacktrackEngageGuid = gfOpportunisticGuid;
+                            _btTargetGuid = gfOpportunisticGuid;  // FT → FN-style for engage window
+                            _btIsBlEscapeMode = false;
+                            _btPhase = BacktrackPhase.EngageWindow;
+                            logger.LogWarning(
+                                $"[FRG] [FIX-FIRE] GF: FT-mode opportunistic recheck — " +
+                                $"guid={gfOpportunisticGuid} verdict=NotInRect at waypoint #{_btStepsBack}. " +
+                                $"Transitioning to EngageWindow; Combat plan will engage. " +
+                                $"Setting BacktrackEngageGuid; backtrack mode flips FT→FN-style.");
+                            return true;
+                        }
+                        // InRect verdict: publish so assist sees current state, then
+                        // fall through to existing FT-mode logic below.
+                        leaderNavProvider.UpdateBacktrackAggressorGuid(gfOpportunisticGuid);
+                        leaderNavProvider.UpdateBacktrackProgress(
+                            aggressorInRect: true,
+                            insideBl: navigation.IsInBlacklistArea(),
+                            waypointIdx: _btStartRouteIdx - _btStepsBack);
+                    }
+
                     // Fix FT: in BL-escape mode the verdict is "is the BOT
                     // itself still inside any BL rect?" — not the target's
                     // position. If we've stepped back to a waypoint outside

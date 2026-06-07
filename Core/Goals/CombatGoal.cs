@@ -70,6 +70,14 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
     // or override conditions no longer hold).
     private int _combatOverrideGuid;
 
+    // Fix GJ (run-168, phase E) — Combat plan engagement gate for non-IsIgnored.
+    // Latches the current target guid being gated so we get one log per
+    // gate episode plus a release log when the gate exits. Paired with
+    // _combatOverrideGuid (self-defense latch) and _partyAssistMirrorGuid
+    // (Fix L mirror latch) — all serve the same once-per-activation logging
+    // pattern.
+    private int _combatGateGuid;
+
     // Fix L (log-58 10:12:22:148 → 10:12:36:305 leader engaging blacklisted
     // 311297 alone via Fix 17, assist stood at projection boundary X~946 for
     // 14 s and did not participate): latch for the party-assist override
@@ -211,6 +219,38 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 keyAction.ResetCharges();
             }
         }
+    }
+
+    /// <summary>
+    /// Fix GE amendment (run-168, phase E) — mobConfirmedOutside check.
+    /// Mirror of GoapAgent.MobConfirmedOutsideForGE; see that doc-comment
+    /// for full rationale. Both files use this to override Fix GE's strict
+    /// suppression so the assist can engage alongside the leader during the
+    /// leader's EngageWindow phase.
+    ///
+    /// Leader-local check: cache verdict NotInRect.
+    /// Assist check: leader's published BacktrackAggressorGuid + !BacktrackAggressorInRect.
+    /// </summary>
+    private bool MobConfirmedOutsideForGE(int guid)
+    {
+        if (guid == 0)
+            return false;
+
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            RecheckVerdict v = recheckCache.GetVerdict(guid);
+            return v == RecheckVerdict.NotInRect;
+        }
+        else if (classConfig.Mode == Mode.AssistFocus)
+        {
+            if (!leaderConnection.HasValidLeaderState)
+                return false;
+            LeaderState? ls = leaderConnection.LastLeaderState;
+            if (ls == null)
+                return false;
+            return ls.BacktrackAggressorGuid == guid && !ls.BacktrackAggressorInRect;
+        }
+        return false;
     }
 
     public override void OnEnter()
@@ -433,20 +473,74 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // !navigation.IsApproachEscapeActive guard: defensive — don't
         // interrupt an in-progress approach escape. CombatGoal doesn't
         // run during ATG escape, but the cheap check provides robustness.
-        if (navigation.IsInBlacklistArea() &&
+        // ── Fix GH (run-168, phase E) — Fix M cache integration (option (ii)) ──
+        //
+        // PREVIOUSLY (pre-Phase E): Fix M's trigger was bot-position-only —
+        // `IsInBlacklistArea() && !IsIgnored(target)`. Fired AFTER the bot
+        // had already chased into the rect. Also over-blacklisted when the
+        // mob had walked back out during the chase (bot ended up
+        // blacklisting an engageable mob).
+        //
+        // NOW (Phase E): augment with cache-based trigger. Logic (option ii):
+        //   Fire IF: cache verdict definitively InRect for current target
+        //            (engagement-time prevention, regardless of bot position)
+        //   OR IF: bot inside BL AND cache verdict NOT definitively NotInRect
+        //          (covers chase-into-rect AND no-cache-info cases, but NOT
+        //           the "mob walked out while bot was inside" case where bot
+        //           can continue combat and naturally chase the mob out).
+        //
+        // Equivalently: fire UNLESS (cache verdict NotInRect AND bot inside BL).
+        //
+        // With Fix GG's engagement-time recheck (now firing for ALL aggros),
+        // the cache populates BEFORE the bot chases in. Net effect: blacklist
+        // fires at engagement time when verdict says InRect — bot never
+        // enters the rect.
+        //
+        // Known tradeoff (acceptable per design choice): if the bot crosses
+        // into BL while the recheck for current target is still in flight
+        // (Pending/SearchFailed), Fix GH bails and blacklists. If the
+        // verdict would have resolved NotInRect a moment later, the mob is
+        // over-blacklisted. The alternative — Fix GJ waits while bot is
+        // inside BL — exposes the bot to damage in an unsafe area. The plan
+        // chooses conservative bail.
+        RecheckVerdict ghCacheVerdict =
+            playerReader.TargetGuid != 0
+                ? recheckCache.GetVerdict(playerReader.TargetGuid)
+                : RecheckVerdict.Unknown;
+        bool ghCacheSaysInRect = ghCacheVerdict == RecheckVerdict.InRect;
+        bool ghCacheSaysNotInRect = ghCacheVerdict == RecheckVerdict.NotInRect;
+        bool ghPositionTrigger = navigation.IsInBlacklistArea();
+
+        bool ghShouldFire =
+            ghCacheSaysInRect
+            || (ghPositionTrigger && !ghCacheSaysNotInRect);
+
+        if (ghShouldFire &&
             !navigation.IsApproachEscapeActive &&
             bits.Target() &&
             playerReader.TargetGuid != 0 &&
             !playerReader.IsIgnored(playerReader.TargetGuid))
         {
-            logger.LogWarning(
-                $"[CombatGoal] Fix M BL-during-combat bail-out: bot inside " +
-                $"blacklist area while engaging non-IsIgnored target " +
-                $"guid={playerReader.TargetGuid}. Blacklisting target and " +
-                $"exiting combat to trigger evade-retreat behavior. " +
-                $"(Mode={classConfig.Mode})");
+            string ghTriggerReason;
+            if (ghCacheSaysInRect && ghPositionTrigger)
+                ghTriggerReason = "BOTH cache-verdict-InRect AND bot-inside-BL";
+            else if (ghCacheSaysInRect)
+                ghTriggerReason = "cache-verdict-InRect (engagement-time prevention)";
+            else  // ghPositionTrigger && !ghCacheSaysNotInRect
+                ghTriggerReason = $"bot-inside-BL with non-definitive cache (verdict={ghCacheVerdict}; Fix M legacy path)";
 
-            bool inRect = navigation.IsTargetLikelyInBlacklistRect();
+            logger.LogWarning(
+                $"[CombatGoal] [FIX-FIRE] GH: Fix M-augmented bail-out — trigger={ghTriggerReason}, " +
+                $"guid={playerReader.TargetGuid}, botInsideBL={ghPositionTrigger}, " +
+                $"cacheVerdict={ghCacheVerdict}, (Mode={classConfig.Mode})");
+
+            // The inRect parameter for EvadeBlacklistEvent reflects the
+            // authoritative verdict where available, falling back to the
+            // passive read only if cache is Unknown.
+            bool inRect = ghCacheSaysInRect ||
+                          (ghCacheVerdict == RecheckVerdict.Unknown
+                           && navigation.IsTargetLikelyInBlacklistRect());
+
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
             playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
@@ -457,6 +551,67 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             wait.Update();
             stopMoving.Stop();
             return;
+        }
+
+        // ── Fix GJ (run-168, phase E) — Combat plan engagement gate for non-IsIgnored ──
+        //
+        // Fix GG (Phase E) triggers BeginRecheck for non-IsIgnored aggros at
+        // engagement time. The operation takes ~700ms (Tab+Interact+Stop+
+        // Settle+Read). During this window the cache verdict is Pending or
+        // SearchFailed.
+        //
+        // The original Fix FY cache gate (fyMirrorCacheGatePasses, below
+        // line ~700) gates only the IsIgnored selfDefenseOverride path. For
+        // non-IsIgnored targets, no gate existed — CombatGoal would press
+        // Approach + Attack keys while the operation pressed Tab + Stop +
+        // Interact. Race condition.
+        //
+        // Fix GJ closes this: if current target is non-IsIgnored AND cache
+        // verdict is Pending/SearchFailed (operation in flight), return
+        // early — no engagement keys pressed this tick. Bot stays stationary
+        // at engagement distance. Next tick, gate re-evaluates against the
+        // now-resolved cache.
+        //
+        // Fix GH (above) wins ordering: if verdict resolves InRect, Fix GH
+        // bails with blacklist BEFORE this gate fires. If verdict resolves
+        // NotInRect, this gate doesn't fire and normal combat continues.
+        //
+        // Scope clarification: Fix GJ suppresses CombatGoal's engagement
+        // keypresses (Approach/Attack) during the gate window. It does NOT
+        // suppress the recheck operation's own keypresses (Tab/Interact/
+        // Stop) — the operation runs as an IReader independent of goal
+        // selection, ticking every addon frame. The operation owns the
+        // Tab/Stop/Interact sequence; Fix GJ just prevents CombatGoal from
+        // layering Approach/Attack on top.
+        if (!currentTargetIsIgnored
+            && bits.Target()
+            && playerReader.TargetGuid != 0
+            && bits.Combat()
+            && !assistStatusProvider.EvadeRecoveryActive)
+        {
+            RecheckVerdict gjVerdict = recheckCache.GetVerdict(playerReader.TargetGuid);
+            if (gjVerdict == RecheckVerdict.Pending
+                || gjVerdict == RecheckVerdict.SearchFailed)
+            {
+                if (_combatGateGuid != playerReader.TargetGuid)
+                {
+                    _combatGateGuid = playerReader.TargetGuid;
+                    logger.LogInformation(
+                        $"[CombatGoal] [FIX-FIRE] GJ: Engagement gate — non-IsIgnored " +
+                        $"target guid={playerReader.TargetGuid} has cache verdict={gjVerdict} " +
+                        $"(recheck operation in flight). Suppressing engagement keys until " +
+                        $"verdict resolves. (Mode={classConfig.Mode})");
+                }
+                return;
+            }
+            else if (_combatGateGuid != 0
+                     && _combatGateGuid == playerReader.TargetGuid)
+            {
+                logger.LogInformation(
+                    $"[CombatGoal] Fix GJ gate released for guid={_combatGateGuid} " +
+                    $"(verdict now {gjVerdict}).");
+                _combatGateGuid = 0;
+            }
         }
 
         // Fix 17 (log-44 00:41:12 leader / 00:41:28 assist — Combat ↔ NO PLAN
@@ -531,6 +686,35 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // when self-defense is active.
         bool overrideAlreadyLatched =
             _combatOverrideGuid != 0 && _combatOverrideGuid == playerReader.TargetGuid;
+
+        // ── Fix GE (run-168, phase D) — Self-backtrack state (mode-aware) ──
+        //
+        // Used by BOTH the Fix 17 self-defense override (below ~line 664) AND
+        // the Fix L mirror (below ~line 875) to suppress IsIgnored-mob
+        // engagement during backtrack. Declared once here so both sites can
+        // reference the same value. See GoapAgent.cs for full rationale.
+        //
+        // Mode-aware:
+        //   PartyLeader → navigation.IsBacktrackingActive (own FRG state).
+        //   AssistFocus → leader's published IsBacktracking (coordinated
+        //                 backtrack mirror per Fix GC design line 229-247).
+        //   Other modes → false.
+        bool selfInBacktrackForGE;
+        if (classConfig.Mode == Mode.PartyLeader)
+        {
+            selfInBacktrackForGE = navigation.IsBacktrackingActive;
+        }
+        else if (classConfig.Mode == Mode.AssistFocus)
+        {
+            selfInBacktrackForGE =
+                leaderConnection.HasValidLeaderState &&
+                leaderConnection.LastLeaderState != null &&
+                leaderConnection.LastLeaderState.IsBacktracking;
+        }
+        else
+        {
+            selfInBacktrackForGE = false;
+        }
 
         // E4: don't let self-defense chase a mob determined to be inside a blacklist
         // rect at blacklist time (CombatGoal closes distance via direct Approach
@@ -644,15 +828,34 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         // (BlacklistRecheckOperation.BeginRecheck is a no-op when same guid
         // already in flight). Kept here so CombatGoal can also be the entry
         // point if it's selected without the planner pass on this tick.
+        //
+        // ── Fix GG (run-168, phase E) — engagement-time recheck for ALL aggros ──
+        //
+        // Mirror of GoapAgent.cs Fix GG. PREVIOUSLY the trigger required
+        // `currentTargetIsIgnored` — only IsIgnored mobs got an engagement-
+        // time recheck. NOW per design Decision #2 (line 311): recheck for
+        // ALL aggros so Fix GH can consult the cache to bail BEFORE the
+        // bot chases into a rect.
+        //
+        // Guards mirror GoapAgent (see comment there for full rationale):
+        //   - bits.Target_Combat(): NEW for Fix GG. Filters out friendly-
+        //     targeting cases and yellow neutrals (Target_Hostile would
+        //     include both, Target_Combat is "target is in combat with us").
         if (fyMirrorVerdict == RecheckVerdict.Unknown &&
-            currentTargetIsIgnored && bits.Target() && bits.Combat()
+            bits.Target() && bits.Combat()
             && combatLog.DamageTakenCount() > 0
+            && bits.Target_Combat()  // Fix GG: target is in combat with us
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
             && !assistStatusProvider.EvadeRecoveryActive
             && fyMirrorGuid != 0)
         {
             recheckOperation.BeginRecheck(fyMirrorGuid);
             fyMirrorVerdict = recheckCache.GetVerdict(fyMirrorGuid);
+            logger.LogInformation(
+                $"[CombatGoal] [FIX-FIRE] GG: Engagement-time recheck for guid={fyMirrorGuid} " +
+                $"(currentTargetIgnored={currentTargetIsIgnored}, botInsideBL={navigation.IsInBlacklistArea()}, " +
+                $"targetCombat={bits.Target_Combat()}). Per design Decision #2: recheck for ALL " +
+                $"aggros, not just IsIgnored.");
         }
 
         bool fyMirrorCacheInRect = fyMirrorVerdict == RecheckVerdict.InRect;
@@ -665,6 +868,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             && combatLog.DamageTakenCount() > 0
             && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
             && !assistStatusProvider.EvadeRecoveryActive
+            && (!selfInBacktrackForGE                                            // Fix GE: don't engage IsIgnored mobs during backtrack
+                || MobConfirmedOutsideForGE(playerReader.TargetGuid)             // Fix GE amendment (Phase E): unless mob is verifiably outside
+                || fyMirrorDeclaredStuck)                                        // declaredStuck escape per operator rule
             && (engageAllowed || btEngageOverride)
             && fyMirrorCacheGatePasses)
         {
@@ -738,6 +944,36 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                         $"the leader navigates to our position. " +
                         $"Target guid={playerReader.TargetGuid}.");
                 }
+            }
+        }
+        else if (selfInBacktrackForGE && !fyMirrorDeclaredStuck
+                 && !MobConfirmedOutsideForGE(playerReader.TargetGuid)  // Fix GE amendment: don't log SUPPRESSED when amendment would have overridden
+                 && currentTargetIsIgnored && bits.Target() && bits.Combat()
+                 && combatLog.DamageTakenCount() > 0
+                 && playerReader.TargetTarget is UnitsTarget.Me or UnitsTarget.Pet
+                 && !assistStatusProvider.EvadeRecoveryActive)
+        {
+            // Fix GE diagnostic for Fix 17 mirror — log once per backtrack-
+            // suppression event. Latches on _combatOverrideGuid to prevent
+            // log spam. Fires when the bot is in a backtrack state (own FRG
+            // or coordinated mirror via leader's published IsBacktracking)
+            // and the IsIgnored mob would otherwise have been engaged via
+            // Fix 17 self-defense. Per operator rule (2026-06-06): retreat
+            // takes priority unless the mob is verifiably outside the rect
+            // (BacktrackEngageGuid path) or the bot is declaredStuck.
+            if (_combatOverrideGuid != playerReader.TargetGuid)
+            {
+                _combatOverrideGuid = playerReader.TargetGuid;
+                string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
+                    ? "navigation.IsBacktrackingActive=true (own FRG state)"
+                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
+                logger.LogInformation(
+                    $"[CombatGoal] [FIX-FIRE] GE: Fix 17 mirror SUPPRESSED for target " +
+                    $"guid={playerReader.TargetGuid}  this bot is itself in active backtrack " +
+                    $"({selfBacktrackSource}). Engaging IsIgnored mob during backtrack would " +
+                    $"defeat the retreat's purpose; staying suppressed so FRG (leader) or " +
+                    $"coordinated retreat (assist) can complete its waypoint navigation. " +
+                    $"(Mode={classConfig.Mode})");
             }
         }
         else if (_combatOverrideGuid != 0)
@@ -855,17 +1091,25 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             }
         }
 
-        // ── Fix GD (run-168) — Self-backtrack cascade-break (CombatGoal mirror) ──
+        // ── Fix GE (run-168, phase D) — Self-backtrack cascade-break (CombatGoal Fix L mirror) ──
         //
-        // Mirror of GoapAgent.cs Fix GD gate. See full rationale there
-        // (line ~1889). When SELF is in any backtrack mode (FN/FT/FX),
-        // suppress the Fix L mirror so the planner-level decision and the
-        // runtime decision stay in lockstep. Without this, GoapAgent's
-        // Fix L might be suppressed by Fix GD but CombatGoal's mirror
-        // might still flip currentTargetIsIgnored on a different tick,
-        // causing the planner-runtime mismatch that flickers Combat plan
-        // in/out of selection.
-        bool selfIsBacktrackingForFixGD = navigation.IsBacktrackingActive;
+        // RENAMED from misnamed "Fix GD" 2026-06-06: see GoapAgent.cs for
+        // the full rationale and renaming justification (line ~1989). The
+        // Fix GD label was already reserved in run167-fix-plan.md lines
+        // 255-267 for a vestigial FV revert.
+        //
+        // Mirror of GoapAgent.cs Fix GE gate. When SELF is in any backtrack
+        // state (own FRG-driven on leader, or coordinated mirror on assist
+        // via leader's published IsBacktracking), suppress the Fix L mirror
+        // so the planner-level decision and the runtime decision stay in
+        // lockstep. Without this, GoapAgent's Fix L might be suppressed by
+        // Fix GE but CombatGoal's mirror might still flip
+        // currentTargetIsIgnored on a different tick, causing the planner-
+        // runtime mismatch that flickers Combat plan in/out of selection.
+        //
+        // selfInBacktrackForGE was declared earlier in Update() (near
+        // overrideAlreadyLatched) so both the Fix 17 self-defense gate and
+        // this Fix L mirror gate use the same value.
 
         // Position rule (operator-directed; lockstep with GoapAgent Fix L + the
         // self-defense gate): join the partner's fight only when this bot may itself
@@ -880,7 +1124,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             engageAllowedForJoin &&
             !assistStatusProvider.EvadeRecoveryActive &&
             !partnerHasInRectBacktrackForFixZ &&    // Fix FZ mirror: don't cascade onto partner's backtrack
-            !selfIsBacktrackingForFixGD)            // Fix GD mirror: don't fire while self is backtracking
+            (!selfInBacktrackForGE                  // Fix GE mirror: don't fire while self is backtracking (own or coordinated)
+             || MobConfirmedOutsideForGE(playerReader.FocusTargetGuid)))  // Fix GE amendment (Phase E): unless mob is verifiably outside the rect
         {
             bool thisBotTargetMatchesFocus =
                 bits.Target() &&
@@ -926,22 +1171,27 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 currentTargetIsIgnored = false;
             }
         }
-        else if (selfIsBacktrackingForFixGD && focusTargetIsIgnored && bits.FocusTarget()
+        else if (selfInBacktrackForGE
+                 && !MobConfirmedOutsideForGE(playerReader.FocusTargetGuid)  // Fix GE amendment: don't log SUPPRESSED when amendment would have overridden
+                 && focusTargetIsIgnored && bits.FocusTarget()
                  && bits.FocusTarget_Combat() && playerReader.FocusTargetGuid != 0)
         {
-            // Fix GD mirror diagnostic — log once per backtrack-suppression event.
+            // Fix GE mirror diagnostic — log once per backtrack-suppression event.
             // Latches on _partyAssistMirrorGuid (paired with GoapAgent's
-            // _partyAssistOverrideGuid). If both Fix GD (self-backtrack) and
-            // Fix FZ (partner-backtrack) gates would fire, Fix GD is logged
+            // _partyAssistOverrideGuid). If both Fix GE (self-backtrack) and
+            // Fix FZ (partner-backtrack) gates would fire, Fix GE is logged
             // first (self-state is the closer cause).
             if (_partyAssistMirrorGuid != playerReader.FocusTargetGuid)
             {
                 _partyAssistMirrorGuid = playerReader.FocusTargetGuid;
+                string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
+                    ? "navigation.IsBacktrackingActive=true (own FRG state)"
+                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
                 logger.LogInformation(
-                    $"[CombatGoal] [FIX-FIRE] GD: Fix L mirror SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
-                    $"this bot is itself in active backtrack (IsBacktrackingActive=true). " +
+                    $"[CombatGoal] [FIX-FIRE] GE: Fix L mirror SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
+                    $"this bot is itself in active backtrack ({selfBacktrackSource}). " +
                     $"Engaging during backtrack would defeat the retreat's purpose; staying suppressed " +
-                    $"so FRG can complete its backtrack waypoint navigation. " +
+                    $"so FRG (leader) or coordinated retreat (assist) can complete its waypoint navigation. " +
                     $"(Mode={classConfig.Mode})");
             }
         }

@@ -149,6 +149,20 @@ public sealed class LeaderNavigationProvider
     }
 
     /// <summary>
+    /// Fix GF (run-168, phase D) — FT-mode opportunistic recheck setter.
+    /// FT-mode (BL-escape) enters with BacktrackAggressorGuid=0 because there's
+    /// no specific tracked aggressor. When the FT-mode waypoint Evaluating phase
+    /// runs an opportunistic recheck on the current IsIgnored target, this
+    /// setter refines the published guid so the assist can consult the verdict
+    /// (via leader.BacktrackAggressorGuid + leader.BacktrackAggressorInRect).
+    /// Called from FRG.UpdateBacktrackStateMachine before UpdateBacktrackProgress.
+    /// </summary>
+    public void UpdateBacktrackAggressorGuid(int aggressorGuid)
+    {
+        _backtrackAggressorGuid = aggressorGuid;
+    }
+
+    /// <summary>
     /// FRG exit — clear backtrack-publish fields. Called when FRG transitions
     /// out of backtrack (any exit path).
     /// </summary>
