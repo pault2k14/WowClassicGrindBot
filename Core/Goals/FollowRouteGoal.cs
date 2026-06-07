@@ -834,12 +834,88 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                         // escape completes.
                         bool insideBlacklist =
                             navigation.AreaBlacklist?.ContainsWorld(playerReader.WorldPos) == true;
+
+                        // ── Fix GM (run-170) — preserve backtrack across assist-unavailable ──
+                        //
+                        // Run-170 evidence (leader log, 0ms clock offset):
+                        //   01:21:26:442  Assist's recheck verdict for 2439455 = InRect.
+                        //   01:21:26:442 → 01:21:37:667  Assist main-loop FROZE for 11.2s
+                        //                  (same pattern as run-169 wait.Update block;
+                        //                  Phase F GK instrumentation not yet compiled
+                        //                  into this build — zero GK markers fired).
+                        //   01:21:39:316 → 01:21:52:345  Second freeze, 13.0s. Assist log
+                        //                  ends abruptly at 01:21:52:432.
+                        //   01:22:11:148  Leader Tab acquires 2439455 (in-rect).
+                        //   01:22:18:857  Leader's recheck verdict = InRect.
+                        //   01:22:22:300  Leader enters BACKTRACK (FN, IsIgnored caster
+                        //                  reads in-rect, first wp <944.43,284.25>).
+                        //   01:22:25:855  This handler fires with assistisfollowing=False,
+                        //                  assistNavigating=False (assist's status went
+                        //                  stale during/after its 13s freeze). Leader is
+                        //                  OUTSIDE the BL rect (at <945.24,281.09>, rect
+                        //                  is [952..999, 277..327]) — so the existing
+                        //                  Fix I-2 insideBlacklist guard does NOT skip
+                        //                  Abort. Abort() fires.
+                        //   01:22:25:856  Backtrack PAUSED across plan flicker (FU
+                        //                  preserves state).
+                        //   01:22:25:857  Plan → NO PLAN. Deadlock:
+                        //                   - CombatGoal can't engage IsIgnored 2439455
+                        //                     (Fix GE/GH/GJ gates suppress engagement).
+                        //                   - FRG can't be re-selected because incombat
+                        //                     preconditions block it.
+                        //                   - Backtrack state preserved but never resumes
+                        //                     because FRG.OnEnter never re-fires.
+                        //   01:22:25:857 → 01:22:50:948  Leader silent (only InRectVerdict
+                        //                  debug). Operator stops the bot.
+                        //
+                        // Design context (run167-fix-plan.md Decision #15, line 322):
+                        // "Coordinated backtrack means assist mirrors leader's
+                        // BacktrackCurrentWaypointIdx, occupies same waypoint as
+                        // needed". The design assumes the assist is operational. There
+                        // is NO provision for "assist unreachable mid-backtrack". The
+                        // leader's safety (completing the retreat) takes priority over
+                        // coordination, since:
+                        //   - The assist may recover (freeze ends; Fix GC coordination
+                        //     re-establishes when assist's IsFollowing/IsNavigating
+                        //     publishes again).
+                        //   - The mob continues to attack the leader during the deadlock,
+                        //     making the dead-stop situation actively dangerous.
+                        //   - Continuing alone progresses toward the same goal (escape
+                        //     mob's cast range or until leash) that coordinated
+                        //     backtrack would have achieved.
+                        //
+                        // Fix: extend the existing Fix I-2 guard. If the leader is in
+                        // active backtrack (navigation.IsBacktrackingActive=true), skip
+                        // Abort the same way we already skip when inside BL. The
+                        // backtrack state machine continues normally; assist coordination
+                        // resumes via Fix GC if/when the assist's status updates again.
+                        //
+                        // Why not modify Abort() itself: Abort()'s Fix FU already
+                        // preserves backtrack state. The problem is that PausePathing()
+                        // halts navigation AND the post-Abort planner ticks reach NO
+                        // PLAN. Resuming the backtrack requires FRG.OnEnter to re-fire,
+                        // which requires FRG to be re-selected by the planner — but
+                        // there's no path to that re-selection while the bot is in
+                        // combat with the IsIgnored mob. So the safer fix is to NOT
+                        // enter Abort in the first place.
+                        bool inBacktrack = navigation.IsBacktrackingActive;
+
                         if (insideBlacklist)
                         {
                             logger.LogInformation(
                                 "FollowRouteGoal: OnGoapEvent - assist unavailable but leader " +
                                 "inside blacklist — skipping Abort to let escape complete. " +
                                 "Pause-for-assist will handle the wait once leader is meaningfully clear.");
+                        }
+                        else if (inBacktrack)
+                        {
+                            logger.LogInformation(
+                                "[FRG] [FIX-FIRE] GM: assist unavailable but leader is in active " +
+                                "backtrack (navigation.IsBacktrackingActive=true) — skipping Abort " +
+                                "to let retreat complete alone. Leader's safety takes priority over " +
+                                "coordination; assist can rejoin via Fix GC if it recovers. " +
+                                $"(target={_btTargetGuid}, phase={_btPhase}, " +
+                                $"stepsBack={_btStepsBack}, blEscapeMode={_btIsBlEscapeMode})");
                         }
                         else
                         {

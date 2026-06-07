@@ -623,12 +623,78 @@ public sealed partial class GoapAgent : IDisposable
                 {
                     if (currentAssistStatusCantFollow)
                     {
-                        logger.LogInformation(
-                            $"[GoapAgent] Fix I-1: Assist status -> BotStatus.CantFollow — " +
-                            $"navigating leader to assist position " +
-                            $"({statusCantFollowState!.MapX:0.00},{statusCantFollowState.MapY:0.00}).");
-                        foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
-                            goal.GoToOneWaypoint(statusCantFollowState.MapPosNoZ);
+                        // ── Fix GM-2 (run-170 audit) — preserve backtrack across assist CantFollow ──
+                        //
+                        // The Fix I-1 dispatch below calls goal.GoToOneWaypoint(assistPos)
+                        // on the leader's FollowRouteGoal, which overrides the current
+                        // navigation target with a single waypoint to the assist's
+                        // CantFollow position. FRG.GoToOneWaypoint (at FollowRouteGoal.cs:
+                        // 2693) does NOT check or preserve backtrack state — it just
+                        // clears existing routes and sets the new single waypoint.
+                        //
+                        // If the leader is in active backtrack (retreating from a BL
+                        // caster), this dispatch hijacks the retreat:
+                        //   - The backtrack STATE is preserved by Fix FU (_btPhase,
+                        //     _btTargetGuid, etc. stay set).
+                        //   - But the active navigation target is replaced with the
+                        //     assist's position, which could be anywhere — including
+                        //     back INSIDE the BL rect the leader is trying to escape.
+                        //   - The leader walks toward the assist (potentially into
+                        //     more BL mob aggro range) instead of completing retreat.
+                        //
+                        // Run-170 did not exercise this path (assist's status went
+                        // stale, not CantFollow — the rising-edge check at line 622
+                        // saw no transition to CantFollow). But the audit performed
+                        // alongside Fix GM (FollowRouteGoal.cs:838 block) identified
+                        // this site as the next-most-likely Fix-GM-style gap.
+                        //
+                        // Fix GM-2: skip the GoToOneWaypoint dispatch when leader is
+                        // in active backtrack. Same principle as Fix GM — leader's
+                        // safety takes priority over coordination. Rationale:
+                        //   - The assist's CantFollow is self-recoverable via its
+                        //     own pathfinding escalation (FFG's _navAttempt path
+                        //     re-tries with widening search radii).
+                        //   - The leader continuing retreat doesn't worsen the
+                        //     assist's situation (no positive feedback loop).
+                        //   - When backtrack exits naturally, the assist's
+                        //     CantFollow state can be re-evaluated; if it's still
+                        //     CantFollow at that point, normal Fix I-1 dispatch
+                        //     fires on the NEXT rising edge (the previous… tracker
+                        //     update at line below still updates regardless, so a
+                        //     subsequent transition CantFollow=false→true after
+                        //     backtrack exits would fire normally).
+                        //
+                        // Note: previousAssistStatusCantFollow IS still updated at
+                        // line below regardless of the skip. This means: if the
+                        // assist stays in CantFollow throughout the leader's
+                        // backtrack and continues afterward, the leader will NOT
+                        // re-fire GoToOneWaypoint after backtrack exits (no rising
+                        // edge to detect). Operator should be aware: post-backtrack
+                        // assist recovery relies on the assist clearing CantFollow
+                        // and re-entering it. This is acceptable because: (a) the
+                        // assist's pathfinding escalation typically resolves
+                        // CantFollow within seconds, (b) if the assist stays
+                        // CantFollow indefinitely, the leader's FRG has its own
+                        // pause-for-assist logic in Update() that handles it.
+                        if (navigation.IsBacktrackingActive)
+                        {
+                            logger.LogInformation(
+                                $"[GoapAgent] [FIX-FIRE] GM-2: Assist status -> BotStatus.CantFollow " +
+                                $"at ({statusCantFollowState!.MapX:0.00},{statusCantFollowState.MapY:0.00}) " +
+                                $"but leader is in active backtrack (navigation.IsBacktrackingActive=true) — " +
+                                $"skipping GoToOneWaypoint dispatch to let retreat complete. Assist's " +
+                                $"CantFollow is self-recoverable via its own pathfinding escalation; " +
+                                $"leader's safety takes priority over coordination.");
+                        }
+                        else
+                        {
+                            logger.LogInformation(
+                                $"[GoapAgent] Fix I-1: Assist status -> BotStatus.CantFollow — " +
+                                $"navigating leader to assist position " +
+                                $"({statusCantFollowState!.MapX:0.00},{statusCantFollowState.MapY:0.00}).");
+                            foreach (var goal in AvailableGoals.OfType<FollowRouteGoal>())
+                                goal.GoToOneWaypoint(statusCantFollowState.MapPosNoZ);
+                        }
                     }
                     previousAssistStatusCantFollow = currentAssistStatusCantFollow;
                 }
