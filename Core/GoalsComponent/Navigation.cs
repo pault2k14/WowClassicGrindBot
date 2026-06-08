@@ -1000,6 +1000,54 @@ public sealed partial class Navigation : IDisposable
     private long _lastNoForwardStopShortTickMs;
     private const int NoForwardDiagLogThrottleMs = 1000;
 
+    // ── Fix GP (run-172) — silent refill-fail grace tracking ──
+    //
+    // Run-172 produced 44 [NAV-NO-FORWARD] refill-failed events from Phase
+    // H's diagnostic, scattered across 70 minutes. Per-cluster tracing of
+    // four representative events showed they are NOT freezes — they're
+    // brief architectural transients between consecutive Update ticks:
+    //
+    //   Pattern A (e.g. 14:00:22:917 trace, 13:42:46:267):
+    //     REFILL pops a waypoint detected as "already reached" (d ≤ thr=3.55),
+    //     and there are no more waypoints in the queue. wp=0 route=0 active=True.
+    //     My diagnostic fires. On the NEXT tick (~15ms later), FFG's
+    //     OnDestinationReached handler calls SetWayPoints → route gets refilled.
+    //     The "silent" window was 15ms.
+    //
+    //   Pattern B (e.g. 14:32:20:944 trace):
+    //     Same internal pop fires FFG's OnWayPointReached handler, which
+    //     transitions FFG to Idle and calls navigation.Stop() → active=False.
+    //     REFILL exits with phase=pause_during_wpReachedHandler, wp=1
+    //     route=0. My diagnostic still fires because it doesn't check
+    //     `active`. But the bot is INTENTIONALLY paused — not silently stuck.
+    //
+    //   Pattern C (e.g. 13:55:37-44 cluster, 4 events over 7s):
+    //     Steady-state chase loop — FFG fires "Destination reached" every
+    //     ~550ms. Between cycles, the route is briefly empty (~15ms) before
+    //     FFG re-sets waypoints. Bot is moving at running speed (~7y/s)
+    //     during this entire cluster.
+    //
+    // Fix: gate the existing line-2049 diagnostic with two checks:
+    //   (a) `active`-check — paused navigation isn't a freeze; reset
+    //       _lastNonSilentTickMs and return without firing.
+    //   (b) grace period — only fire if the silent state has persisted
+    //       for >SilentRefillFailGraceMs (100ms). This filters out all
+    //       three patterns above while preserving signal for genuine
+    //       multi-second freezes.
+    //
+    // _lastNonSilentTickMs holds Environment.TickCount64 of the most
+    // recent tick where Navigation was NOT in the silent refill-fail
+    // state. Updated when route is non-empty entering the route-emptiness
+    // check, when refill succeeds, or when active goes false in the silent
+    // block. The silent block compares `now - _lastNonSilentTickMs` against
+    // the grace period to decide whether to emit the log.
+    //
+    // Trade-off: a real sustained freeze emits the first log 100ms later
+    // than before. Throttled at 1000ms, the visible diagnostic cadence is
+    // unchanged for events that last >100ms.
+    private long _lastNonSilentTickMs;
+    private const long SilentRefillFailGraceMs = 100;
+
     private long waitingRequestId;
 
     // Movement can stop at STOP_DIST, but we only advance (pop) at POP_DIST.
@@ -1995,6 +2043,14 @@ public sealed partial class Navigation : IDisposable
         }
 
         // Route may have emptied after pop; consume waypoint and/or refill immediately in same Update.
+        // Fix GP (run-172): if route is non-empty entering this block, we're
+        // not in the silent refill-fail state — refresh _lastNonSilentTickMs
+        // so a subsequent silent tick starts a fresh 100ms grace window.
+        if (routeToNextWaypoint.Count > 0)
+        {
+            _lastNonSilentTickMs = Environment.TickCount64;
+        }
+
         if (routeToNextWaypoint.Count == 0)
         {
             if (IsAtFinalWaypoint(playerPos, out _))
@@ -2041,7 +2097,29 @@ public sealed partial class Navigation : IDisposable
                     // NoForwardDiagLogThrottleMs (1s) so a sustained stall
                     // produces 2–3 lines per false-stuck event instead of
                     // 60+/sec.
+                    //
+                    // ── Fix GP (run-172) — suppress false-positive transients ──
+                    // See _lastNonSilentTickMs declaration for the three patterns
+                    // (A: WP-pop-and-refill gap, B: FFG-pause via handler,
+                    // C: chase loop) that fire here without representing a
+                    // real freeze. Two-stage gate:
+                    //   (a) if !active, navigation is paused (not stuck); reset
+                    //       the non-silent timestamp and return.
+                    //   (b) if silentMs < grace (100ms), still inside a brief
+                    //       transient window; return without firing.
                     long noFwdRefillTickMs = Environment.TickCount64;
+
+                    if (!active)
+                    {
+                        _lastNonSilentTickMs = noFwdRefillTickMs;
+                        return;
+                    }
+
+                    if (noFwdRefillTickMs - _lastNonSilentTickMs < SilentRefillFailGraceMs)
+                    {
+                        return;
+                    }
+
                     if (noFwdRefillTickMs - _lastNoForwardRefillFailTickMs >= NoForwardDiagLogThrottleMs)
                     {
                         Vector3 wpTopForLog = wayPoints.Count > 0 ? Nav2D(wayPoints.Peek()) : default;
@@ -2051,7 +2129,8 @@ public sealed partial class Navigation : IDisposable
                             $"waiting={waitingForPathResult} pending={Volatile.Read(ref pathRequestPending)} " +
                             $"emptyCdMs={(emptyRouteRefillCooldownUntilUtc - now).TotalMilliseconds:0} " +
                             $"npCdMs={(noProgressRefillCooldownUntilUtc - now).TotalMilliseconds:0} " +
-                            $"wp={wayPoints.Count} wpTop={wpTopForLog} pos={playerPos}.");
+                            $"wp={wayPoints.Count} wpTop={wpTopForLog} pos={playerPos} " +
+                            $"silentMs={noFwdRefillTickMs - _lastNonSilentTickMs}.");
                         _lastNoForwardRefillFailTickMs = noFwdRefillTickMs;
                     }
                     return;
@@ -2059,6 +2138,11 @@ public sealed partial class Navigation : IDisposable
 
                 // Refill produced a real route — safe to clear the latch now.
                 ClearDestinationLatch();
+
+                // Fix GP (run-172): refill succeeded — silent state ended.
+                // Updating _lastNonSilentTickMs here means a subsequent silent
+                // tick starts a fresh 100ms grace window.
+                _lastNonSilentTickMs = Environment.TickCount64;
 
                 // Fix BH-1 (defensive, see line ~1503 for full rationale):
                 // Refill internal pop site can fire OnWayPointReached, whose
@@ -5544,6 +5628,16 @@ public sealed partial class Navigation : IDisposable
                             $"[BL] Path node inside blacklist; rejecting. " +
                             $"badPoint={cur}");
 
+                        // ── Fix GQ (run-172 evaluation) — source attribution ──
+                        // Tag each path rejection with the rect source so we
+                        // can directly count StuckRect-driven vs map-BL-driven
+                        // rejections in future runs. See the helper's xmldoc
+                        // for the motivating cross-run analysis (1 of 23
+                        // StuckRects had any observable use across r167-172).
+                        logger.LogInformation(
+                            $"[BL-SRC] path-reject node source={ClassifyBlacklistRejectSource(cur)} " +
+                            $"point={cur}");
+
                         if (TryInsertDetourFromRejectedPath(result.StartW, result.EndW, cur))
                         {
                             sameRejectCount = 0;
@@ -5576,6 +5670,12 @@ public sealed partial class Navigation : IDisposable
                             $"seg=({prev} -> {cur}) i={i} " +
                             $"routeTop={(routeToNextWaypoint.Count > 0 ? Nav2D(routeToNextWaypoint.Peek()).ToString() : "<none>")} " +
                             $"routeEnd={(steps.Length > 0 ? Nav2D(steps[^1]).ToString() : "<none>")}");
+
+                        // Fix GQ (run-172 evaluation) — source attribution.
+                        // See the helper's xmldoc for motivating analysis.
+                        logger.LogInformation(
+                            $"[BL-SRC] path-reject segment source={ClassifyBlacklistRejectSourceSegment(prev, cur)} " +
+                            $"seg=({prev} -> {cur})");
 
                         Vector3 hint = new Vector3((prev.X + cur.X) * 0.5f, (prev.Y + cur.Y) * 0.5f, 0f);
 
@@ -6557,6 +6657,61 @@ public sealed partial class Navigation : IDisposable
     // against the STATIC map blacklist only, exempting the dynamic StuckRects --
     // the escape deliberately traverses the stuck area it just marked. Without
     // this, an escape route whose NODE lands inside the freshly-placed StuckRect
+    // ── Fix GQ (run-172 evaluation diagnostic) — path-reject source attribution ──
+    //
+    // Cross-run analysis of runs 167-172 evaluated whether dynamic StuckRects
+    // were contributing to the bot's pathing/escape behavior. Findings:
+    //   - 23 StuckRects added; only 1 had any observed direct use (an FFG
+    //     position-chase projection in r167 at 22:08:24).
+    //   - 5,278 Fix EO route-waypoint skips: all driven by static map BL rects.
+    //   - 19 of 20 position-chase projections: also static map BL.
+    //   - 12 PathCalculatedCallback rejections in r168/r170: all 12 had a
+    //     badPoint outside any then-alive StuckRect — also static map BL.
+    //
+    // The existing post-pather reject logs at the [BL] sites above record
+    // the rejected point but don't attribute it to a rect source. This pair
+    // of helpers classifies whether the rejected point/segment is caught by
+    // a dynamic StuckRect or whether (by elimination) only a static map BL
+    // rect can explain the reject. Used by the [BL-SRC] follow-up log at each
+    // existing reject site. Future log analysis can grep [BL-SRC] to count
+    // stuck-driven vs static-driven rejections directly.
+    //
+    // _stuckWorldRects is owned exclusively by the navigation thread; Update
+    // and PathCalculatedCallback are both on that thread, so an unlocked
+    // List<BlacklistRect> scan here is safe and matches the existing usage
+    // pattern (e.g., AddStuckRect, PruneExpiredStuckRects, _areaBlacklist
+    // rebuild on Set). Returned string is meant for human log inspection,
+    // not for machine parsing — it's stable enough for grep but not a
+    // contract.
+    private string ClassifyBlacklistRejectSource(Vector3 point)
+    {
+        Vector2 p = new(point.X, point.Y);
+        for (int i = 0; i < _stuckWorldRects.Count; i++)
+        {
+            BlacklistRect r = _stuckWorldRects[i];
+            if (r.Contains(p))
+            {
+                return $"stuck@<{r.MidX:0.0},{r.MidY:0.0}>";
+            }
+        }
+        return "static";
+    }
+
+    private string ClassifyBlacklistRejectSourceSegment(Vector3 a, Vector3 b)
+    {
+        Vector2 va = new(a.X, a.Y);
+        Vector2 vb = new(b.X, b.Y);
+        for (int i = 0; i < _stuckWorldRects.Count; i++)
+        {
+            BlacklistRect r = _stuckWorldRects[i];
+            if (r.IntersectsSegment(va, vb))
+            {
+                return $"stuck@<{r.MidX:0.0},{r.MidY:0.0}>";
+            }
+        }
+        return "static";
+    }
+
     // is still rejected ("[BL] Path node inside blacklist; rejecting") even
     // though DU made the segment-crossing check escape-aware, so the self-defeat
     // recurs through a different check (observed twice during episode #5's 45y

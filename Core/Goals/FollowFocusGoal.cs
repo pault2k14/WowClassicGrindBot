@@ -6248,6 +6248,45 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // escape logic below. 6y margin matches Fix 12 ExitMargin so
         // both checks find the same candidate.
         // See HANDOFF Fix 18/19/33 for full evidence.
+        //
+        // ── Fix GO (run-172) — bound loop to keep candidates ≥POP_DIST from assist ──
+        //
+        // Run-172 13:55:27:374 (assist clock): the projection loop returned a
+        // candidate at distFromLeader=23y when lenXY=25.1y — candidate was
+        // only 2.07y from the assist, INSIDE Navigation.POP_DIST=3.6y. The
+        // SetWaypoint loop guard escalated to CantFollow 153ms later because:
+        //
+        //   - SetWaypoint(target_2.07y_from_bot)
+        //   - Navigation: route was just built but consume loop pops the
+        //     waypoint on the next tick (target within POP_DIST=3.6y)
+        //   - "Destination reached" → FFG's OnDestinationReached refreshes
+        //   - Same projection runs again → same too-close candidate
+        //   - Loop guard counts: 10 sets within 100ms → CantFollow
+        //
+        // Second instance at 13:55:33:120: lenXY=5.5y, leader within FFG's
+        // close-range; projection returned candidate at 0.5y from assist.
+        // FFG transitioned NavigatingToLeader → Idle within 16ms.
+        //
+        // The end behavior (CantFollow for unreachable leader) is correct,
+        // but it's reached via SetWaypoint loop guard rather than the clean
+        // projection-loop-exhausted path. Worse, the candidate within POP_DIST
+        // is functionally useless: it triggers instant pop in Navigation
+        // (consume loop pops when d ≤ POP_DIST=3.6y) AND fails ShouldMoveToward
+        // when d ≤ STOP_DIST=3.0y (no Forward press at all).
+        //
+        // Fix: change loop upper bound from `distFromLeader < lenXY` to
+        // `distFromLeader < lenXY - Navigation.POP_DIST`. This ensures any
+        // returned candidate is at least POP_DIST=3.6y from the assist — a
+        // useful waypoint that the bot can actually navigate toward. If the
+        // bound rejects all candidates (BL rect covers the segment from
+        // leader all the way to ~POP_DIST short of assist), loop exhausts
+        // and control falls through to Fix 12 → Fix 24 → Fix FT → final
+        // assist-position fallback (same chain the design already had for
+        // "entire segment blacklisted" scenarios).
+        //
+        // Verified against all 7 run-172 projection events: 5 with assist_d
+        // > 3.6y remain accepted (no behavior change), 2 with assist_d ≤ 3.6y
+        // are rejected (loop exhausts → falls through cleanly).
         const float ProjectionSafetyMarginYards = 6.0f;
         if (navigation.AreaBlacklist != null &&
             navigation.AreaBlacklist.TryGetContainingRectInflated(
@@ -6255,7 +6294,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         {
             const float STEP_YARDS = 2.0f;
             for (float distFromLeader = FollowStopShortYards + STEP_YARDS;
-                 distFromLeader < lenXY;
+                 distFromLeader < lenXY - Navigation.POP_DIST;
                  distFromLeader += STEP_YARDS)
             {
                 Vector3 candidate = new Vector3(
