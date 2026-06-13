@@ -154,11 +154,96 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             // ~line 800) prevents flicker at the boundary so Combat
             // doesn't oscillate as the assist moves through the edge
             // of range. Mirrors the gating ATG.AssistFocus already uses.
-            AddPrecondition(GoapKey.incombatrange, true);
+            //
+            // ── Fix GS (run-173) — REMOVES Fix FQ's incombatrange gate ──
+            //
+            // Operator directive following run-173 22:14:00-22:14:50 deadlock
+            // (see Fix GR delivery for the full trace): "we need to make
+            // sure both bots can get into combat goal — the ability for
+            // both bots to enter combat if a mob was attacking us even
+            // if we had an invalid target."
+            //
+            // Run-173 failure path: assist took proximity aggro at
+            // 22:14:00:108 while its target slot still pointed at the
+            // corpse from the prior kill (consume/loot/follow chain).
+            // State at 22:14:03:691:
+            //   partymembercombat=True   incombatrange=False
+            //   targetisalive=False      damagetaken=True
+            // Fix FQ's `incombatrange=true` precondition meant Combat
+            // could NOT fire — there was no live in-range target to
+            // engage. The other AssistFocus-pool goals also rejected
+            // the state (ATG needs targetisalive, AssistFocusGoal needs
+            // a castable spell key, TargetFocusTargetGoal needs
+            // incombat=false). Planner produced NO PLAN, assist froze
+            // 47 s and died.
+            //
+            // The run-163 design pattern (Combat exits when out of
+            // range → FFG navigates to leader → Combat re-fires) assumed
+            // that the assist's "invalid target" reason is "focus chain
+            // target out of range" and that motion toward the leader
+            // resolves the range gap. In run-173 the reason is "stale
+            // dead-target slot from prior kill" — motion toward the
+            // leader does NOT resolve it (the corpse stays where it
+            // died; incombatrange-vs-corpse can never become true).
+            //
+            // Fix GS reverts the AssistFocus precondition set to its
+            // pre-FQ state. CombatGoal can now fire whenever the assist
+            // is in combat, regardless of current-target validity. The
+            // goal's existing runtime handles invalid-target cases:
+            //   - dead target slot → PressClearTarget + lost-target branch
+            //   - no target → FindPossibleThreats → PressNearestTarget(Tab)
+            //   - focus chain swap → PressTargetFocus + PressTargetOfTarget
+            // These paths existed before Fix FQ and were the system's
+            // self-defense mechanism. Fix FQ inadvertently gated all of
+            // them off when the bot was out of range.
+            //
+            // The run-163 Tab-spin regression Fix FQ was added to
+            // prevent (15s of caster fire while spinning Tab) may
+            // re-surface in similar long-range caster scenarios. If it
+            // does, the proper fix is at the CombatGoal RUNTIME side
+            // (bound the Tab-spin loop, fall through to FFG after N
+            // attempts) — not at the precondition. Restoring the entry
+            // path takes priority because a dead assist contributes
+            // zero combat and zero loot/skin, while a Tab-spinning
+            // assist at least continues to threaten the attacker.
+            //
+            // FFG can still take over when the assist genuinely needs
+            // to follow the leader rather than engage: GoapAgent's Fix FQ
+            // disjunct on `assistshouldfollow` (kept intact, plus Fix GR
+            // for the dead-target case) makes FFG eligible when in-combat
+            // and unable to engage. CombatGoal's cost (4f) is below FFG
+            // (19f), so when both are eligible the planner picks Combat —
+            // matching the operator's design intent.
+            // AddPrecondition(GoapKey.incombatrange, true);   // ← Fix FQ, removed by Fix GS
         }
         else if(classConfig.Mode == Mode.PartyLeader)
         {
-            AddPrecondition(GoapKey.partyleadercombat, true);
+            // ── Fix GS (run-173) — broaden trigger from leader-self to party ──
+            //
+            // Run-173 also exposed the symmetric leader-side block: leader's
+            // CombatGoal required `partyleadercombat=true` (= the leader
+            // itself in combat). With the assist proximity-aggroed and the
+            // leader patrolling, partyleadercombat=False and partymembercombat=True.
+            // The leader observed `partymembercombat=True` but had no goal
+            // that could fire on that signal alone — leader's ATG needs
+            // `assistisfollowing=true` (assist is frozen, can't follow),
+            // FollowRouteGoal needs `assistrequestreturnorisfollowing=true`
+            // (also false because assist is neither following nor requesting
+            // return). NO PLAN at 22:14:08:602 leader-clock.
+            //
+            // Switch the trigger from `partyleadercombat=true` to
+            // `partyincombat=true`. partyincombat is the OR of leader-combat
+            // and party-member-combat (already computed in UpdateWorldState
+            // as `PartyInCombat()`), so the leader's CombatGoal now fires
+            // whenever ANY party member is in combat. The leader's CombatGoal
+            // runtime handles the "no own target but party is in combat"
+            // case via the focus chain (assist's target) and FindPossibleThreats
+            // / PressNearestTarget — same fallback the assist's branch uses.
+            // When the proximity-aggro mob attacking the assist comes into
+            // the leader's aggro range (as the assist moves toward the leader
+            // via Fix GR's FFG fallback OR as the mob's chase brings it
+            // closer), the leader will Tab-acquire it and engage.
+            AddPrecondition(GoapKey.partyincombat, true);
             AddPrecondition(GoapKey.forcedfollow, false);
             // Symmetric to AssistFocus above. On the leader the focus chain
             // resolves to the assist's target.

@@ -2423,10 +2423,48 @@ public sealed partial class GoapAgent : IDisposable
              // scenarios where the assist has its own non-focus-chain target
              // worth engaging (Tab/SoftInteract acquisition); those continue
              // to flow through the existing Combat path.
+             //
+             // ── Fix GR (run-173) — extend FQ to cover dead-target case ──
+             //
+             // run-173 failure: at 22:14:00:108 the assist's CombatTracker fired
+             // "Entered Combat" from proximity aggro by a new mob; the assist's
+             // target slot was still occupied by the corpse from the prior kill
+             // (consume/loot/follow chain at 22:13:52-22:14:00). State at the
+             // first re-plan tick (22:14:03:691):
+             //   hastarget=True, targetisalive=False, incombat=True,
+             //   incombatrange=False, focuscombat=False
+             // FQ's third disjunct as originally written required:
+             //   (TargetGuid == 0 || TargetGuid == FocusTargetGuid)
+             // The corpse's TargetGuid was neither zero nor the focus chain
+             // target, so the disjunct evaluated false. assistshouldfollow→false,
+             // FFG ineligible. CombatGoal.AssistFocus requires incombatrange=true
+             // (Fix FQ on CombatGoal); ATG.AssistFocus requires targetisalive=true.
+             // Both fail on a dead-target slot. No other AssistFocus-pool goal
+             // had matching preconditions. Planner produced NO PLAN.
+             //
+             // The assist froze at <48.16, -1517.95> from 22:14:03 until the
+             // operator-observed end of the window at 22:14:50+ (47 s), the
+             // entire time taking damage from the proximity-aggro mob. The
+             // leader independently produced NO PLAN at 22:14:08:602 (assist-
+             // clock equivalent ≈ 22:14:01.7) because its PartyLeader-mode ATG
+             // requires assistisfollowing=true and the assist never published
+             // a Following status during the freeze. Total deadlock.
+             //
+             // Why this case escaped FQ as originally written: FQ's two
+             // covered cases ("no target" and "wrong target") both describe
+             // *what the assist is currently looking at*. The dead-target
+             // case describes a stale slot — semantically identical to "no
+             // target" because the bot cannot engage a corpse, but the
+             // GUID-based test missed it. The minimal fix is one extra
+             // disjunct on the inner OR that treats a dead target as a
+             // can't-engage signal. This preserves the narrow scope (still
+             // gated by playerCombat && OutOfCombatRange) so it can't
+             // hijack a live target the bot has legitimately acquired.
              (playerCombat &&
               playerReader.OutOfCombatRange() &&
               (playerReader.TargetGuid == 0 ||
-               playerReader.TargetGuid == playerReader.FocusTargetGuid)));
+               playerReader.TargetGuid == playerReader.FocusTargetGuid ||
+               bits.Target_Dead())));
 
         WorldState[GoapKey.partymembercombat]  = PartyMemberInCombat();
         WorldState[GoapKey.partyleadercombat]  = PartyLeaderInCombat();
