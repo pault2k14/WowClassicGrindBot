@@ -9,6 +9,11 @@ using System.Numerics;
 
 namespace Core;
 
+// Per-mob blacklist entry (Gap AZ). Replaces the former (DateTime, bool) value tuple.
+// IsEvade is the classification axis (independent of InRect); EvadePos is the position
+// captured at evade-detection, used as the distance-recheck anchor (Vector3.Zero otherwise).
+public record BlacklistAreaEntry(DateTime Until, bool InRect, bool IsEvade, Vector3 EvadePos);
+
 public sealed partial class PlayerReader : IMouseOverReader, IReader
 {
     private readonly IAddonDataProvider reader;
@@ -151,20 +156,31 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     public UnitClass Class => (UnitClass)(reader.GetInt(46) / 100 % 100);
     public ClientVersion Version => (ClientVersion)(reader.GetInt(46) % 10);
 
-    public Dictionary<int, (DateTime until, bool inRect)> BlacklistAreaMobs { get; } = new();
+    public Dictionary<int, BlacklistAreaEntry> BlacklistAreaMobs { get; } = new();
 
     public static int BLACKLIST_IGNORE_SECONDS = 30;
 
     public TimeSpan BlacklistIgnoreTimespan = new TimeSpan(0, 0, BLACKLIST_IGNORE_SECONDS);
 
-    public void IgnoreTarget(int id, bool inRect = false)
-    => BlacklistAreaMobs[id] = (DateTime.UtcNow + BlacklistIgnoreTimespan, inRect);
+    public void IgnoreTarget(int id, bool inRect, bool isEvade, Vector3 evadePos = default)
+    => BlacklistAreaMobs[id] = new BlacklistAreaEntry(DateTime.UtcNow + BlacklistIgnoreTimespan, inRect, isEvade, evadePos);
+
+    // Re-stamp an existing entry's TTL while PRESERVING its own InRect/IsEvade/EvadePos
+    // classification (distinct from IgnoreTarget, which writes whatever the caller passes).
+    // If the entry was already pruned, this is a no-op: do NOT resurrect with a default
+    // classification (that would be the very loss we are avoiding). Self-contained — reads
+    // only BlacklistAreaMobs, which PlayerReader owns.
+    public void RefreshIgnoreTarget(int id)
+    {
+        if (BlacklistAreaMobs.TryGetValue(id, out var e))
+            BlacklistAreaMobs[id] = e with { Until = DateTime.UtcNow + BlacklistIgnoreTimespan };
+    }
 
     public bool IsIgnored(int id)
     {
         if (BlacklistAreaMobs.TryGetValue(id, out var e))
         {
-            if (DateTime.UtcNow < e.until)
+            if (DateTime.UtcNow < e.Until)
                 return true;
 
             // expired -> remove
@@ -181,8 +197,8 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
     {
         if (BlacklistAreaMobs.TryGetValue(id, out var e))
         {
-            if (DateTime.UtcNow < e.until)
-                return e.inRect;
+            if (DateTime.UtcNow < e.Until)
+                return e.InRect;
 
             // expired -> remove
             BlacklistAreaMobs.Remove(id);

@@ -7,6 +7,8 @@
 // in-rect subset) reach the partner via LeaderState.BlacklistedMobGuids /
 // NoEngageMobGuids over the party API channel (not party chat).
 
+using System.Numerics;
+
 namespace Core.GOAP;
 
 /// <summary>
@@ -43,10 +45,24 @@ public sealed class EvadeBlacklistEvent : GoapEventArgs
     /// See CHANGESET2_E4_D_DESIGN §7.</summary>
     public bool InRect { get; }
 
-    public EvadeBlacklistEvent(int targetGuid, EvadeReason reason = EvadeReason.RealEvade, bool inRect = false)
+    /// <summary>Classification axis, INDEPENDENT of <see cref="InRect"/>: true when the
+    /// mob is a real game-side evade, false for reachability/ghost/positional blacklists.
+    /// Carried explicitly because the GoapAgent funnel handles four <see cref="EvadeReason"/>s
+    /// and Reason != IsEvade (a Propagation event can carry either). See RUN174 EVADE
+    /// CLASSIFICATION.</summary>
+    public bool IsEvade { get; }
+
+    /// <summary>The mob's map position captured at evade-detection (while the target is
+    /// still held), used as the distance-recheck anchor. Vector3.Zero for non-RealEvade
+    /// dispatches (positional bails do not supply it).</summary>
+    public Vector3 EvadePos { get; }
+
+    public EvadeBlacklistEvent(int targetGuid, EvadeReason reason = EvadeReason.RealEvade, bool inRect = false, bool isEvade = false, Vector3 evadePos = default)
     {
         TargetGuid = targetGuid;
         Reason = reason;
         InRect = inRect;
+        IsEvade = isEvade;
+        EvadePos = evadePos;
     }
 }

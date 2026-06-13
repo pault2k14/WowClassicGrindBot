@@ -628,7 +628,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
 
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
-            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
+            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect, isEvade: false);
             navigation.ClearStuckRects();
             input.PressStopAttack();
             wait.Update();
@@ -1421,8 +1421,17 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             && combatLog.EvadeMobs.Contains(playerReader.TargetGuid))
         {
             logger.LogInformation($"[CombatGoal] Target guid={playerReader.TargetGuid} is evading — broadcasting and exiting.");
-            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.RealEvade));
-            playerReader.IgnoreTarget(playerReader.TargetGuid);
+            // Decision 2: carry the ACTUAL positional verdict (recurring evade mobs get a
+            // static MapBlacklistRect, so they ARE in-rect). Same authoritative-verdict shape
+            // as the Fix-GH/M ReachabilityBail path, re-derived with local names (the GH locals
+            // are out of scope here). EvadePos captured while the target is still held.
+            RecheckVerdict evCacheVerdict = recheckCache.GetVerdict(playerReader.TargetGuid);
+            bool inRect = evCacheVerdict == RecheckVerdict.InRect
+                          || (evCacheVerdict == RecheckVerdict.Unknown
+                              && navigation.IsTargetLikelyInBlacklistRect());
+            Vector3 evadePos = playerReader.TargetMapPos;
+            SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.RealEvade, inRect, isEvade: true, evadePos: evadePos));
+            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect, isEvade: true, evadePos);
             navigation.ClearStuckRects();
             input.PressStopAttack();
             wait.Update();
@@ -1527,7 +1536,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                     if (stuckSec >= UnreachableMobTimeoutSec)
                     {
                         logger.LogWarning($"[CombatGoal] Geometry trap detected after {stuckSec:0.0}s — disengaging.");
-                        playerReader.IgnoreTarget(playerReader.TargetGuid);
+                        playerReader.IgnoreTarget(playerReader.TargetGuid, inRect: false, isEvade: false);
                         input.PressStopAttack();
                         wait.Update();
                         input.PressClearTarget();

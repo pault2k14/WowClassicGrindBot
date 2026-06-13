@@ -7,6 +7,7 @@ using SharedLib.NpcFinder;
 
 using System;
 using System.Diagnostics;
+using System.Numerics;
 using System.Threading;
 
 using static System.Diagnostics.Stopwatch;
@@ -159,7 +160,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
                 $"blacklist rect — blacklisting (in-rect) instead of pulling.");
             if (classConfig.Mode == Mode.PartyLeader)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, true));
-            playerReader.IgnoreTarget(playerReader.TargetGuid, true);
+            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect: true, isEvade: false);
             return;
         }
 
@@ -328,7 +329,7 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
             bool inRect = navigation.IsTargetLikelyInBlacklistRect();
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
                 SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.ReachabilityBail, inRect));
-            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect);
+            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect, isEvade: false);
             input.PressStopAttack();
             input.PressClearTarget();
             wait.Update();
@@ -464,9 +465,14 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         {
             Log("Evading mob");
 
+            // Decision 2: static-rect positional verdict (PTG has NO recheckCache — use the
+            // same form the escape-exhausted ReachabilityBail bail above uses). EvadePos
+            // captured while the target is still held.
+            bool inRect = navigation.IsTargetLikelyInBlacklistRect();
+            Vector3 evadePos = playerReader.TargetMapPos;
             if (classConfig.Mode == Mode.PartyLeader && playerReader.TargetGuid != 0)
-                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.RealEvade));
-            playerReader.IgnoreTarget(playerReader.TargetGuid);
+                SendGoapEvent(new EvadeBlacklistEvent(playerReader.TargetGuid, EvadeReason.RealEvade, inRect, isEvade: true, evadePos: evadePos));
+            playerReader.IgnoreTarget(playerReader.TargetGuid, inRect, isEvade: true, evadePos);
             input.PressStopAttack();
             input.PressClearTarget();
             wait.Update();

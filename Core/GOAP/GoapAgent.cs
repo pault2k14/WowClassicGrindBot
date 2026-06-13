@@ -753,7 +753,7 @@ public sealed partial class GoapAgent : IDisposable
                                 $"[GoapAgent] New blacklisted mob guid={guid} from API " +
                                 $"(inRect={inRect}) — ignoring target and dispatching EvadeBlacklistEvent.");
 
-                            playerReader.IgnoreTarget(guid, inRect);
+                            playerReader.IgnoreTarget(guid, inRect, isEvade: false);
                             HandleGoapEvent(new EvadeBlacklistEvent(guid, EvadeReason.Propagation, inRect));
 
                             // ── Category-B cleanup (post-run-154 audit) ──
@@ -991,7 +991,7 @@ public sealed partial class GoapAgent : IDisposable
             if (currentlyInBlacklistMemoryZone && _knownBlacklistedGuids.Count > 0)
             {
                 foreach (int guid in _knownBlacklistedGuids)
-                    playerReader.IgnoreTarget(guid, playerReader.IsNoEngage(guid));
+                    playerReader.RefreshIgnoreTarget(guid);
             }
 
             // ── Evade recovery world state ────────────────────────────────
@@ -3046,7 +3046,7 @@ public sealed partial class GoapAgent : IDisposable
                 //                 in CombatGoal.Update (line 198) saw IsIgnored=false
                 //   23:01:54:894  kill credit on the supposedly-blacklisted mob
                 // Centralizing the call here makes every dispatch path symmetric.
-                playerReader.IgnoreTarget(evade.TargetGuid, evade.InRect);
+                playerReader.IgnoreTarget(evade.TargetGuid, evade.InRect, evade.IsEvade, evade.EvadePos);
 
                 // Fix 15: record this guid in the session blacklist so the
                 // per-tick refresh in GoapThread keeps its IsIgnored TTL
