@@ -794,7 +794,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             selfInBacktrackForGE =
                 leaderConnection.HasValidLeaderState &&
                 leaderConnection.LastLeaderState != null &&
-                leaderConnection.LastLeaderState.IsBacktracking;
+                leaderConnection.LastLeaderState.IsActivelyBacktracking();
         }
         else
         {
@@ -1051,7 +1051,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 _combatOverrideGuid = playerReader.TargetGuid;
                 string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
                     ? "navigation.IsBacktrackingActive=true (own FRG state)"
-                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
+                    : $"leader phase={leaderConnection.LastLeaderState?.BacktrackPhase} (coordinated backtrack via Fix GA)";
                 logger.LogInformation(
                     $"[CombatGoal] [FIX-FIRE] GE: Fix 17 mirror SUPPRESSED for target " +
                     $"guid={playerReader.TargetGuid}  this bot is itself in active backtrack " +
@@ -1154,7 +1154,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 foreach (var assistState in assistStateStore.GetAll())
                 {
                     if (assistStateStore.IsStale(assistState)) continue;
-                    if (assistState.IsBacktracking &&
+                    if (assistState.IsActivelyBacktracking() &&
                         assistState.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
                         assistState.BacktrackAggressorInRect)
                     {
@@ -1167,7 +1167,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
             {
                 LeaderState? ls = leaderConnection.HasValidLeaderState ? leaderConnection.LastLeaderState : null;
                 if (ls != null &&
-                    ls.IsBacktracking &&
+                    ls.IsActivelyBacktracking() &&
                     ls.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
                     ls.BacktrackAggressorInRect)
                 {
@@ -1271,7 +1271,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 _partyAssistMirrorGuid = playerReader.FocusTargetGuid;
                 string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
                     ? "navigation.IsBacktrackingActive=true (own FRG state)"
-                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
+                    : $"leader phase={leaderConnection.LastLeaderState?.BacktrackPhase} (coordinated backtrack via Fix GA)";
                 logger.LogInformation(
                     $"[CombatGoal] [FIX-FIRE] GE: Fix L mirror SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
                     $"this bot is itself in active backtrack ({selfBacktrackSource}). " +
@@ -1933,6 +1933,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 || playerReader.IsIgnored(playerReader.TargetGuid))
             {
                 int evadingGuid = playerReader.TargetGuid;
+                Vector3 evadePos = playerReader.TargetMapPos;   // S2.5c: capture while target still held, before PressClearTarget
 
                 // Fix (run-147): self-defense preservation. Without this, the
                 // Fix Q "Clearing target only" path below clears an IsIgnored
@@ -2062,7 +2063,7 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
                 input.PressClearTarget();
                 wait.Update();
                 stopMoving.Stop();
-                SendGoapEvent(new EvadeBlacklistEvent(evadingGuid, EvadeReason.RealEvade));
+                SendGoapEvent(new EvadeBlacklistEvent(evadingGuid, EvadeReason.RealEvade, inRect: false, isEvade: true, evadePos: evadePos));
                 return;
             }
             else if (bits.Target_Combat() && bits.TargetTarget_PlayerOrPet())

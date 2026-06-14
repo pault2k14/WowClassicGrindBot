@@ -88,14 +88,15 @@ public sealed class AssistState
 
     // ------------------------------------------------------------------
     // Fix GA (run-167) — backtrack-mode coordination fields.
-    // Mirror of LeaderState.IsBacktracking/etc. so each bot can read
+    // Mirror of LeaderState.BacktrackPhase/etc. so each bot can read
     // the partner's backtrack state via Fix GA's two-way publish.
     // See LeaderState.cs Fix GA block for full semantics.
     // ------------------------------------------------------------------
 
-    /// <summary>True when the assist is in active BL-backtrack
-    /// (Fix GC coordinated backtrack, mirroring leader's).</summary>
-    public bool IsBacktracking { get; set; }
+    /// <summary>Coordinated-backtrack phase (Fix GC, mirroring leader's).
+    /// IsActivelyBacktracking() == (BacktrackPhase != None) ≡ legacy IsBacktracking.</summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public BacktrackPhase BacktrackPhase { get; set; }
 
     /// <summary>Assist's local aggressor guid for backtrack, or 0
     /// when the assist's backtrack is purely coordinated (mirroring

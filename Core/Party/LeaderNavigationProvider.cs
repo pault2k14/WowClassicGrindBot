@@ -97,7 +97,7 @@ public sealed class LeaderNavigationProvider
     // snapshot.
     // -----------------------------------------------------------------------
 
-    private volatile bool _isBacktracking;
+    private volatile BacktrackPhase _backtrackPhase = BacktrackPhase.None;
     private volatile bool _insideBlacklistArea;
     private volatile int _backtrackAggressorGuid;
     private volatile bool _backtrackAggressorInRect;
@@ -106,7 +106,9 @@ public sealed class LeaderNavigationProvider
     /// <summary>True iff this bot is currently inside an FRG backtrack
     /// state-machine (phase != None). Mirror of <c>navigation.IsBacktrackingActive</c>
     /// for partner-state publish.</summary>
-    public bool IsBacktracking => _isBacktracking;
+    public BacktrackPhase BacktrackPhase => _backtrackPhase;
+
+    public void SetBacktrackPhase(BacktrackPhase phase) => _backtrackPhase = phase;
 
     /// <summary>True iff this bot is currently inside any static BL rect.
     /// Snapshot of <c>navigation.IsInBlacklistArea()</c> taken at publish points.</summary>
@@ -134,7 +136,6 @@ public sealed class LeaderNavigationProvider
         _backtrackAggressorInRect = aggressorInRect;
         _insideBlacklistArea = insideBl;
         _backtrackCurrentWaypointIdx = waypointIdx;
-        _isBacktracking = true; // volatile write last — acts as memory fence for readers
     }
 
     /// <summary>
@@ -168,7 +169,6 @@ public sealed class LeaderNavigationProvider
     /// </summary>
     public void ClearBacktrack()
     {
-        _isBacktracking = false; // volatile write first — readers see the clear immediately
         _backtrackAggressorGuid = 0;
         _backtrackAggressorInRect = false;
         _backtrackCurrentWaypointIdx = -1;
@@ -290,6 +290,12 @@ public sealed class LeaderNavigationProvider
     private readonly HashSet<int> _noEngageGuids = new();
     private volatile int[] _noEngageSnapshot = System.Array.Empty<int>();
 
+    // S7.8: evade subset of the blacklist (cross-bot IsEvade mirror). Exact
+    // parallel to _noEngageGuids above. Published as EvadeMobGuids so the assist
+    // can distinguish evade entries from positional ones when adopting leader guids.
+    private readonly HashSet<int> _evadeGuids = new();
+    private volatile int[] _evadeSnapshot = System.Array.Empty<int>();
+
     /// <summary>
     /// Snapshot of the in-rect ("no-engage") subset, published alongside
     /// <see cref="BlacklistedMobGuidsSnapshot"/>. Rebuilt on every change.
@@ -297,10 +303,16 @@ public sealed class LeaderNavigationProvider
     public int[] NoEngageMobGuidsSnapshot => _noEngageSnapshot;
 
     /// <summary>
+    /// S7.8: snapshot of the evade subset, published alongside
+    /// <see cref="NoEngageMobGuidsSnapshot"/>. Rebuilt on every change.
+    /// </summary>
+    public int[] EvadeMobGuidsSnapshot => _evadeSnapshot;
+
+    /// <summary>
     /// Records a newly-evaded mob GUID. No-op if <paramref name="guid"/> is 0
     /// or already present. Rebuilds the snapshot atomically.
     /// </summary>
-    public void AddBlacklistedMobGuid(int guid, bool inRect = false)
+    public void AddBlacklistedMobGuid(int guid, bool inRect = false, bool isEvade = false)
     {
         if (guid == 0)
             return;
@@ -313,6 +325,12 @@ public sealed class LeaderNavigationProvider
         // determined in-rect stays in-rect for the session); we never demote.
         if (inRect && _noEngageGuids.Add(guid))
             _noEngageSnapshot = System.Linq.Enumerable.ToArray(_noEngageGuids);
+
+        // S7.8: record the evade subset separately (cross-bot IsEvade mirror).
+        // Parallel to _noEngageGuids above; never-demote. Supplies EvadeMobGuids
+        // so the assist can classify adopted guids as evade vs positional.
+        if (isEvade && _evadeGuids.Add(guid))
+            _evadeSnapshot = System.Linq.Enumerable.ToArray(_evadeGuids);
     }
 
     /// <summary>
@@ -329,6 +347,9 @@ public sealed class LeaderNavigationProvider
 
         _noEngageGuids.Clear();
         _noEngageSnapshot = System.Array.Empty<int>();
+
+        _evadeGuids.Clear();
+        _evadeSnapshot = System.Array.Empty<int>();
     }
 
     // -----------------------------------------------------------------------

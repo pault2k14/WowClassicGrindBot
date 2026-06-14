@@ -748,13 +748,17 @@ public sealed partial class GoapAgent : IDisposable
                             // subset of BlacklistedMobGuids, published in the same snapshot.
                             bool inRect = leaderState.NoEngageMobGuids is { Length: > 0 } noEngage
                                 && System.Array.IndexOf(noEngage, guid) >= 0;
+                            // S7.8: classify the adopted guid as evade if the leader published it
+                            // in EvadeMobGuids (parallel to the inRect computation above).
+                            bool isEvade = leaderState.EvadeMobGuids is { Length: > 0 } ev
+                                && System.Array.IndexOf(ev, guid) >= 0;
 
                             logger.LogInformation(
                                 $"[GoapAgent] New blacklisted mob guid={guid} from API " +
                                 $"(inRect={inRect}) — ignoring target and dispatching EvadeBlacklistEvent.");
 
-                            playerReader.IgnoreTarget(guid, inRect, isEvade: false);
-                            HandleGoapEvent(new EvadeBlacklistEvent(guid, EvadeReason.Propagation, inRect));
+                            playerReader.IgnoreTarget(guid, inRect, isEvade);
+                            HandleGoapEvent(new EvadeBlacklistEvent(guid, EvadeReason.Propagation, inRect, isEvade));
 
                             // ── Category-B cleanup (post-run-154 audit) ──
                             //
@@ -1953,7 +1957,7 @@ public sealed partial class GoapAgent : IDisposable
             || (classConfig.Mode == Mode.AssistFocus
                 && leaderConnection.HasValidLeaderState
                 && leaderConnection.LastLeaderState != null
-                && leaderConnection.LastLeaderState.IsBacktracking);  // coordinated mirror (assist)
+                && leaderConnection.LastLeaderState.IsActivelyBacktracking());  // coordinated mirror (assist)
 
         bool selfDefenseOverride =
             targetIgnored &&
@@ -1995,7 +1999,7 @@ public sealed partial class GoapAgent : IDisposable
                 _selfDefenseOverrideGuid = playerReader.TargetGuid;
                 string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
                     ? "navigation.IsBacktrackingActive=true (own FRG state)"
-                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
+                    : $"leader phase={leaderConnection.LastLeaderState?.BacktrackPhase} (coordinated backtrack via Fix GA)";
                 logger.LogInformation(
                     $"[GoapAgent] [FIX-FIRE] GE: selfDefenseOverride SUPPRESSED for target " +
                     $"guid={playerReader.TargetGuid}  this bot is itself in active backtrack " +
@@ -2099,7 +2103,7 @@ public sealed partial class GoapAgent : IDisposable
                 foreach (var assistState in assistStateStore.GetAll())
                 {
                     if (assistStateStore.IsStale(assistState)) continue;
-                    if (assistState.IsBacktracking &&
+                    if (assistState.IsActivelyBacktracking() &&
                         assistState.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
                         assistState.BacktrackAggressorInRect)
                     {
@@ -2113,7 +2117,7 @@ public sealed partial class GoapAgent : IDisposable
             {
                 LeaderState? ls = leaderConnection.HasValidLeaderState ? leaderConnection.LastLeaderState : null;
                 if (ls != null &&
-                    ls.IsBacktracking &&
+                    ls.IsActivelyBacktracking() &&
                     ls.BacktrackAggressorGuid == playerReader.FocusTargetGuid &&
                     ls.BacktrackAggressorInRect)
                 {
@@ -2198,7 +2202,7 @@ public sealed partial class GoapAgent : IDisposable
             selfInBacktrackForGE =
                 leaderConnection.HasValidLeaderState &&
                 leaderConnection.LastLeaderState != null &&
-                leaderConnection.LastLeaderState.IsBacktracking;
+                leaderConnection.LastLeaderState.IsActivelyBacktracking();
         }
         else
         {
@@ -2255,7 +2259,7 @@ public sealed partial class GoapAgent : IDisposable
                 _partyAssistOverrideGuid = playerReader.FocusTargetGuid;
                 string selfBacktrackSource = classConfig.Mode == Mode.PartyLeader
                     ? "navigation.IsBacktrackingActive=true (own FRG state)"
-                    : "leader.IsBacktracking=true (coordinated backtrack via Fix GA)";
+                    : $"leader phase={leaderConnection.LastLeaderState?.BacktrackPhase} (coordinated backtrack via Fix GA)";
                 logger.LogInformation(
                     $"[GoapAgent] [FIX-FIRE] GE: Fix L SUPPRESSED for focus guid={playerReader.FocusTargetGuid}  " +
                     $"this bot is itself in active backtrack ({selfBacktrackSource}). " +
@@ -3065,7 +3069,7 @@ public sealed partial class GoapAgent : IDisposable
 
                     // Publish the blacklisted GUID via API so the assist can call
                     // playerReader.IgnoreTarget without relying on the chat message.
-                    leaderNavProvider.AddBlacklistedMobGuid(evade.TargetGuid, evade.InRect);
+                    leaderNavProvider.AddBlacklistedMobGuid(evade.TargetGuid, evade.InRect, evade.IsEvade);
 
                     // No recovery window, no _evadeLeaderWaiting, no finder suppression:
                     // the post-evade disengage is removed. The finder is gated by

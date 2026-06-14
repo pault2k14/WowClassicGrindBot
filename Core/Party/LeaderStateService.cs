@@ -300,6 +300,7 @@ public sealed class LeaderStateService
             // Mob blacklist — cumulative for the session.
             BlacklistedMobGuids = leaderNavProvider.BlacklistedMobGuidsSnapshot,
             NoEngageMobGuids = leaderNavProvider.NoEngageMobGuidsSnapshot,
+            EvadeMobGuids = leaderNavProvider.EvadeMobGuidsSnapshot,
 
             // Fix AV (Route A): dynamic stuck-rect propagation. The
             // assist applies each entry via Navigation.AddPropagatedStuckRect
@@ -318,7 +319,7 @@ public sealed class LeaderStateService
             // (singleton, already injected as leaderNavProvider) instead of
             // Navigation (scoped). FRG writes via SetBacktrackEntry /
             // UpdateBacktrackProgress / ClearBacktrack.
-            IsBacktracking = leaderNavProvider.IsBacktracking,
+            BacktrackPhase = leaderNavProvider.BacktrackPhase,
             BacktrackAggressorGuid = leaderNavProvider.BacktrackAggressorGuid,
             BacktrackAggressorInRect = leaderNavProvider.BacktrackAggressorInRect,
             InsideBlacklistArea = leaderNavProvider.InsideBlacklistArea,

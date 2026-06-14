@@ -137,8 +137,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     // backtrack resumes from the preserved phase). State clears on Abort()
     // or when self-defense conditions no longer hold (combat drop, target
     // lost, target killed, or route start reached).
-    private enum BacktrackPhase { None, Navigating, Evaluating, EngageWindow }
-    private BacktrackPhase _btPhase = BacktrackPhase.None;
+    private BacktrackPhase _btPhaseBacking = BacktrackPhase.None;
+    private BacktrackPhase _btPhase
+    {
+        get => _btPhaseBacking;
+        set
+        {
+            _btPhaseBacking = value;
+            leaderNavProvider.SetBacktrackPhase(value);
+        }
+    }
     private int _btStartRouteIdx = -1;
     private int _btStepsBack;
     private int _btTargetGuid;

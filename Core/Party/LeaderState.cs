@@ -80,6 +80,12 @@ public sealed class LeaderState
     /// suppressed for mobs the leader determined to be inside a blacklist rect.</summary>
     public int[] NoEngageMobGuids { get; set; } = System.Array.Empty<int>();
 
+    /// <summary>S7.8: the evade subset of <see cref="BlacklistedMobGuids"/> (cross-bot
+    /// IsEvade mirror). The assist reads this to classify an adopted leader guid as an
+    /// evade (vs a positional blacklist), so the classification survives the cross-bot
+    /// boundary instead of defaulting to non-evade.</summary>
+    public int[] EvadeMobGuids { get; set; } = System.Array.Empty<int>();
+
     // ------------------------------------------------------------------
     // Fix AV (Route A) — Stuck-rect propagation from leader to assist.
     //
@@ -129,9 +135,10 @@ public sealed class LeaderState
     // so the leader can see assist's backtrack state.
     // ------------------------------------------------------------------
 
-    /// <summary>True when this bot is in an active BL-backtrack
-    /// (Fix FN/FT/FX state machine, _btPhase != None).</summary>
-    public bool IsBacktracking { get; set; }
+    /// <summary>Coordinated-backtrack phase (Fix FN/FT/FX state machine).
+    /// IsActivelyBacktracking() == (BacktrackPhase != None) ≡ legacy IsBacktracking.</summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public BacktrackPhase BacktrackPhase { get; set; }
 
     /// <summary>The aggressor guid driving the backtrack
     /// (_btTargetGuid), or 0 when IsBacktracking is false or the

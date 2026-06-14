@@ -144,7 +144,7 @@ public sealed class PartyStatePublisher : IReader
             // Symmetric to LeaderStateService.cs (leader→assist direction).
             // The leader's Fix FZ gate consults assist.BacktrackAggressorInRect
             // to decide whether to fire Fix L; assist's FFG Fix GB consumer
-            // reads leader.IsBacktracking + LeaderBacktrackCurrentWaypointIdx
+            // reads leader.BacktrackPhase + LeaderBacktrackCurrentWaypointIdx
             // to enter coordinated backtrack mode.
             //
             // Scope fix 2026-06-06: read from LeaderNavigationProvider
@@ -152,7 +152,7 @@ public sealed class PartyStatePublisher : IReader
             // publisher is a singleton and DI rejects singleton-on-scoped.
             // FRG writes the fields via SetBacktrackEntry / UpdateBacktrackProgress
             // / ClearBacktrack on the goal-execution path.
-            IsBacktracking = navPublishProvider.IsBacktracking,
+            BacktrackPhase = navPublishProvider.BacktrackPhase,
             BacktrackAggressorGuid = navPublishProvider.BacktrackAggressorGuid,
             BacktrackAggressorInRect = navPublishProvider.BacktrackAggressorInRect,
             InsideBlacklistArea = navPublishProvider.InsideBlacklistArea,

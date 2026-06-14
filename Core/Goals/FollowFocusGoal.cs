@@ -2174,7 +2174,7 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
                     LeaderState? gbLeaderState = leaderConnection.HasValidLeaderState
                         ? leaderConnection.LastLeaderState : null;
                     bool gbLeaderConfirmedInRect = gbLeaderState != null
-                        && gbLeaderState.IsBacktracking
+                        && gbLeaderState.IsActivelyBacktracking()
                         && gbLeaderState.BacktrackAggressorGuid != 0
                         && gbLeaderState.BacktrackAggressorGuid == playerReader.TargetGuid
                         && gbLeaderState.BacktrackAggressorInRect;
@@ -6162,13 +6162,13 @@ public sealed class FollowFocusGoal : GoapGoal, IGoapEventListener
         // mid-backtrack between waypoint pops), drop into the normal
         // body-chase logic below. Brief exposure is bounded; next tick's
         // TargetWaypoint publish resumes normal coordination.
-        if (leader.IsBacktracking && leader.InsideBlacklistArea && leader.HasTargetWaypoint)
+        if (leader.IsActivelyBacktracking() && leader.InsideBlacklistArea && leader.HasTargetWaypoint)
         {
             if (_currentNavTargetMode != NavTargetMode.WaypointSharing)
             {
                 logger.LogInformation(
                     $"[FFG] [FIX-FIRE] GC: leader is inside BL rect during backtrack " +
-                    $"(IsBacktracking=true, InsideBlacklistArea=true) — redirecting from " +
+                    $"(backtrack phase={leader.BacktrackPhase}, InsideBlacklistArea=true) — redirecting from " +
                     $"PositionChase to leader's published backtrack waypoint at " +
                     $"<{leader.TargetWaypointWorldX:F2},{leader.TargetWaypointWorldY:F2}>. " +
                     $"Assist coordinates with leader's retreat instead of chasing body into rect.");
